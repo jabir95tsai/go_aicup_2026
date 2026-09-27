@@ -1,0 +1,15 @@
+data/training/
+data/processed/
+data/raw/
+models/
+logs/
+oof_predictions/
+submissions/
+*.npy
+*.parquet
+*.memmap
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+._*
+.DS_Store
