@@ -143,6 +143,25 @@ player-adversarial 頭（gradient reversal）或「每批次每位玩家只取�
   在 11/04 查清前，合成驗證的絕對分數不可信、只能用來比較方法間相對優劣。
   若真實情境下開局習慣失效，競賽一的主力要從 L7（開局指紋）轉向全盤風格 embedding（L8）
 
+### L-001 文獻調查（2026-09-27）
+
+**性質：** 文獻與既有專案調查，不是實驗，不佔上傳額度。結論與設計影響整理在 STRATEGY.md §1b；外部資源登記在 `EXTERNAL_RESOURCES.md`。
+**方法：** 背景 agent 兩輪網路搜尋（第一輪碰到搜尋上限，第二輪補完）。以下「已驗證」= 讀過原文 PDF／原始碼／官方頁面。
+
+| # | 發現 | 狀態 | 對計畫的影響 |
+|---|---|---|---|
+| R1 | Kuboki 2025 表 4：**同一玩家** k 盤 exact 58.1／61.0／63.2%（k=5／10／15），同段位隨機抽盤則是 70.4／82.8／89.4%；±1 同一玩家約 95–97% | 已驗證（PDF） | 競賽二預期要用同一玩家數字；盤數邊際效益小 → 重點在玩家不變性 |
+| R2 | Chen 2025（ICLR）與 Kuboki 2025 主結果的查詢題都是「同段位」而非「同一玩家」，文中都沒說是否 player-disjoint | 已驗證 | 文獻中的高數字不能和我們的驗證直接類比 |
+| R3 | KataGo HumanSL `b18c384nbt-humanv0`：以段位為條件的走子網路；段位尺度 = KGS；授權 = KataGo Neural Network License | 已驗證（原始碼 + 授權頁） | L5 成本下降，可考慮提前；gate = 先測吞吐量 |
+| R4 | HumanSL 訓練資料來源：原始碼列舉 OGS/KGS/Fox/Tygem/GoGoD/Go4Go，官方未明示；不含幽玄 | 部分驗證（推論） | 只能當特徵，不能直接解碼段位 |
+| R5 | Behavioral stylometry（NeurIPS 2021）：ArcFace 不收斂 → GE2E；只用第 15 手後訓練 0.39 vs 含開局 0.99；400 人池 P@1 0.953 | 已驗證（PDF）；程式碼未公開 | 競賽一 loss 並列比較 GE2E；開局必須入模 |
+| R6 | 同一玩家換開局（e4 vs d4），兩組風格距離 ≈ 與他人距離；文獻中無時間切分的 stylometry 數字 | 已驗證（PDF） | 支持「開局指紋可能在真實測試失效」假設，未證實 |
+| R7 | AI CUP 2023 圍棋賽題目不同（下一手預測 + 棋風分類）；前幾名方案未找到 | 已驗證（競賽頁） | 參考價值低 |
+| R8 | 8 篇方法論文 arXiv ID 已核對（GE2E、Attention MIL、Set Transformer、CSLS、k-reciprocal、PT-MAP、CORAL、CORN） | 已驗證（arXiv API） | 實作細節未讀 |
+
+**未找到：** AI CUP 2023 前幾名報告、Kaggle Finding Elo 得獎方法、時間切分下的 stylometry 數字、Kuboki 2025 程式碼、Hsueh et al. 2026 HumanSL 論文預印本。
+**未驗證：** 「Fox 1d ≈ KGS 2k」、主辦方講者與 Kuboki 論文共同作者為同一人（推論）。
+
 ---
 
 ## 待辦（測試檔發布後立刻做）

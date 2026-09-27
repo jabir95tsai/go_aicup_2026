@@ -101,7 +101,7 @@
 - **D4 增強：開啟**（棋力與方位無關）
 
 **競賽一：ArcFace + 候選庫微調（L8 路線 C）**
-- 在 1M 訓練集上以 `player_id` 做 ArcFace / sub-center ArcFace 預訓
+- 在 1M 訓練集上以 `player_id` 做 metric learning 預訓，**GE2E 與 ArcFace / sub-center ArcFace 並列比較**（文獻中 ArcFace 在類似設定不收斂，見 STRATEGY §1b）
 - 再在候選庫上微調 400-way 分類頭，**public / private 各訓一次，分類頭不共用權重**
 - **D4 增強：關閉**（絕對方位就是指紋）。這點寫成 config assert，避免誤用
 
