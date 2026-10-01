@@ -1,1 +1,16 @@
-data/
+/data/
+/outputs/
+/submissions/
+/reference/
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+
+*.pt
+*.pth
+*.ckpt
+*.safetensors
