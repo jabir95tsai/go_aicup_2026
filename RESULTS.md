@@ -175,6 +175,7 @@ player-adversarial 頭（gradient reversal）或「每批次每位玩家只取�
 - partner 的 `reference.md` 補了 L-001 沒有的來源：AIIDE 2025 multi-policy 棋力估計（R02）、Moudřík GoStyle（R03/R04）、Animiral/go-strength-model（R05，KataGo trunk 特徵）、**主辦方 ICGA 2025 舊 AI CUP 回顧（R09，對應 L-001 R7 的「未找到」）**、SupCon。尚未讀原文，未驗證
 - partner 的 `reference.md` §10 列的「同局黑白兩方跨 split 污染」風險，在本資料不適用：A-001/A-002 已證實 1M 盤零重複 `sgf_content`，每盤只出現一次
 - **待確認：** partner 列的目標算力（國網晶創 26、AMD ROCm）是否真的可用 → 已加入 CLAUDE.md §0 待確認表
+  - **更新（同日）：** 已確認晶創 26 與 ROCm 都可用 → CLAUDE.md §0 移到「算力 ✅」；EXECUTION_PLAN 算力預算待重估
 
 ---
 

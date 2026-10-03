@@ -50,5 +50,6 @@ python scripts/eda_report.py                     # 重產 notebooks/02_eda.md，
 2. push 前先 `git pull --rebase`
 3. **`RESULTS.md` 只在檔尾新增**，不改別人的舊紀錄；編號接續（A-xxx 稽核、L-xxx 文獻、實驗用 tag）
 4. 資料、快取、權重、提交檔一律不進 git（`.gitignore` 已擋）；外部資源一用就登記到 `EXTERNAL_RESOURCES.md`
-5. **只有一個人上傳 AI CUP 提交檔**（規則：隊員各自上傳 = 多重帳號 → 喪失資格）。唯一上傳人：**待定**
+5. **AI CUP 提交只用同一個帳號**（帳號：**待定**）。兩人都可以操作上傳，但**絕不能用各自的個人帳號**（規則：隊員各自上傳 = 多重帳號 → 喪失資格）。
+   每日 5 次額度兩人共用、計分看最後一次上傳 → 上傳前先在 `RESULTS.md` 登記 tag／預期分數，11/24 當天先講好由誰做最後一次
 6. 隊伍之間不分享程式與特徵；repo 保持 private
