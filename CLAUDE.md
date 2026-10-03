@@ -69,12 +69,13 @@
 | 測試集 rank 是否平衡（每級 40 題？） | L4 先驗校正能不能用 | 無法直接看，用預測分布反推 |
 | 競賽一 baseline 為何只有 0.28（見上方警訊） | 決定合成驗證能不能信 | 11/04 測試集 + 真實候選庫 EDA |
 | 唯一上傳人 | 規則：隊員各自上傳 = 多重帳號 | 隊內決定 |
+| 可用算力：國網「晶創 26」、AMD ROCm 單卡是否真的可用（partner 的 `AGENTS.md` 列為目標環境） | 決定 `EXECUTION_PLAN.md` 的算力預算要不要整個重估（目前依 3060 Ti 8GB 估） | 問 partner；可用的話程式要能跑 CUDA／ROCm、預留 DDP |
 
 ---
 
 ## 1. 資料
 
-來源：日本棋院幽玄網站 19 路圍棋棋譜（已授權），2021–2023。已匿名化——**移除姓名、段位、勝負、註解，只留棋盤設定與落子**；玩家代號不可回推身分。
+來源：日本棋院幽玄網站 19 路圍棋棋譜（已授權），2021–2023。官方發布：[AILAB-NDHU/aicup2026-go-dataset](https://github.com/AILAB-NDHU/aicup2026-go-dataset) Releases v1.0，`aicup2026_go_training.tar.xz`，SHA-256 `959ebc602b9638d665cb063a6269e0d5aef73956b77913e725763eb335ced94b`；解壓出的 `training/` 放到 `data/training/`。資料僅限本競賽使用。已匿名化——**移除姓名、段位、勝負、註解，只留棋盤設定與落子**；玩家代號不可回推身分。
 
 **棋力 10 級（由弱至強，ordinal）：** `D < C < B < A < 1D < 2D < 3D < 4D < 5D < 6D` → 內部一律編碼為 `0..9`
 
@@ -177,7 +178,7 @@
 
 ## 5. CV 設計
 
-**群組鍵 = `player_id`。全專案只有 `src/cv.py` 一處產生 split，並附 assert 檢查 fold 間 player 零重疊。**
+**群組鍵 = `player_id`。全專案只有 `src/go_aicup/data/cv.py` 一處產生 split，並附 assert 檢查 fold 間 player 零重疊。**
 
 ### 競賽二（棋力）
 `GroupKFold(5) by player_id`。同一玩家的棋譜跨 fold 會讓模型背玩家而不是學棋力 → CV 虛高。
@@ -266,34 +267,42 @@
 
 ```
 project/
-├── CLAUDE.md                  # 本檔案
+├── CLAUDE.md                  # 本檔案（唯一事實來源；AGENTS.md 只指向這裡）
+├── README.md                  # 新成員上手：安裝、資料放置、重建步驟、協作規則
 ├── RESULTS.md                 # 實驗帳本（只增不刪，失敗也記）
+├── STRATEGY.md / EXECUTION_PLAN.md / EXTERNAL_RESOURCES.md / reference.md
+├── pyproject.toml             # 讓 go_aicup 可 import：pip install -e .
 ├── requirements.txt           # 鎖版本，報告要用
-├── data/
-│   ├── raw/                   # 官方原始 CSV
-│   └── processed/             # SGF → int16 memmap + metadata parquet
-├── src/
-│   ├── sgf.py                 # SGF parser + property 稽核（唯一 parser）
-│   ├── preprocess.py          # raw CSV → processed，一次性轉檔
-│   ├── data.py                # dataset / 合成題目取樣（k ∈ {5,10,15,20}）
-│   ├── cv.py                  # 唯一 split 來源：GroupKFold by player_id + 合成候選庫
-│   ├── feature_policy.py      # 禁用欄位清單（game_id / player_id / 檔名衍生…）
-│   ├── features_vN.py         # 手工特徵，一版一檔
-│   ├── encoder.py             # 共用 game encoder
-│   ├── train_rank_vN.py       # 競賽二
-│   ├── train_pid_vN.py        # 競賽一
-│   ├── aggregate.py           # 題內多盤聚合
-│   ├── blend.py
-│   └── make_submission.py     # 兩賽各一種格式
-├── configs/                   # 每個 run 一個 yaml（報告要用）
-├── oof_predictions/           # {tag}_*.npy
-├── models/
-├── logs/                      # {tag}.log
-├── submissions/
-│   ├── rank/
-│   └── pid/
+├── data/                      # 不進 git
+│   ├── training/              # 官方訓練集 train_*.csv
+│   ├── raw/                   # 其他官方原始檔（11/04 的候選庫、測試題）
+│   └── processed/             # SGF → int16 memmap + metadata parquet；cv/ 切分表；eda/
+├── src/go_aicup/              # 可重用程式（import 用），兩人分工以子目錄為界
+│   ├── paths.py               # repo 路徑只在這裡算一次
+│   ├── metrics.py             # 兩賽官方指標，一律分 k 桶回報（兩賽共用，不拆）
+│   ├── data/
+│   │   ├── sgf.py             # SGF parser + property 稽核（唯一 parser）
+│   │   ├── preprocess.py      # raw CSV → processed，一次性轉檔
+│   │   ├── store.py           # GameStore：memmap 讀取 + 我方／對方視角
+│   │   └── cv.py              # 唯一 split 來源：GroupKFold by player_id + 合成候選庫
+│   ├── features/
+│   │   ├── feature_policy.py  # 禁用欄位清單（game_id / player_id / 檔名衍生…）
+│   │   ├── game_stats.py      # 盤面重播統計（numba）
+│   │   └── features_vN.py     # 手工特徵，一版一檔
+│   ├── models/                # 共用 game encoder、aggregate（題內多盤聚合）
+│   └── tasks/
+│       ├── strength/          # 競賽二：train_rank_vN、推論、提交檔
+│       └── identity/          # 競賽一：train_pid_vN、推論、提交檔
+├── scripts/                   # 一次性報告／命令列入口（audit_train、eda_report…），不放可重用邏輯
+├── tests/
+├── configs/{strength,identity}/  # 每個 run 一個 yaml（報告要用）
+├── outputs/<run-id>/          # 不進 git；新 run 一律放這：config、log、OOF、權重、分數（run-id 以 rank_/pid_ 開頭）
+├── logs/                      # 不進 git；W1 舊 log，新 run 不再寫這裡
+├── submissions/{rank,pid}/    # 不進 git
 └── notebooks/                 # EDA 只讀，不放訓練邏輯
 ```
+
+執行方式：可重用模組用 `python -m go_aicup.<子套件>.<模組>`（例如 `python -m go_aicup.data.cv`），一次性報告用 `python scripts/<name>.py`。
 
 ---
 

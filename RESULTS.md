@@ -162,6 +162,20 @@ player-adversarial 頭（gradient reversal）或「每批次每位玩家只取�
 **未找到：** AI CUP 2023 前幾名報告、Kaggle Finding Elo 得獎方法、時間切分下的 stylometry 數字、Kuboki 2025 程式碼、Hsueh et al. 2026 HumanSL 論文預印本。
 **未驗證：** 「Fox 1d ≈ KGS 2k」、主辦方講者與 Kuboki 論文共同作者為同一人（推論）。
 
+### A-007 合併 partner 骨架 + 改為套件結構（2026-10-03）
+
+**性質：** 工程整理，不是實驗，不影響任何分數。
+**起因：** 兩人各自開了 repo、接到同一個 remote，history 沒有共同祖先；W1 的程式從未推上 GitHub，partner 看不到。已用 `--allow-unrelated-histories` 合併。
+
+- **路徑變更：** `src/*.py` → `src/go_aicup/{data,features}/`、`metrics.py` 留在套件根、`audit_train`/`eda_report` → `scripts/`；`data.py` 改名 `store.py`。
+  **本檔 A-001～A-006 內的 `python src/xxx.py` 指令是當時的路徑，不改**；現行指令見 README
+- repo 根目錄改由 `go_aicup/paths.py` 單一計算；`pyproject.toml` + `pip install -e .`；`requirements.txt` 補上原本漏鎖的 scipy／numba／matplotlib
+- **重現性驗證（搬移前後）：** pytest 15/15；`cv` 9 張切分表與 `game_stats` 輸出 sha256 **逐位元相同**；`preprocess --verify-only` 結果相同；`eda_report` 重產 02_eda.md，全部數字相同、圖檔位元相同，只有時間戳與路徑文字變動
+- 新 run 改用 `outputs/<run-id>/`（partner 的慣例）；`logs/` 留給 W1 舊 log
+- partner 的 `reference.md` 補了 L-001 沒有的來源：AIIDE 2025 multi-policy 棋力估計（R02）、Moudřík GoStyle（R03/R04）、Animiral/go-strength-model（R05，KataGo trunk 特徵）、**主辦方 ICGA 2025 舊 AI CUP 回顧（R09，對應 L-001 R7 的「未找到」）**、SupCon。尚未讀原文，未驗證
+- partner 的 `reference.md` §10 列的「同局黑白兩方跨 split 污染」風險，在本資料不適用：A-001/A-002 已證實 1M 盤零重複 `sgf_content`，每盤只出現一次
+- **待確認：** partner 列的目標算力（國網晶創 26、AMD ROCm）是否真的可用 → 已加入 CLAUDE.md §0 待確認表
+
 ---
 
 ## 待辦（測試檔發布後立刻做）

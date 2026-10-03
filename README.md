@@ -1,49 +1,54 @@
 # AI CUP 2026 圍棋競賽
 
-本專案處理兩項任務：依多盤棋譜辨識棋手，以及預測棋力。競賽資料格式、評分與限制見 [AGENTS.md](AGENTS.md)；研究與方法參考見 [reference.md](reference.md)。
+兩個競賽共用一份訓練資料、一個 repo：**競賽一 玩家辨識**（`tasks/identity/`）、**競賽二 棋力預測**（`tasks/strength/`）。
 
-## 檔案位置
+| 文件 | 內容 |
+|---|---|
+| [CLAUDE.md](CLAUDE.md) | **唯一事實來源**：規則、評分、時程、資料稽核結果、CV 設計、洩漏清單、上傳紀律、專案結構 |
+| [RESULTS.md](RESULTS.md) | 實驗帳本，只增不刪，失敗也記 |
+| [STRATEGY.md](STRATEGY.md) / [EXECUTION_PLAN.md](EXECUTION_PLAN.md) | 決勝槓桿與 8 週計畫 |
+| [reference.md](reference.md) | 文獻與工具整理 |
+| [EXTERNAL_RESOURCES.md](EXTERNAL_RESOURCES.md) | 外部資源申報清單（報告必備） |
+| [AGENTS.md](AGENTS.md) | 只指向 CLAUDE.md（給 Codex 等 agent） |
 
-```text
-go_aicup_2026/
-├─ AGENTS.md                 # 競賽規則與專案慣例（現有文件）
-├─ reference.md              # 研究與實作參考（現有文件）
-├─ README.md                 # 專案入口與目錄說明
-├─ .gitignore
-├─ configs/                  # 版控的實驗設定
-│  ├─ identity/              # 棋手辨識設定
-│  └─ strength/              # 棋力預測設定
-├─ src/go_aicup/             # 可重用的 Python 程式碼
-│  ├─ data/                  # CSV/SGF 解析、盤面重建、去重與切分
-│  ├─ features/              # 棋譜／棋手特徵與快取格式
-│  ├─ models/                # 兩題可共用的編碼器與模型元件
-│  ├─ tasks/
-│  │  ├─ identity/            # 棋手辨識：候選排序、Top-5 指標與推論
-│  │  └─ strength/            # 棋力預測：等級分類、官方指標與推論
-│  └─ ...                    # 共用訓練流程與提交檔驗證
-├─ scripts/                  # 命令列入口：準備資料、訓練、驗證、推論
-├─ tests/                    # 解析、切分、防洩漏、指標與提交格式測試
-├─ data/                     # 不進 Git
-│  ├─ raw/                  # 官方原始壓縮檔及原樣解壓資料
-│  └─ processed/            # 清理後資料、特徵快取、切分索引與清單
-├─ outputs/                  # 不進 Git；每次實驗一個 <run-id>/
-│  └─ <run-id>/             # config、環境／資料版本、分數、log、checkpoint
-└─ submissions/              # 不進 Git；依官方範例產生的最終提交 CSV
+## 目前進度
+
+W1 完成：SGF 稽核、1M 盤轉檔、CV 切分與合成題組、兩賽官方指標、訊號 EDA（細節見 `RESULTS.md` A-001～A-006）。下一步是兩賽的 P0 baseline。
+
+## 上手
+
+```bash
+pip install -r requirements.txt     # 版本已鎖，報告要用
+pip install -e .                    # 讓 go_aicup 可 import
+python -m pytest -q                 # 應全數通過
 ```
 
-目前只建立目錄骨架；圖中的模組檔案與實驗檔案會在實作對應功能時加入。尚未取得官方測試資料與提交範例，因此提交檔欄位和命名應以屆時的官方格式為準。
+**資料**（不進 git）：從 [官方 Releases](https://github.com/AILAB-NDHU/aicup2026-go-dataset/releases) 下載 `aicup2026_go_training.tar.xz`，核對 SHA-256（見 CLAUDE.md 第 1 節），解壓出的 `training/` 放到 `data/training/`。11/04 發布的候選庫與測試題放 `data/raw/`。
 
-## 放置原則
+**重建衍生資料**（全 CPU，依序執行，結果是確定性的，兩人重建出的檔案會逐位元相同）：
 
-- 官方下載檔放 `data/raw/`，保留原樣與 SHA-256；任何轉換、去重結果、特徵和切分索引放 `data/processed/`。同一棋局及其衍生片段只能位於同一切分。
-- 可重用邏輯放 `src/go_aicup/`，`scripts/` 只負責讀取設定並呼叫程式。兩題共用 SGF 解析、盤面表示、編碼器與訓練入口；專屬的預測頭、損失、官方指標和推論流程分別放 `tasks/identity/`、`tasks/strength/`。
-- 實驗參數分別放 `configs/identity/`、`configs/strength/`。每次訓練建立唯一 `outputs/<run-id>/`，建議以任務名稱作為 run-id 前綴，並保存實際設定、seed、資料版本與切分、Git commit、套件及硬體資訊、驗證分數和權重，方便重現。
-- 提交檔只由推論程式寫入 `submissions/`，產生後依官方範例檢查欄位、順序、候選與等級值。不要手動修改答案。
-- 原始資料、快取、權重、實驗輸出和提交檔由 `.gitignore` 排除；程式、設定、測試及文件進 Git。外部資料或模型的來源與用途須在相關設定或實驗紀錄中留存。
+```bash
+python -m go_aicup.data.preprocess train         # SGF → int16 memmap，約 2.5 分鐘
+python -m go_aicup.data.cv                       # CV 切分 + 合成題組，數秒
+python -m go_aicup.features.game_stats           # EDA 用的盤面統計，約 10 秒
+python scripts/eda_report.py                     # 重產 notebooks/02_eda.md，約 2 分鐘
+```
 
-## 建議實作順序
+## 結構
 
-1. CSV/SGF 解析及資料稽核，確認 pass、異常與重複棋局。
-2. 建立不洩漏的驗證切分與兩題官方指標。
-3. 實作 baseline、推論及提交格式檢查。
-4. 再加入可設定的 PyTorch 訓練入口、續訓、smoke test 與 DDP 支援。
+詳見 CLAUDE.md 第 10 節。重點：
+
+- `src/go_aicup/` 放可重用程式（用 `python -m go_aicup....` 執行）；`scripts/` 放一次性報告與命令列入口
+- 兩賽共用 `data/`、`features/`、`models/`、`metrics.py`；各自的訓練、推論、提交檔放 `tasks/strength/`、`tasks/identity/`
+- 切分只能由 `go_aicup/data/cv.py` 產生；特徵要過 `go_aicup/features/feature_policy.py`
+- 新的實驗 run 一律寫到 `outputs/<run-id>/`（run-id 以 `rank_`／`pid_` 開頭），存 config、seed、git commit、log、OOF、權重、分k桶分數
+- 提交檔只由推論程式寫入 `submissions/`，不手動改答案
+
+## 協作規則
+
+1. **預設分支 `main`。** 改動開 branch → PR → 另一人看過再 merge；不要 force push `main`
+2. push 前先 `git pull --rebase`
+3. **`RESULTS.md` 只在檔尾新增**，不改別人的舊紀錄；編號接續（A-xxx 稽核、L-xxx 文獻、實驗用 tag）
+4. 資料、快取、權重、提交檔一律不進 git（`.gitignore` 已擋）；外部資源一用就登記到 `EXTERNAL_RESOURCES.md`
+5. **只有一個人上傳 AI CUP 提交檔**（規則：隊員各自上傳 = 多重帳號 → 喪失資格）。唯一上傳人：**待定**
+6. 隊伍之間不分享程式與特徵；repo 保持 private

@@ -49,10 +49,10 @@
 | 產出 | 內容 | Gate |
 |------|------|------|
 | ✅ `notebooks/01_audit.md` | 訓練集側稽核完成（`RESULTS.md` A-001）；測試側待發布 | train 側全綠 |
-| ✅ `src/sgf.py` | 唯一 SGF parser + property 稽核工具 | round-trip 500/500，解析錯誤 0 |
-| ✅ `src/preprocess.py` | SGF → int16 memmap + metadata parquet，分片、可續跑 | 1M 盤轉完，抽樣 1000 盤反解回 SGF 驗證無損 |
-| ✅ `src/cv.py` | GroupKFold by player_id + **合成題組產生器** | fold 間 player 零重疊 assert；能產 10,000 題 |
-| ✅ `src/feature_policy.py` | 禁用欄位名單（`game_id`/`player_id`/檔名衍生/test 沒有的 property） | 有單元測試 → `tests/test_foundation.py` 11/11（A-003） |
+| ✅ `go_aicup/data/sgf.py` | 唯一 SGF parser + property 稽核工具 | round-trip 500/500，解析錯誤 0 |
+| ✅ `go_aicup/data/preprocess.py` | SGF → int16 memmap + metadata parquet，分片、可續跑 | 1M 盤轉完，抽樣 1000 盤反解回 SGF 驗證無損 |
+| ✅ `go_aicup/data/cv.py` | GroupKFold by player_id + **合成題組產生器** | fold 間 player 零重疊 assert；能產 10,000 題 |
+| ✅ `go_aicup/features/feature_policy.py` | 禁用欄位名單（`game_id`/`player_id`/檔名衍生/test 沒有的 property） | 有單元測試 → `tests/test_foundation.py` 11/11（A-003） |
 | `RESULTS.md` | 開帳 | — |
 
 **八項稽核中，這四項若命中會改變後續計畫，優先做：**
