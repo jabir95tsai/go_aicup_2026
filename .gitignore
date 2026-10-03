@@ -9,6 +9,9 @@
 *.npy
 *.parquet
 *.memmap
+# official CSVs (train / pools / test questions) must never be committed
+*.csv
+*.tar.xz
 
 # model weights
 *.pt

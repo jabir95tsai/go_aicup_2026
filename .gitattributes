@@ -1,0 +1,9 @@
+# Store and check out text as LF on every machine, whatever core.autocrlf says,
+# so the two of us never produce whole-file line-ending diffs.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.pdf binary
+*.npy binary
+*.parquet binary
