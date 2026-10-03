@@ -10,14 +10,12 @@ and an opening naive-Bayes player-id probe) exist only to put a number on
 folds, gallery/query-disjoint pid splits).
 
 Usage:
-    python src/game_stats.py      # once, ~10 s
-    python src/eda_report.py
+    python -m go_aicup.features.game_stats      # once, ~10 s
+    python scripts/eda_report.py
 """
 
 from __future__ import annotations
 
-import pathlib
-import sys
 import time
 
 import matplotlib
@@ -32,12 +30,11 @@ from scipy.stats import spearmanr  # noqa: E402
 from sklearn.linear_model import LogisticRegression  # noqa: E402
 from sklearn.preprocessing import StandardScaler  # noqa: E402
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import cv  # noqa: E402
-from data import GameStore  # noqa: E402
-from metrics import K_BUCKETS, pid_report, rank_report  # noqa: E402
+from go_aicup.data import cv  # noqa: E402
+from go_aicup.data.store import GameStore  # noqa: E402
+from go_aicup.metrics import K_BUCKETS, pid_report, rank_report  # noqa: E402
+from go_aicup.paths import ROOT  # noqa: E402
 
-ROOT = pathlib.Path(__file__).resolve().parent.parent
 STATS = ROOT / "data" / "processed" / "eda" / "game_stats_train.parquet"
 REPORT = ROOT / "notebooks" / "02_eda.md"
 FIG_DIR = ROOT / "notebooks" / "figures"
@@ -279,7 +276,7 @@ def section_univariate(d: Data) -> tuple[str, pd.DataFrame]:
     txt = f"""## 2. 單盤特徵的棋力訊號與變異分解
 
 用 numba 盤面引擎重播全量 1M 盤（2.2 億手，7.5 秒），每盤對**本人**與**對手**各算 26 種統計
-（`src/game_stats.py`）。每個特徵的總變異拆成三塊：
+（`src/go_aicup/features/game_stats.py`）。每個特徵的總變異拆成三塊：
 
 - **rank η²**：rank 之間的差異（=棋力訊號）
 - **玩家(同rank內)**：同一 rank 內、不同玩家之間的差異（=個人風格指紋；競賽一要的、競賽二要避免記住的）
@@ -900,7 +897,7 @@ def main() -> int:
     header = f"""# W1 訊號 EDA — 棋力與玩家指紋在哪裡
 
 產生時間：{time.strftime('%Y-%m-%d %H:%M')}　資料：全量訓練集 1,000,000 盤
-產生方式：`python src/game_stats.py && python src/eda_report.py`（全程 CPU，約 {int(time.time() - t0) // 60 + 1} 分鐘）
+產生方式：`python -m go_aicup.features.game_stats && python scripts/eda_report.py`（全程 CPU，約 {int(time.time() - t0) // 60 + 1} 分鐘）
 
 > 結構面稽核（欄位、重複、長度、玩家數）見 `01_audit.md` 與 `RESULTS.md` A-001～A-003，本報告不重複。
 > 本報告回答的是：**訊號在哪裡、有多強、隨 k 怎麼變、兩賽的需求哪裡衝突。**

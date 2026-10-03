@@ -23,23 +23,19 @@ Competition 1 (player id)
     `pid_train_players(split)` gives the allowed training players.
 
 Usage:
-    python src/cv.py          # writes data/processed/cv/*.parquet and prints a summary
+    python -m go_aicup.data.cv        # writes data/processed/cv/*.parquet and prints a summary
 """
 
 from __future__ import annotations
-
-import pathlib
-import sys
 
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import StratifiedKFold
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from metrics import K_BUCKETS  # noqa: E402
+from go_aicup.metrics import K_BUCKETS
+from go_aicup.paths import PROCESSED
 
-ROOT = pathlib.Path(__file__).resolve().parent.parent
-CV_DIR = ROOT / "data" / "processed" / "cv"
+CV_DIR = PROCESSED / "cv"
 
 SEED = 2026
 N_FOLDS = 5
@@ -300,7 +296,7 @@ def summarize(meta: pd.DataFrame, tables: dict[str, pd.DataFrame]) -> str:
 
 
 def main() -> int:
-    from data import GameStore
+    from go_aicup.data.store import GameStore
 
     store = GameStore("train")
     tables = build_all(store.meta)

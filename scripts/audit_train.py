@@ -14,8 +14,8 @@ training data alone (the candidate pools and test files are not released yet):
   * duplicate SGF content within train
 
 Usage:
-    python src/audit_train.py --limit 2000       # fast smoke pass
-    python src/audit_train.py                    # full pass (reads 1.3 GB)
+    python scripts/audit_train.py --limit 2000       # fast smoke pass
+    python scripts/audit_train.py                    # full pass (reads 1.3 GB)
 """
 
 from __future__ import annotations
@@ -24,16 +24,14 @@ import argparse
 import collections
 import hashlib
 import pathlib
-import sys
 import time
 
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import sgf as sgflib  # noqa: E402
+from go_aicup.data import sgf as sgflib
+from go_aicup.paths import ROOT
 
-ROOT = pathlib.Path(__file__).resolve().parent.parent
 TRAIN_DIR = ROOT / "data" / "training"
 RANKS = ["D", "C", "B", "A", "1D", "2D", "3D", "4D", "5D", "6D"]
 CHUNK = 20_000

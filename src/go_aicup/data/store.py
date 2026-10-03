@@ -16,8 +16,7 @@ import pathlib
 import numpy as np
 import pandas as pd
 
-ROOT = pathlib.Path(__file__).resolve().parent.parent
-PROCESSED = ROOT / "data" / "processed"
+from go_aicup.paths import PROCESSED
 
 MINE, THEIRS = 0, 1
 

@@ -1,16 +1,11 @@
-"""Board-replay engine used by the EDA statistics (src/game_stats.py)."""
+"""Board-replay engine used by the EDA statistics (go_aicup.features.game_stats)."""
 
 from __future__ import annotations
 
-import pathlib
-import sys
-
 import numpy as np
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "src"))
-
-import game_stats as gs  # noqa: E402
-import sgf as sgflib  # noqa: E402
+from go_aicup.data import sgf as sgflib
+from go_aicup.features import game_stats as gs
 
 
 def replay(points: list[str]) -> np.ndarray:

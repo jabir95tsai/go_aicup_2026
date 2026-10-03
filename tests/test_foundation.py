@@ -3,20 +3,14 @@ question melting. Uses a small synthetic metadata table, no real data."""
 
 from __future__ import annotations
 
-import pathlib
-import sys
-
 import numpy as np
 import pandas as pd
 import pytest
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "src"))
-
-import cv  # noqa: E402
-import feature_policy as fp  # noqa: E402
-import metrics  # noqa: E402
-import preprocess  # noqa: E402
-import sgf as sgflib  # noqa: E402
+from go_aicup import metrics
+from go_aicup.data import cv, preprocess
+from go_aicup.data import sgf as sgflib
+from go_aicup.features import feature_policy as fp
 
 
 def synthetic_meta(n_players: int = 1_700, seed: int = 0) -> pd.DataFrame:

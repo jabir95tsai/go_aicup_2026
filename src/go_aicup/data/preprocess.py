@@ -21,9 +21,9 @@ The training conversion is sharded per rank file and resumable: a shard is
 considered done once its meta parquet exists (written last, via rename).
 
 Usage:
-    python src/preprocess.py train              # convert + combine + verify
-    python src/preprocess.py train --verify-only
-    python src/preprocess.py release            # pools / questions present on disk
+    python -m go_aicup.data.preprocess train              # convert + combine + verify
+    python -m go_aicup.data.preprocess train --verify-only
+    python -m go_aicup.data.preprocess release            # pools / questions present on disk
 """
 
 from __future__ import annotations
@@ -32,17 +32,15 @@ import argparse
 import hashlib
 import os
 import pathlib
-import sys
 import time
 from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import sgf as sgflib  # noqa: E402
+from go_aicup.data import sgf as sgflib
+from go_aicup.paths import ROOT
 
-ROOT = pathlib.Path(__file__).resolve().parent.parent
 TRAIN_DIR = ROOT / "data" / "training"
 RAW_DIRS = [ROOT / "data" / "raw", ROOT / "data", ROOT / "data" / "test"]
 OUT_DIR = ROOT / "data" / "processed"

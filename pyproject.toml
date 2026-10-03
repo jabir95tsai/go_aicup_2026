@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "go_aicup"
+version = "0.1.0"
+description = "AI CUP 2026 Go: player identification and rank prediction"
+requires-python = ">=3.11"
+# Pinned dependencies live in requirements.txt (the report needs exact versions).
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

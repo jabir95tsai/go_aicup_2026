@@ -10,26 +10,23 @@ These are descriptive statistics for EDA; they carry no ids and are derived
 from the moves alone, so they are legal features for both competitions.
 
 Usage:
-    python src/game_stats.py            # train store -> data/processed/eda/game_stats_train.parquet
-    python src/game_stats.py --store pool_public
+    python -m go_aicup.features.game_stats            # train store -> data/processed/eda/game_stats_train.parquet
+    python -m go_aicup.features.game_stats --store pool_public
 """
 
 from __future__ import annotations
 
 import argparse
-import pathlib
-import sys
 import time
 
 import numpy as np
 import pandas as pd
 from numba import njit, prange
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from data import GameStore  # noqa: E402
+from go_aicup.data.store import GameStore
+from go_aicup.paths import PROCESSED
 
-ROOT = pathlib.Path(__file__).resolve().parent.parent
-OUT_DIR = ROOT / "data" / "processed" / "eda"
+OUT_DIR = PROCESSED / "eda"
 
 SIZE = 19
 N_POINTS = SIZE * SIZE
