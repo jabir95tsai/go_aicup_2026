@@ -1,15 +1,30 @@
-data/training/
-data/processed/
-data/raw/
-models/
-logs/
-oof_predictions/
-submissions/
+# data, caches and run artifacts never go into git
+/data/
+/outputs/
+/submissions/
+/models/
+/logs/
+/oof_predictions/
+/reference/
 *.npy
 *.parquet
 *.memmap
+
+# model weights
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# python / tooling
 __pycache__/
-*.pyc
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
 .ipynb_checkpoints/
+
+# OS
 ._*
 .DS_Store
