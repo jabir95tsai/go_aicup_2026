@@ -23,6 +23,8 @@ pip install -e .                    # 讓 go_aicup 可 import
 python -m pytest -q                 # 應全數通過
 ```
 
+**GPU 環境：** 本機 RTX 3060 Ti 8GB 與晶創 26 H200；HPC 佇列、節點規格、連線方式與待查額度見 [CLAUDE.md 第 0 節](CLAUDE.md#算力-2026-10-10-更新支援範圍)。
+
 **資料**（不進 git）：從 [官方 Releases](https://github.com/AILAB-NDHU/aicup2026-go-dataset/releases) 下載 `aicup2026_go_training.tar.xz`，核對 SHA-256（見 CLAUDE.md 第 1 節），解壓出的 `training/` 放到 `data/training/`。11/04 發布的候選庫與測試題放 `data/raw/`。
 
 **重建衍生資料**（全 CPU，依序執行，結果是確定性的，兩人重建出的檔案會逐位元相同）：

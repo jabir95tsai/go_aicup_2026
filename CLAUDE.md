@@ -63,8 +63,31 @@
 ### 算力 ✅（2026-10-10 更新支援範圍）
 
 - 必須支援的目標環境只有 **本機 RTX 3060 Ti 8GB（CUDA 12.4）與國網中心「晶創 26」**；取消 AMD 單卡／ROCm 相容性要求
-- → 本機以 CUDA 為基準，可使用 CUDA 專屬 kernel，無須為 ROCm 提供替代實作；晶創 26 依實際 GPU／軟體環境適配。訓練入口預留 DDP／torchrun；資料路徑、batch、precision、裝置都走 config
-- → `EXECUTION_PLAN.md` 的算力預算是依 3060 Ti 估的，**需要重估**（尤其 P3 盤面 CNN、P4 KataGo 特徵的可行規模）；晶創 26 的 GPU 型號、排程器、配額 未知
+- → 兩個目標都以 NVIDIA／CUDA 為基準，可使用 CUDA 專屬 kernel，無須為 ROCm 提供替代實作；訓練入口預留 DDP／torchrun（單節點多卡；無須支援跨節點訓練）；資料路徑、batch、precision、裝置都走 config
+- → `EXECUTION_PLAN.md` 的算力預算是依 3060 Ti 估的，**需要依 H200 實測重估**（尤其 P3 盤面 CNN、P4 KataGo 特徵的可行規模）；帳號剩餘 GPU 小時、儲存配額與實際軟體版本仍未知
+
+#### 晶創 26（Nano4）H200 環境（2026-10-10 查核）
+
+**使用範圍：** 本專案只使用 H200 的 `dev` 與 `8gpus` 佇列，每個作業限單節點、最多 8 GPU。
+
+- **硬體：** H200 節點共 220 台；每台 8 張 NVIDIA H200、2 顆 Intel Xeon Platinum 8480+（共 112 CPU 核心）、2TB 主記憶體、8 個 InfiniBand 400Gb/s 網路埠。H200 節點與登入節點為 x86_64，作業系統為 Red Hat Enterprise Linux。[官方系統規格](https://man.twcc.ai/@nano4-manual/SJuKzVlwbx)
+- **顯存與互連：** Nano4 的 GPU 型號為 H200 SXM5 141GB；H200 每卡為 141GB HBM3e、4.8TB/s 顯存頻寬。節點內 8 卡透過 NVLink 互連，跨節點走 InfiniBand。[TOP500 系統登錄](https://www.top500.org/system/180421/)、[NVIDIA H200 規格](https://www.nvidia.com/en-us/data-center/h200/)、[官方系統規格](https://man.twcc.ai/@nano4-manual/SJuKzVlwbx)
+- **節點與 GPU 數：** 8 GPU 完整配置 = 1 個 H200 節點，本專案只規劃單節點作業。顯存仍分屬各 GPU，不能當成單卡共享顯存。`8gpus` 是佇列名稱，實際配置以作業申請與 Slurm 分配為準。
+
+**排程器：Slurm Workload Manager。** 以下只列本專案使用的 H200 佇列；查核時官方政策如下。[官方 Slurm 佇列表](https://man.twcc.ai/@nano4-manual/SJM_FuxDWe)
+
+| 佇列 | 單一 account 可用 GPU 總數 | 每 job 最少 GPU | 每 job 最長時間 | 每 user 同時 running jobs | 每 user pending jobs |
+|---|---:|---:|---:|---:|---:|
+| `dev` | 32 | 1 | 4 小時 | 10 | 10 |
+| `8gpus` | 32 | 1 | 48 小時 | 8 | 10 |
+
+H200 佇列限制**每張 GPU 最多 12 CPU 核心、200GB 主記憶體**；200GB 是主機 RAM 配額，與 141GB GPU 顯存不同。佇列名稱不等於每 job 的最少 GPU 數；提交前以 `sinfo`／`scontrol show partition` 查當下政策與實際 job 上限。
+
+**本專案使用方式：** 本機 3060 Ti 8GB 做開發與小規模驗證；H200 `dev` 做環境、單卡與單節點 DDP 短測；通過後以 `8gpus` 做單節點最多 8 卡訓練或分片推論。這是工作分配規劃，尚未實測吞吐量或多卡加速比。長作業須定期 checkpoint 並可續跑；NRQ 工作可能被中斷、重新排程。預算以 GPU 小時記帳（GPU 數 × 執行小時），不能由卡數直接假定線性加速。[官方 NRQ 說明](https://iservice.nchc.org.tw/nchc_service/nchc_service_qa.php?target=54)
+
+**連線與環境：** 登入 `nano4.nchc.org.tw:22`；SFTP 資料傳輸使用同主機的 `2222` 埠，掛載 `/home`、`/work`。計算工作交給 Slurm，不在登入節點執行。Job 先 `module purge`，再按 `module avail`／`module spider` 查核並載入所需模組；CUDA、driver、PyTorch／NCCL 的實際版本須在計算節點記錄，不能直接沿用本機 CUDA 12.4 的假設。[官方登入與傳輸說明](https://man.twcc.ai/@nano4-manual/BydP-_lvZg)、[官方 Modules 說明](https://man.twcc.ai/@nano4-manual/BJyI6dgw-g)
+
+**仍未知：** 專案 account／QoS、剩餘 GPU 小時、RQ／NRQ 身分、儲存配額、實際 driver／CUDA／PyTorch／NCCL 版本與排隊時間。晶創 26 另有 GB200／Arm 資源；本專案目前的 HPC 支援範圍限定上述 H200 佇列。
 
 ### 仍待確認 ⏳
 

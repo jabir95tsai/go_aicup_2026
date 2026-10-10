@@ -37,3 +37,10 @@
 | 工具 | 用途 | 範圍 |
 |---|---|---|
 | Claude Code（Anthropic，Claude Opus 5.5） | 程式撰寫與審查、資料稽核與 EDA 腳本、文獻調查、文件撰寫 | 全專案；所有程式由團隊審閱、執行並驗證 |
+
+## 算力環境與官方操作文件
+
+| 資源 | 來源／查核日期 | 用途 | 狀態 | 實際貢獻 |
+|---|---|---|---|---|
+| 國網中心晶創 26（Nano4）H200 官方文件 | [系統規格](https://man.twcc.ai/@nano4-manual/SJuKzVlwbx)、[Slurm 佇列](https://man.twcc.ai/@nano4-manual/SJM_FuxDWe)、[登入與傳輸](https://man.twcc.ai/@nano4-manual/BydP-_lvZg)、[Modules](https://man.twcc.ai/@nano4-manual/BJyI6dgw-g)、[NRQ 說明](https://iservice.nchc.org.tw/nchc_service/nchc_service_qa.php?target=54)；2026-10-10 | 執行環境與作業限制回填至 CLAUDE.md §0 | 使用中（文件引用；尚未執行 HPC 作業） | 工程環境參考，非模型／資料；無分數增益數字 |
+| H200 硬體規格與 Nano4 系統登錄 | [NVIDIA H200](https://www.nvidia.com/en-us/data-center/h200/)、[TOP500 Nano4](https://www.top500.org/system/180421/)；2026-10-10 | 查核 GPU 型號與顯存規格 | 使用中（文件引用） | 硬體規格參考，非效能實測 |

@@ -201,3 +201,11 @@ player-adversarial 頭（gradient reversal）或「每批次每位玩家只取�
 - 本機以 CUDA 為基準，可使用 CUDA 專屬 kernel，無須為 ROCm 提供替代實作；保留 DDP／torchrun 與資料路徑、batch、precision、裝置的 config 要求。
 - 同步更新 `CLAUDE.md` §0、`AGENTS.md` 的指標說明及 `EXECUTION_PLAN.md` 算力預算待辦。晶創 26 的 GPU 型號、排程器、配額仍未知，算力預算仍待重估。
 - 全專案搜尋確認目前沒有 ROCm／AMD 專用程式分支或設定需要移除；`reference.md` 的外部工具後端資訊保留。
+
+### A-009 晶創 26 H200 環境查核（2026-10-10）
+
+**性質：** 官方文件調查與需求回填，未登入 HPC、未提交作業、未訓練模型，不影響分數。
+
+- 使用者確認帳號可使用 H200 `dev`、`8gpus`；官方規格、佇列限制與來源集中於 `CLAUDE.md` §0，文件引用登記於 `EXTERNAL_RESOURCES.md`。
+- 已回填 GPU／節點規格、Slurm job 時限、CPU／RAM 限制、登入／傳輸與 Modules 操作。
+- 同步更新 `EXECUTION_PLAN.md` 待辦與 README 入口；本紀錄補完 A-008 的 GPU 型號／排程器未知項，舊紀錄保留。帳號額度、軟體版本、實測吞吐量仍未知；算力預算仍待短測重估。
