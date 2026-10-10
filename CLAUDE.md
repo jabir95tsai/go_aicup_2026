@@ -60,10 +60,10 @@
   前 30 名且前 25% 且超過 baseline → 繳報告審查後發電子獎狀。報告評分 = 完整性 + 正確性 + **程式原創性**
 - 得獎隊伍須提交**可重現模型的原始程式碼**
 
-### 算力 ✅（2026-10-03 確認）
+### 算力 ✅（2026-10-10 更新支援範圍）
 
-- 本機 RTX 3060 Ti 8GB（CUDA 12.4）、**AMD ROCm 單卡、國網中心「晶創 26」都可用**
-- → 程式要同時能跑 CUDA 與 ROCm（CUDA 專屬 kernel 必須可關閉）；訓練入口預留 DDP／torchrun；資料路徑、batch、precision、裝置都走 config
+- 必須支援的目標環境只有 **本機 RTX 3060 Ti 8GB（CUDA 12.4）與國網中心「晶創 26」**；取消 AMD 單卡／ROCm 相容性要求
+- → 本機以 CUDA 為基準，可使用 CUDA 專屬 kernel，無須為 ROCm 提供替代實作；晶創 26 依實際 GPU／軟體環境適配。訓練入口預留 DDP／torchrun；資料路徑、batch、precision、裝置都走 config
 - → `EXECUTION_PLAN.md` 的算力預算是依 3060 Ti 估的，**需要重估**（尤其 P3 盤面 CNN、P4 KataGo 特徵的可行規模）；晶創 26 的 GPU 型號、排程器、配額 未知
 
 ### 仍待確認 ⏳
