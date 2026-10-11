@@ -32,11 +32,11 @@ python -m pytest -q                 # 應全數通過
 
 `torch==2.6.0+cu124` 有 Linux x86_64 wheel，作為本機與 H200 待驗證的共同環境基準；GPU 通訊使用 **NCCL + DDP／torchrun**。Linux CUDA wheel 的 NVIDIA／NCCL 依賴交給 pip 解析，無須另加 `nccl`、`torchvision` 或 `torchaudio`。參考 [PyTorch 2.6 安裝方式](https://docs.pytorch.org/get-started/previous-versions/)、[DDP backend 說明](https://docs.pytorch.org/docs/2.6/distributed.html)。
 
-先依 Nano4 官方文件執行 `module purge`，用 `module avail`／`module spider` 查核並載入需要的模組，再用 Python 3.11–3.13 建立獨立環境；模組名稱以現場為準。以下驗證放在 Slurm 分配的 **H200 計算節點**，先用 `dev` 做 1／2 卡短測，再驗證同節點 8 卡。實際 driver、glibc、可見 GPU 與 NCCL 通訊尚未在 Nano4 實測。
+Nano4 已使用 Conda 建置本專案環境，名稱為 **`go`**；使用前先執行 `conda activate go`，不需另建 `.venv`。若作業需要系統模組，先依 Nano4 官方文件執行 `module purge`，用 `module avail`／`module spider` 查核並載入需要的模組，再啟用 `go`；模組名稱與 Conda 初始化方式以現場為準。環境中的 Python 版本須符合 3.11–3.13。以下驗證放在 Slurm 分配的 **H200 計算節點**，先用 `dev` 做 1／2 卡短測，再驗證同節點 8 卡。實際 driver、glibc、可見 GPU 與 NCCL 通訊尚未在 Nano4 實測。
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
+conda activate go
+python --version
 python -m pip install --upgrade pip
 python -m pip install --dry-run --ignore-installed --only-binary=:all: -r requirements.txt
 python -m pip install --only-binary=:all: -r requirements.txt
@@ -51,6 +51,7 @@ python -m pytest -q
 
 ```bash
 set -euo pipefail
+conda activate go
 mkdir -p outputs/rank_env_nano4
 nvidia-smi > outputs/rank_env_nano4/nvidia-smi.txt
 ldd --version > outputs/rank_env_nano4/libc.txt

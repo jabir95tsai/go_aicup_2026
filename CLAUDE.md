@@ -85,11 +85,11 @@ H200 佇列限制**每張 GPU 最多 12 CPU 核心、200GB 主記憶體**；200G
 
 **本專案使用方式：** 本機 3060 Ti 8GB 做開發與小規模驗證；H200 `dev` 做環境、單卡與單節點 DDP 短測；通過後以 `8gpus` 做單節點最多 8 卡訓練或分片推論。這是工作分配規劃，尚未實測吞吐量或多卡加速比。長作業須定期 checkpoint 並可續跑；NRQ 工作可能被中斷、重新排程。預算以 GPU 小時記帳（GPU 數 × 執行小時），不能由卡數直接假定線性加速。[官方 NRQ 說明](https://iservice.nchc.org.tw/nchc_service/nchc_service_qa.php?target=54)
 
-**連線與環境：** 登入 `nano4.nchc.org.tw:22`；SFTP 資料傳輸使用同主機的 `2222` 埠，掛載 `/home`、`/work`。計算工作交給 Slurm，不在登入節點執行。Job 先 `module purge`，再按 `module avail`／`module spider` 查核並載入所需模組；CUDA、driver、PyTorch／NCCL 的實際版本須在計算節點記錄，不能直接沿用本機 CUDA 12.4 的假設。[官方登入與傳輸說明](https://man.twcc.ai/@nano4-manual/BydP-_lvZg)、[官方 Modules 說明](https://man.twcc.ai/@nano4-manual/BJyI6dgw-g)
+**連線與環境：** 登入 `nano4.nchc.org.tw:22`；SFTP 資料傳輸使用同主機的 `2222` 埠，掛載 `/home`、`/work`。計算工作交給 Slurm，不在登入節點執行。本專案已使用 Conda 建置名為 **`go`** 的環境，執行前以 `conda activate go` 啟用。Job 如需系統模組，先 `module purge`，再按 `module avail`／`module spider` 查核並載入所需模組，接著啟用 `go`；Conda 初始化方式以現場為準；CUDA、driver、PyTorch／NCCL 的實際版本須在計算節點記錄，不能直接沿用本機 CUDA 12.4 的假設。[官方登入與傳輸說明](https://man.twcc.ai/@nano4-manual/BydP-_lvZg)、[官方 Modules 說明](https://man.twcc.ai/@nano4-manual/BJyI6dgw-g)
 
 **仍未知：** 專案 account／QoS、剩餘 GPU 小時、RQ／NRQ 身分、儲存配額、實際 driver／CUDA／PyTorch／NCCL 版本與排隊時間。晶創 26 另有 GB200／Arm 資源；本專案目前的 HPC 支援範圍限定上述 H200 佇列。
 
-**依賴安裝基準（2026-10-11）：** 本機 Windows 與 Nano4 Linux x86_64 共用 `requirements.txt` 的直接依賴 pins，使用標準 CPython 3.11–3.13、`torch==2.6.0+cu124` 與官方 CUDA 12.4 額外索引。Linux CUDA wheel 的 NCCL 依賴由 pip 安裝；系統 module 不必恰好是 CUDA 12.4，但 driver 必須相容。這是待驗證的共同環境基準，**尚未在 Nano4 安裝或通過多卡測試**。安裝、driver／glibc 檢查與 `scripts/check_torch_ddp.py` 的 1／2／8 卡驗證方式見 [README 的 Nano4 段落](README.md#nano4-linux單節點多卡)；環境紀錄放 `outputs/rank_env_nano4/`。目前沒有 DDP 模型訓練入口，環境通過不代表訓練程式已支援多卡。
+**依賴安裝基準（2026-10-11）：** 本機 Windows 與 Nano4 Linux x86_64 共用 `requirements.txt` 的直接依賴 pins，使用標準 CPython 3.11–3.13、`torch==2.6.0+cu124` 與官方 CUDA 12.4 額外索引。Linux CUDA wheel 的 NCCL 依賴由 pip 安裝；系統 module 不必恰好是 CUDA 12.4，但 driver 必須相容。Nano4 的 Conda **`go`** 環境已建置（2026-10-11 使用者確認）；上述依賴 pins 是否已完整安裝、實際套件版本與多卡測試結果仍待驗證。安裝、driver／glibc 檢查與 `scripts/check_torch_ddp.py` 的 1／2／8 卡驗證方式見 [README 的 Nano4 段落](README.md#nano4-linux單節點多卡)；環境紀錄放 `outputs/rank_env_nano4/`。目前沒有 DDP 模型訓練入口，環境通過不代表訓練程式已支援多卡。
 
 ### 仍待確認 ⏳
 
