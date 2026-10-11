@@ -1,14 +1,13 @@
-"""Convert one game to in-memory, post-move 18-plane training inputs.
+"""Convert one game to in-memory, post-move black / white board planes.
 
-For zero-based ply i, channels 2*k / 2*k+1 contain black / white stones
-in the board after ply i-k, for k=0..7. Missing history is an empty board.
-Channels 16 / 17 are constant black / white indicators for the move at i,
-not for the next player to move. Passes count as plies and advance history.
+For zero-based ply i, channels 0 / 1 contain black / white stones
+in the board after ply i, including captures. Passes count as plies and
+produce another copy of the unchanged board.
 Coordinates are [row, column], matching go_aicup.data.sgf.
 
 No feature arrays are written to disk. Example:
     planes = sgf_to_planes("(;SZ[19];B[pd];W[dp])")
-    # planes.shape == (2, 18, 19, 19), dtype == numpy.float32
+    # planes.shape == (2, 2, 19, 19), dtype == numpy.float32
     # tensor = torch.from_numpy(planes)
 
 For a processed GameStore, avoid parsing SGF again:
@@ -31,8 +30,7 @@ from go_aicup.features.game_stats import NB, NB_CNT, _flood
 
 BOARD_SIZE = sgflib.BOARD_SIZE
 N_POINTS = sgflib.N_POINTS
-HISTORY = 8
-N_CHANNELS = 2 * HISTORY + 2
+N_CHANNELS = 2
 
 
 @njit(cache=True)
@@ -81,20 +79,16 @@ def _replay_planes(moves, colors, out):
 
         for q in range(N_POINTS):
             snapshots[i, q] = board[q]
-        for k in range(HISTORY):
-            for q in range(N_POINTS):
-                value = snapshots[i - k, q] if i >= k else 0
-                out[i, 2 * k, q] = 1.0 if value == 1 else 0.0
-                out[i, 2 * k + 1, q] = 1.0 if value == 2 else 0.0
-        for q in range(N_POINTS):
-            out[i, 16, q] = 1.0 if colors[i] == sgflib.BLACK else 0.0
-            out[i, 17, q] = 1.0 if colors[i] == sgflib.WHITE else 0.0
+            out[i, 0, q] = 1.0 if board[q] == 1 else 0.0
+            out[i, 1, q] = 1.0 if board[q] == 2 else 0.0
 
     return -1, 0
 
 
 def moves_to_planes(moves: np.ndarray, colors: np.ndarray) -> np.ndarray:
-    """Return a contiguous (T, 18, 19, 19) float32 array from parsed moves.
+    """Return a contiguous (T, 2, 19, 19) float32 array from parsed moves.
+
+    Channels 0 / 1 mark black / white stones after each move, respectively.
 
     moves: one-dimensional integer point indices 0..360, with 361 for pass.
     colors: same-length integer array, 0 for black and 1 for white. Actual
@@ -102,7 +96,7 @@ def moves_to_planes(moves: np.ndarray, colors: np.ndarray) -> np.ndarray:
         moves; no alternating-turn assumption is made.
 
     Replay starts on an empty 19x19 board. Empty arrays return shape
-    (0, 18, 19, 19). Inputs are never modified. Occupied-point moves, suicide,
+    (0, 2, 19, 19). Inputs are never modified. Occupied-point moves, suicide,
     and immediate ko recaptures raise ValueError with a one-based move number.
     This is a replay converter, not a rules engine for superko or scoring.
     """
@@ -130,7 +124,10 @@ def moves_to_planes(moves: np.ndarray, colors: np.ndarray) -> np.ndarray:
 
 
 def sgf_to_planes(sgf_content: str) -> np.ndarray:
-    """Parse one SGF string and return its post-move training planes.
+    """Parse one SGF string and return (T, 2, 19, 19) float32 board planes.
+
+    Each timestep contains the post-move black (channel 0) and white
+    (channel 1) stone positions. T includes passes.
 
     Supports the dataset's single linear game: optional root metadata and
     exactly one B/W move per subsequent node (a move at the root is allowed).
