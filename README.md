@@ -17,13 +17,49 @@ W1 完成：SGF 稽核、1M 盤轉檔、CV 切分與合成題組、兩賽官方�
 
 ## 上手
 
+使用標準版 CPython **3.11–3.13**（目前套件組合不支援 Python 3.14）；本機參考版本為 3.13.12。
+`requirements.txt` 同時使用 PyPI 與官方 CUDA 12.4 索引，Windows／Linux x86_64 共用同一組直接依賴版本。
+
 ```bash
-pip install -r requirements.txt     # 版本已鎖，報告要用
-pip install -e .                    # 讓 go_aicup 可 import
+python -m pip install -r requirements.txt  # 版本已鎖，報告要用
+python -m pip install -e .                 # 讓 go_aicup 可 import
 python -m pytest -q                 # 應全數通過
 ```
 
 **GPU 環境：** 本機 RTX 3060 Ti 8GB 與晶創 26 H200；HPC 佇列、節點規格、連線方式與待查額度見 [CLAUDE.md 第 0 節](CLAUDE.md#算力-2026-10-10-更新支援範圍)。
+
+### Nano4 Linux／單節點多卡
+
+`torch==2.6.0+cu124` 有 Linux x86_64 wheel，作為本機與 H200 待驗證的共同環境基準；GPU 通訊使用 **NCCL + DDP／torchrun**。Linux CUDA wheel 的 NVIDIA／NCCL 依賴交給 pip 解析，無須另加 `nccl`、`torchvision` 或 `torchaudio`。參考 [PyTorch 2.6 安裝方式](https://docs.pytorch.org/get-started/previous-versions/)、[DDP backend 說明](https://docs.pytorch.org/docs/2.6/distributed.html)。
+
+先依 Nano4 官方文件執行 `module purge`，用 `module avail`／`module spider` 查核並載入需要的模組，再用 Python 3.11–3.13 建立獨立環境；模組名稱以現場為準。以下驗證放在 Slurm 分配的 **H200 計算節點**，先用 `dev` 做 1／2 卡短測，再驗證同節點 8 卡。實際 driver、glibc、可見 GPU 與 NCCL 通訊尚未在 Nano4 實測。
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install --dry-run --ignore-installed --only-binary=:all: -r requirements.txt
+python -m pip install --only-binary=:all: -r requirements.txt
+python -m pip install -e .
+python -m pip check
+python -m pytest -q
+```
+
+`--only-binary=:all:` 讓 Python／glibc 沒有相容 wheel 時直接報錯，避免在 HPC 意外編譯大型套件。CUDA runtime 來自 `cu124` wheel；系統 CUDA module 與 `nvidia-smi` 顯示的 CUDA 上限不必恰好是 12.4，但 NVIDIA driver 必須相容。以 Linux driver **550.54.14 或更新**作為 CUDA 12.4 GA 的驗證基準；更舊 driver 的 minor compatibility 有限制，需額外查核。[NVIDIA CUDA 12.4 driver 表](https://docs.nvidia.com/cuda/archive/12.4.0/cuda-toolkit-release-notes/index.html)
+
+以下指令在配置 **2 張 GPU、1 個 Slurm task、1 個節點**的 job 內執行。由單一 `torchrun` 啟動每張 GPU 一個 process；不要再用 2 個 Slurm tasks 各啟動一次 `torchrun`。`--nproc-per-node` 依實際配置改成 1、2 或 8，保留 Slurm 設定的 `CUDA_VISIBLE_DEVICES`。
+
+```bash
+set -euo pipefail
+mkdir -p outputs/rank_env_nano4
+nvidia-smi > outputs/rank_env_nano4/nvidia-smi.txt
+ldd --version > outputs/rank_env_nano4/libc.txt
+python -m pip freeze > outputs/rank_env_nano4/pip-freeze.txt
+python -m torch.distributed.run --standalone --nnodes=1 --nproc-per-node=2 \
+  scripts/check_torch_ddp.py 2>&1 | tee outputs/rank_env_nano4/ddp-2gpu.log
+```
+
+通過條件：所有 process 正常退出，log 的 JSON 顯示 `status: passed`、`world_size: 2`、`all_reduce_sum: 3.0`、`ddp_gradient: 1.5`。改跑 8 卡時，使用 `ddp-8gpu.log`，預期 sum 為 36.0、gradient 為 4.5；`pip-freeze.txt` 記錄包含間接依賴的實際版本。這是環境檢查；目前模型訓練入口尚未實作 DDP，後續訓練仍須包裝 `DistributedDataParallel` 並按 rank 分配資料。
 
 **資料**（不進 git）：從 [官方 Releases](https://github.com/AILAB-NDHU/aicup2026-go-dataset/releases) 下載 `aicup2026_go_training.tar.xz`，核對 SHA-256（見 CLAUDE.md 第 1 節），解壓出的 `training/` 放到 `data/training/`。11/04 發布的候選庫與測試題放 `data/raw/`。
 

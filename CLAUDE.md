@@ -89,6 +89,8 @@ H200 佇列限制**每張 GPU 最多 12 CPU 核心、200GB 主記憶體**；200G
 
 **仍未知：** 專案 account／QoS、剩餘 GPU 小時、RQ／NRQ 身分、儲存配額、實際 driver／CUDA／PyTorch／NCCL 版本與排隊時間。晶創 26 另有 GB200／Arm 資源；本專案目前的 HPC 支援範圍限定上述 H200 佇列。
 
+**依賴安裝基準（2026-10-11）：** 本機 Windows 與 Nano4 Linux x86_64 共用 `requirements.txt` 的直接依賴 pins，使用標準 CPython 3.11–3.13、`torch==2.6.0+cu124` 與官方 CUDA 12.4 額外索引。Linux CUDA wheel 的 NCCL 依賴由 pip 安裝；系統 module 不必恰好是 CUDA 12.4，但 driver 必須相容。這是待驗證的共同環境基準，**尚未在 Nano4 安裝或通過多卡測試**。安裝、driver／glibc 檢查與 `scripts/check_torch_ddp.py` 的 1／2／8 卡驗證方式見 [README 的 Nano4 段落](README.md#nano4-linux單節點多卡)；環境紀錄放 `outputs/rank_env_nano4/`。目前沒有 DDP 模型訓練入口，環境通過不代表訓練程式已支援多卡。
+
 ### 仍待確認 ⏳
 
 | 項目 | 為什麼重要 | 何時／去哪查 |
