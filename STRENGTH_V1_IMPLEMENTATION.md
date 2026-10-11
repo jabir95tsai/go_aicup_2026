@@ -9,17 +9,18 @@
 ```text
 官方 CSV
   → 既有 preprocess：唯一 SGF parser → moves／colors／metadata
-  → board_cache：跨棋局平行重播 → 兩層盤面分片
+  → board_cache：跨棋局平行重播 → 兩層盤面位元打包分片 [total_ply,2,46]
   → cv：按級別固定棋局切分 → 指定玩家 sample index
-  → Dataset：全域 sample shuffle → 動態 18 層 → D4
+  → Dataset：全域 sample shuffle → 按 batch 讀取／解包 → 動態 18 層 → D4
   → ResNet：每盤面一個標量
   → 全域各級 sum／count → 排序 loss → DDP backward
-  → validation：手 → 盤 → 同玩家同色 k 盤 → 有序切點 → 官方分數
+  → training eval：手 → 盤 → 同玩家同色 k 盤 → 各級題目分布 → 擬合有序切點
+  → validation／test：相同聚合 → 固定切點 → 級別／官方分數
 ```
 
 先完成「一盤從原 SGF 到模型輸入」及「相同 batch 的單卡／多卡梯度一致」，再擴大轉檔與訓練。資料準備用 CPU 多程序；模型訓練用單節點 GPU DDP。兩者不要共用同一套 worker 或在每個訓練 process 各做一次全量轉檔。
 
-假設是級別平均排序可學到具有棋力訊號的盤面標量，且手／盤／題平均可降低局面雜訊。對 k=5／10／15／20 的效能增益均為**未知**，不由 loss 下降推定。最終 gate 是獨立校準後的四桶官方分數及分布；0.4631 是官方門檻，不是這份按盤驗證必然可轉移的 LB 預測。既有 0.4117 線性探針採用不同切分，不能直接當受控增益比較。
+假設是級別平均排序可學到具有棋力訊號的盤面標量，且手／盤／題平均可降低局面雜訊。對 k=5／10／15／20 的效能增益均為**未知**，不由 loss 下降推定。最終 gate 是只用 training 擬合切點後、固定切點的 validation 四桶官方分數及分布；0.4631 是官方門檻，不是這份按盤驗證必然可轉移的 LB 預測。既有 0.4117 線性探針採用不同切分，不能直接當受控增益比較。
 
 ## 2. 現有程式的接點與限制
 
@@ -36,7 +37,7 @@
 
 既有 parser 偏容錯；board cache 啟動前要檢查 metadata 的 `n_errors`、19 路／無 setup 等資料稽核條件。`moves_to_planes()` 只看 moves／colors，無法自行發現 SGF 的 AB／AW 等原始設定。異常棋局需帶唯一鍵明確報錯，不能靜默略過而讓 80,000／20,000 盤數失真。
 
-## 3. 快取格式：邏輯兩層，磁碟優先比較 uint8 與位元打包
+## 3. 快取格式：以位元打包為正式格式
 
 float32 留在現有公開轉換介面；快取層處理壓縮，讀取後仍得到相同的 0／1 盤面。以全量 **2 億個雙方 ply** 為估算基準，以下使用十進位 GB，不含 metadata、索引、檔案 header 與暫存：
 
@@ -46,7 +47,9 @@ float32 留在現有公開轉換介面；快取層處理壓縮，讀取後仍得
 | `uint8[T,2,19,19]` | 722 | 144.4 GB | 最容易驗證的磁碟參考版 |
 | `uint8[T,2,46]` 位元打包 | 92 | 18.4 GB | 每層 361 bits，分別補至 46 bytes |
 
-建議先支援 `uint8`／`packed` 兩種快取 codec，以同一批資料在 Nano4 做冷讀與熱讀短測後選正式格式。`packed` 是優先候選：每手小於 uint8 的 1/7，且整份快取較有機會留在節點的 OS page cache。配額、可用 RAM 和共享儲存吞吐量仍未知，不能保證常駐。
+依 2026-10-11 使用者確認，正式全量快取採用 `packed` 位元打包，config 記錄 `cache_codec="packed"`。未打包 uint8 僅用於小型一致性／效能對照，不建立第二份全量未打包快取。Nano4 冷讀／熱讀短測用於調整分片、worker、預取及解包方式，不再把正式格式留為未定。
+
+每手 92 bytes，小於未打包 uint8 的 1/7，整份快取較有機會留在節點的 OS page cache。配額、可用 RAM 和共享儲存吞吐量仍未知，不能保證常駐。磁碟仍保存全量打包盤面，RAM 僅保留各 worker 正在處理的棋局及 loader 的當前／預取 batches；禁止累積全量 float32／uint8 盤面後再 stack 或 concatenate。
 
 打包規格必須固定：按 `[channel,row,column]` 的 row-major 順序，兩層各自 `packbits(..., axis=-1, bitorder="little")`，每層最後 7 個 padding bits 為零；解包只取前 361 bits。manifest 記錄 shape、dtype、codec、bitorder、版本與來源 fingerprint。
 
@@ -85,7 +88,7 @@ float32 留在現有公開轉換介面；快取層處理壓縮，讀取後仍得
 | 任務單位 | 2,048–4,096 盤，保持棋局完整，不跨 rank 邊界 |
 | worker 輸入 | move-store 路徑、game range、shard ID、codec、輸出目錄 |
 | worker 讀取 | 自行唯讀 memmap moves／colors，讀取所屬棋局 |
-| worker 計算 | 每盤 `moves_to_planes()` → 檢查 0／1 → uint8 或 packbits |
+| worker 計算 | 每盤 `moves_to_planes()` → 檢查 0／1 → 暫存 uint8 → packbits |
 | worker 寫入 | 自己唯一的 shard 暫存檔；不與其他 worker 共寫 |
 | worker 回傳 | shard ID、盤數、手數、bytes、耗時及檢查結果等小型摘要 |
 | 主程序 | 排程、顯示進度、收集狀態、驗證 manifest；不收大型 tensor |
@@ -113,13 +116,13 @@ worker 根據該 shard 的 lengths 預先計算 local offsets／總 ply 數，�
 data/processed/boards/strength_v1_<cache-id>/
   manifest.json
   games.parquet                  # game_index → shard_id, local_offset, length
-  shard_00000.npy                 # [total_ply,2,46] packed 或 [total_ply,2,19,19]
+  shard_00000.npy                 # uint8[total_ply,2,46]，正式 packed 格式
   shard_00000.done.json
   ...
 data/processed/cv/
   strength_v1_games.parquet       # game_index, rank, game_id, split
-  strength_v1_calibration_players.parquet
-  strength_v1_evaluation_players.parquet
+  strength_v1_train_calibration_questions.parquet  # 僅使用 training 棋局
+  strength_v1_validation_questions.parquet         # 僅使用 validation 棋局
 data/processed/strength_v1/<dataset-id>/
   train_game.npy                  # uint32[N_train_samples]
   train_ply.npy                   # uint16[N_train_samples]
@@ -140,7 +143,7 @@ data/processed/strength_v1/<dataset-id>/
 
 給定 `(game_index, ply=t)`，讀 `P[t], P[t-1], ..., P[t-7]`。負數時刻直接補零；不得讀到同 shard 的上一盤。channel 16／17 使用 move store 的當手實際顏色。所有歷史使用同一個 D4 transform，顏色層不變。
 
-packed 版一次讀取 `[8,2,46]` payload，解包得到 `[8,2,19,19]`，再 reshape 為 16 個棋子 channels，補兩層顏色成 `[18,19,19]`。CPU 優先保持 uint8，整批 pin memory、非同步 H2D，再在 GPU 轉成模型輸入 dtype。BF16 autocast 的輸出分數另轉 FP32 做 sum／loss。
+正式 loader 一次讀取 `[8,2,46]` payload，解包得到 `[8,2,19,19]`，再 reshape 為 16 個棋子 channels，補兩層顏色成 `[18,19,19]`。CPU 優先保持 uint8，整批 pin memory、非同步 H2D，再在 GPU 轉成模型輸入 dtype。BF16 autocast 的輸出分數另轉 FP32 做 sum／loss。
 
 首版先在 CPU vectorized 解包；若 profiling 證明解包限制速度，再比較搬 packed bytes 到 GPU 後解包。GPU 解包與自訂 kernel 尚未實作，也不預設一定更快。
 
@@ -223,7 +226,7 @@ S_r=\sum_d S_{d,r},\quad C_r=\sum_d C_{d,r},\quad \mu_r=S_r/C_r.
 
 每 step：讀取預排全域 batch → local 資料載入／18 層／D4 → 單次 BF16 forward → FP32 全域級別 sum／count → loss → backward → clip → AdamW → scheduler。正式起點不混入題目級 loss。
 
-約 8,000 萬 training samples 是 **4,883 steps／epoch**。僅 40 個主幹 3×3 卷積的 forward 約 0.279 PFLOP／全域 batch（乘加算 2 FLOPs）；backward 與其他操作另計。此算式是運算量，不是 H200 實测时间。
+約 8,000 萬 training samples 是 **4,883 steps／epoch**。僅 40 個主幹 3×3 卷積的 forward 約 0.279 PFLOP／全域 batch（乘加算 2 FLOPs）；backward 與其他操作另計。此算式是運算量，不是 H200 實測時間。
 
 先在 Nano4 跑暖機後 100–200 steps，分別量 data wait、H2D／組合、forward、loss collective、backward、optimizer、checkpoint、GPU peak memory，記錄 p50／p95／吞吐。CUDA 非同步操作需用 events／同步或 profiler 測量，不能只用未同步的 Python 計時。再依實測 step 秒數估訓練時間：
 
@@ -241,17 +244,25 @@ DataLoader 已預取的 index 不算已完成訓練；續跑從 update cursor �
 
 各卡保存自身 RNG，rank 0 保存主 checkpoint；都成功後才發布完成標記。定時寫 `last`（起始每 15 分鐘）、每 epoch／最佳 checkpoint，接近 Slurm walltime 時在完整 step 邊界停止，不等被殺才嘗試保存。
 
-## 9. Validation 與有序切點
+## 9. Training 分布擬合區間，Validation 固定區間評估
 
 每盤指定玩家 scores 等權平均成 game score，再將同玩家同色的 k 盤 game scores 等權平均成 question score。不能直接把題內所有手平均，否則長局佔比較高。
 
-20% validation 的玩家先按級別固定分成 calibration／evaluation 兩部分，再僅從對應部分的 **validation 棋局**合成題。不能把同一玩家的 training 棋局誤納入驗證題。兩部分玩家互斥；各自與 training 的玩家重疊率另外記錄。k=20 同色 validation 盤不足的玩家不以重複盤補足，列 eligibility／覆蓋率；某級某桶無合格玩家則明確報錯。
+依 2026-10-11 使用者確認，切點改為**只用 training data 擬合**。模型權重固定後，以 eval 模式、凍結 BN、不使用隨機 D4 增強，重新推論 training 的指定玩家盤面。不能直接沿用訓練 loop 中不同 optimizer steps、不同權重及 training-mode BN 下收集的分數。
 
-起始建議 calibration／evaluation 玩家各半、各合成 10,000 題，四個 k 桶等量，題內盤不重複。不同題可共用玩家／盤，必須按玩家做 bootstrap 或重抽比較；不能把 10,000 題宣稱為 10,000 個獨立玩家。
+按真實 rank 保存手級、盤級與題目級分布的平均、標準差、分位數及相鄰級重疊。排序目標預期 `mu_6D > mu_5D > ... > mu_D`，不是要求 6D 每個樣本都大於 5D。切點應對齊最後實際輸入解碼器的 question score；不能只由單手分布擬合後，就認為 k 盤平均也有同樣的最佳區間。
 
-9 個切點可用動態規劃最佳化：對 calibration question scores 排序，相同分數不可拆開；每個分數區段配一個非遞減的 rank_id。reward 為 exact=1、差一級=1/e、其餘=0，四桶等權。利用 prefix reward 做最佳分段，固定平手規則，保存 boundaries、score 比較方向、模型 hash。空級／相同切點情況要定義合法的非遞減解與診斷，不能任意挪動平手樣本到不同級。
+training／validation 題分別由 `cv.py` 合成，題內必須同玩家、同色、k 盤互不重複。Training 擬合題僅取 training 棋局，validation 題僅取 validation 棋局；同一玩家可能在兩邊出現，依本版按盤切分設定記錄玩家重疊，不新增玩家互斥要求。k=20 同色盤不足的玩家不以重複盤補足，列 eligibility／覆蓋率；某級某桶無合格玩家則明確報錯。
 
-evaluation 題不參與切點搜尋。若反覆用這批 evaluation scores 選超參／epoch，這批數字便是模型選擇驗證，不再是完全獨立最終評估；需再留固定測試題／保留既有 player-disjoint holdout 作第二意見。
+起始建議 training 擬合題／validation 評估題各 10,000 題，四個 k 桶等量，級別均衡、盡量均勻抽取合格玩家。Training 各級全量盤分數可作分布診斷，但切點擬合使用固定抽樣題組；題數增加時記錄精度與成本。不同題可共用玩家／盤，須按玩家做 bootstrap 或重抽比較，不能把 10,000 題宣稱為 10,000 個獨立玩家。
+
+9 個切點可用動態規劃最佳化：對 training calibration question scores 排序，相同分數不可拆開；每個分數區段配一個非遞減的 rank_id。Reward 為 exact=1、差一級=1/e、其餘=0，每個 k 桶總權重 1/4。利用 prefix reward 做最佳分段，不預設分布為高斯，也不只取相鄰均值中點。此處「最佳」指固定 training 題組上的官方分數，在有序區間限制下的最佳解，不是對未知 test 的保證。
+
+令 `t1 <= ... <= t9`，D 對應 `(-∞,t1)`，C 對應 `[t1,t2)`，依序至 6D 的 `[t9,+∞)`。固定相等分數的邊界規則，可用右側插入位置計算 rank_id；空級／相同切點情況要定義合法的非遞減解與診斷，不能依真實標籤把平手樣本分到不同級。首版四個 k 共用一組切點，擬合時四桶等權；分 k 獨立切點屬後續另行實驗。
+
+保存 boundaries、各級分布、training 擬合分數、seed、題組 hash、模型 checkpoint hash 與解碼規則。每個待評估 checkpoint 都以同一 training 題組重新推論／擬合，切點與該模型一對一綁定。Training 再推論的盤數與耗時另外計入預算；不必為每個 checkpoint 保存全部 8,000 萬手分數，若只做切點擬合可只推論固定 training 題組中所需的唯一棋局。
+
+validation 不參與切點搜尋；全份 validation 可用於固定切點後的分布與題目評估，不再分成校準／評估兩個玩家集合。Training 分布有樣本內偏差，若固定切點在 validation 表現不佳，記錄這個落差，不回頭用 validation 真實標籤調區間。若用 validation 選超參／epoch，它仍是模型選擇驗證，最終泛化結論需要額外 holdout；既有 player-disjoint 設計保留作第二意見。
 
 報告同時列固定 validation batch loss、整體級別平均 loss、各級分布、四桶 score／acc／MAE／混淆矩陣，以及玩家重疊／樣本 eligibility。不因全量 means 排序成功就判定模型成功。
 
@@ -259,13 +270,13 @@ evaluation 題不參與切點搜尋。若反覆用這批 evaluation scores 選�
 
 | 待實作檔案 | 責任 | 首次驗收 |
 |---|---|---|
-| `data/board_cache.py` | codec、shard builder、manifest、續跑 | 隨機盤／提子／pass 與現有介面逐元素一致；壞 shard 不可讀 |
-| `data/cv.py` | 新增 V1 棋局切分、校準／評估玩家切分 | 每級 80,000／20,000、棋局零交集，保留舊 API |
+| `data/board_cache.py` | packed 打包／解包、shard builder、manifest、續跑 | 隨機盤／提子／pass 解包後與現有介面逐元素一致；padding bits 為零；壞 shard 不可讀 |
+| `data/cv.py` | 新增 V1 棋局切分、training 擬合題／validation 評估題 | 每級 80,000／20,000、棋局零交集，題組只取所屬 split，保留舊 API |
 | `tasks/strength/dataset.py` | sample index、global batch sampler、歷史、D4 | 不跨局、不看未來、只取指定玩家、全 epoch 不漏不重 |
 | `models/strength_resnet.py` | 完整 ResNet 與 scalar head | shape、23,748,611 參數、block 相加後無 ReLU |
 | `tasks/strength/losses.py` | 全域 means、排序 loss | 1.678268 基準、單／多卡梯度對照 |
 | `tasks/strength/train_rank_v1.py` | DDP、短測、訓練／validation、續跑 | 尾批／SyncBN、一完整 step 的續跑對照 |
-| `tasks/strength/evaluate_rank_v1.py` | 手→盤→題、切點、分桶評分 | 校準／評估玩家互斥，題內盤等權 |
+| `tasks/strength/evaluate_rank_v1.py` | 手→盤→題、training 分布／切點、分桶評分 | 僅 training 擬合，validation 固定切點，題內盤等權 |
 | `configs/strength/rank_cnn_v1.json` | paths、codec、sampler、模型、optimizer、precision | 所有隱含預設明確化，保存 resolved config |
 
 後續落地建議拆成四次可審查交付：① 快取與切分／索引；② 動態輸入＋模型／loss；③ DDP＋短測／續跑；④ 校準評估＋一 epoch 實驗。這是程式模組分工，不需要不同 agent 同時修改共用檔案。
