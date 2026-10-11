@@ -1,10 +1,13 @@
 """Behavioral checks for the SGF-to-training-plane converter."""
 
+import csv
+
 import numpy as np
 import pytest
 
 from go_aicup.data import sgf as sgflib
 from go_aicup.features.sgf_planes import moves_to_planes, sgf_to_planes
+from go_aicup.paths import DATA
 
 
 def test_coordinates_post_move_planes_and_color_channels():
@@ -133,3 +136,28 @@ def test_immediate_ko_is_rejected_but_recapture_after_passes_is_allowed():
     planes = sgf_to_planes(KO_PREFIX + ";W[];B[];W[bb])")
     assert planes[-1, 1, 1, 1] == 1
     assert planes[-1, 0, 1, 2] == 0
+
+
+def main():
+    """Print the final post-move tensor for the first D-rank training game."""
+    import torch
+
+    training_path = DATA / "training" / "train_D.csv"
+    if not training_path.is_file():
+        training_path = DATA / "raw" / "training" / "train_D.csv"
+    with training_path.open(newline="", encoding="utf-8-sig") as handle:
+        first_game = next(csv.DictReader(handle), None)
+    if first_game is None:
+        raise ValueError(f"No games found in {training_path}")
+
+    planes = sgf_to_planes(first_game["sgf_content"])
+    final_tensor = torch.from_numpy(planes[-1])
+    print(f"Source: {training_path}")
+    print(f"Game: {first_game['game_id']}, moves: {len(planes)}")
+    print(f"Final tensor: shape={tuple(final_tensor.shape)}, dtype={final_tensor.dtype}")
+    torch.set_printoptions(profile="full", linewidth=120)
+    print(final_tensor)
+
+
+if __name__ == "__main__":
+    main()
