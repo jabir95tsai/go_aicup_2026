@@ -4,7 +4,8 @@
 
 | 文件 | 內容 |
 |---|---|
-| [CLAUDE.md](CLAUDE.md) | **唯一事實來源**：規則、評分、時程、資料稽核結果、CV 設計、洩漏清單、上傳紀律、專案結構 |
+| [CLAUDE.md](CLAUDE.md) | 競賽規則、評分、時程、既有資料稽核與專案紀律；第一版棋力模型以以下計畫為準 |
+| [STRENGTH_V1_PLAN.md](STRENGTH_V1_PLAN.md) | **第一版棋力辨識實作計畫**：兩層盤面動態組合 18 層、ResNet、全域 batch 16,384、級別平均排序 loss、Nano4 DDP |
 | [RESULTS.md](RESULTS.md) | 實驗帳本，只增不刪，失敗也記 |
 | [STRATEGY.md](STRATEGY.md) / [EXECUTION_PLAN.md](EXECUTION_PLAN.md) | 決勝槓桿與 8 週計畫 |
 | [reference.md](reference.md) | 文獻與工具整理 |
@@ -13,7 +14,9 @@
 
 ## 目前進度
 
-W1 完成：SGF 稽核、1M 盤轉檔、CV 切分與合成題組、兩賽官方指標、訊號 EDA（細節見 `RESULTS.md` A-001～A-006）。下一步是兩賽的 P0 baseline。
+W1 完成：SGF 稽核、1M 盤轉檔、CV 切分與合成題組、兩賽官方指標、訊號 EDA（細節見 `RESULTS.md` A-001～A-006）。棋力辨識下一步依 [第一版計畫](STRENGTH_V1_PLAN.md) 建立 Nano4 盤面 ResNet：每級 80,000 盤 training／20,000 盤 validation，只取指定玩家落子後盤面，全域 batch 16,384，各級輸出平均後計算排序 loss。模型與訓練入口尚待實作。
+
+`features/sgf_planes.py` 現在輸出 `T×2×19×19` 的 float32 黑／白盤面；T 包含雙方所有落子與 pass。訓練讀取時才組合目前與前 7 手盤面，再加這一手的黑／白顏色層，形成 `18×19×19`，不預先存全量 18 層 tensor。只在樣本索引過濾指定玩家的手，基礎盤面仍保留雙方歷史。
 
 ## 上手
 
