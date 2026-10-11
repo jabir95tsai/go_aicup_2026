@@ -32,7 +32,7 @@
 | `data/cv.py` | metadata、同玩家同色合成題、保存切分表的模式 | 新增具名 V1 按盤切分；保留舊 player-disjoint API |
 | `metrics.py` | 四個 k 桶的官方 score、acc、MAE | 本版總分另明確取四桶等權平均；目前 `all` 是所有題直接平均，僅桶數相等時等價 |
 
-目前 `data/processed/` 沒有 move store；原始資料實際在 `data/raw/training/`，但 `preprocess.py` 的 `TRAIN_DIR` 指向 `data/training/`。正式轉檔前需把來源／目的路徑接入 config 或 CLI，不能直接假設现有預設命令會找到 CSV，也不需要搬動原始資料。
+目前 `data/processed/` 沒有 move store；原始資料實際在 `data/raw/training/`，但 `preprocess.py` 的 `TRAIN_DIR` 指向 `data/training/`。正式轉檔前需把來源／目的路徑接入 config 或 CLI，不能直接假設現有預設命令會找到 CSV，也不需要搬動原始資料。
 
 既有 parser 偏容錯；board cache 啟動前要檢查 metadata 的 `n_errors`、19 路／無 setup 等資料稽核條件。`moves_to_planes()` 只看 moves／colors，無法自行發現 SGF 的 AB／AW 等原始設定。異常棋局需帶唯一鍵明確報錯，不能靜默略過而讓 80,000／20,000 盤數失真。
 
@@ -46,7 +46,7 @@ float32 留在現有公開轉換介面；快取層處理壓縮，讀取後仍得
 | `uint8[T,2,19,19]` | 722 | 144.4 GB | 最容易驗證的磁碟參考版 |
 | `uint8[T,2,46]` 位元打包 | 92 | 18.4 GB | 每層 361 bits，分別補至 46 bytes |
 
-建議先支持 `uint8`／`packed` 兩種快取 codec，以同一批資料在 Nano4 做冷讀與熱讀短測後選正式格式。`packed` 是优先候選：每手小於 uint8 的 1/7，且整份快取較有機會留在節點的 OS page cache。配額、可用 RAM 和共享儲存吞吐量仍未知，不能保證常駐。
+建議先支援 `uint8`／`packed` 兩種快取 codec，以同一批資料在 Nano4 做冷讀與熱讀短測後選正式格式。`packed` 是優先候選：每手小於 uint8 的 1/7，且整份快取較有機會留在節點的 OS page cache。配額、可用 RAM 和共享儲存吞吐量仍未知，不能保證常駐。
 
 打包規格必須固定：按 `[channel,row,column]` 的 row-major 順序，兩層各自 `packbits(..., axis=-1, bitorder="little")`，每層最後 7 個 padding bits 為零；解包只取前 361 bits。manifest 記錄 shape、dtype、codec、bitorder、版本與來源 fingerprint。
 
@@ -102,7 +102,7 @@ worker 根據該 shard 的 lengths 預先計算 local offsets／總 ply 數，�
 - Windows 用可 pickle 的頂層函式及 `__main__` guard；worker 在自身 process 開啟 memmap，不 pickle 開啟的 store 或大型陣列。
 - 限制 pending tasks（例如 2×workers），避免提交整份 SGF／metadata 或把 RAM 用在佇列。
 - 完成順序可不同，shard ID／game range 必須固定；manifest 最終按 game range 排序。
-- shard 完整 flush、關閉 handle、shape／bytes／hash 檢查後，在同目錄原子 rename。最後才写完成標記。續跑要核對來源 fingerprint、converter／codec 版本；不能只因 `.npy` 存在就跳過。
+- shard 完整 flush、關閉 handle、shape／bytes／hash 檢查後，在同目錄原子 rename。最後才寫完成標記。續跑要核對來源 fingerprint、converter／codec 版本；不能只因 `.npy` 存在就跳過。
 - worker 失敗只重做未完成 shard；主程序禁止把缺 shard 的快取發布為可訓練資料。錯誤包含 rank、game_id、source_row 與 ply。
 
 在 Slurm 計算節點執行轉檔，CPU 數遵循實際 allocation；是否允許單獨 CPU job 目前未知，不能假設 H200 佇列提供 CPU-only 作業。轉檔不需要 torchrun，也不需要 GPU 計算。
@@ -128,7 +128,7 @@ data/processed/strength_v1/<dataset-id>/
   manifest.json
 ```
 
-兩層快取保存**所有雙方 ply**；train／valid sample index 才選 `colors[ply] == player_color`。pass 納入，不按奇偶猜顏色。rank／player_color 從 game metadata 查，無须在每個 sample 重複保存。game_index 是 store row 對應，不能把不唯一的 game_id 直接當 array index。
+兩層快取保存**所有雙方 ply**；train／valid sample index 才選 `colors[ply] == player_color`。pass 納入，不按奇偶猜顏色。rank／player_color 從 game metadata 查，無須在每個 sample 重複保存。game_index 是 store row 對應，不能把不唯一的 game_id 直接當 array index。
 
 `game:uint32 + ply:uint16` 以兩個陣列保存共 6 bytes／樣本；約 8,000 萬 training 樣本是 480 MB。載入時把 batch 的索引轉成框架需要的整數型別。寫入前檢查 game／ply 上限；未來來源超過 dtype 上限須報錯或升版。
 
@@ -171,7 +171,7 @@ Flatten(361) → Linear(361,256) → ReLU → Linear(256,1)
 
 按以上結構、BN 有 affine、Linear 有 bias 計算，共 **23,748,611 個可訓練參數**，不含 BN running buffers。forward 返回 `[B]` 或 `[B,1]` 的實數，loss 層明確統一 shape。
 
-先建模、轉 SyncBatchNorm、移至 local CUDA device，再包 DDP。正式起點是 BF16 autocast、AdamW 1e-3／weight decay 1e-4、5% steps warmup＋cosine、gradient norm clip=1；BN eps／momentum、初始化、BN／bias 是否 decay 均写入 config。首版可全部参数采用同一 weight decay，日后排除 BN／bias 若实验则单独记录，避免隐含默认改变。
+先建模、轉 SyncBatchNorm、移至 local CUDA device，再包 DDP。正式起點是 BF16 autocast、AdamW 1e-3／weight decay 1e-4、5% steps warmup＋cosine、gradient norm clip=1；BN eps／momentum、初始化、BN／bias 是否 decay 均寫入 config。首版可全部參數採用同一 weight decay；日後排除 BN／bias 若作實驗，則單獨記錄，避免隱含預設改變。
 
 顯存主要是 activation，不是權重。每卡 B=2,048 時，一個 BF16 `[B,256,19,19]` tensor 為 **0.353 GiB**；41 個同尺寸 tensor 就約 14.5 GiB，而 backward 還有其他 saved tensors、BN 暫存、gradients、cuDNN workspace 等，這不是峰值估計。H200 141GB 是否能以這組 kernel／layout 直接訓練，仍須實測。
 
@@ -206,7 +206,7 @@ S_r=\sum_d S_{d,r},\quad C_r=\sum_d C_{d,r},\quad \mu_r=S_r/C_r.
 | 全部分數加同一常數 | loss 不變 |
 | 各卡級別數量不同，部分卡缺級但全域不缺 | 全域 loss／梯度與單卡參考相同 |
 | FP32 無 BN 的極小模型 | 初始建議 atol 1e-6、rtol 1e-5；記最大絕對／相對誤差 |
-| 完整模型＋SyncBN | 比較 outputs、loss、参数 grads、BN running stats 及一步更新；另訂合理浮點容差 |
+| 完整模型＋SyncBN | 比較 outputs、loss、參數 grads、BN running stats 及一步更新；另訂合理浮點容差 |
 | BF16 | 與 FP32 參考比較誤差及有限值，不能要求逐 bit 相同 |
 
 排序 loss 對整體平移不敏感；末端 Linear bias 對這個 loss 的資料梯度應接近零。切點必須綁定 checkpoint，不能把另一 epoch 的切點直接搬過來。級別差距拉大會讓排序 loss 接近零，但個體分布仍可能重疊，所以要記標準差、分位數及四桶題目分數。
@@ -235,7 +235,7 @@ S_r=\sum_d S_{d,r},\quad C_r=\sum_d C_{d,r},\quad \mu_r=S_r/C_r.
 
 上表不含全量轉檔、shuffle、validation、寫 checkpoint 與排隊。Validation 約 2,000 萬 samples，需另外量 eval throughput。10 epochs 只是上限，不在完成短測前預支全量預算；正式先跑一 epoch。
 
-checkpoint 保存 model／BN buffers、optimizer、scheduler、global optimizer step、epoch、**最後完成 optimizer update 的 batch cursor**、per-rank RNG、permutation hash／path、split／cache hash、config、git／環境資訊。BF16 沒使用 GradScaler 時記錄 AMP 模式，不虚构 scaler state。
+checkpoint 保存 model／BN buffers、optimizer、scheduler、global optimizer step、epoch、**最後完成 optimizer update 的 batch cursor**、per-rank RNG、permutation hash／path、split／cache hash、config、git／環境資訊。BF16 沒使用 GradScaler 時記錄 AMP 模式，不虛構 scaler state。
 
 DataLoader 已預取的 index 不算已完成訓練；續跑從 update cursor 重建 loader，利用 stateless D4 重現增強。只存 seed 不夠：保留 permutation 或固定 RNG 演算法／版本並校驗 hash。精確續跑起點要求相同 world_size；換卡數視為另一 run／另驗 BN 與數值差異。
 
@@ -257,16 +257,16 @@ evaluation 題不參與切點搜尋。若反覆用這批 evaluation scores 選�
 
 ## 10. 檔案分工與交付 gate
 
-| 待實作檔案 | 責任 | 首次验收 |
+| 待實作檔案 | 責任 | 首次驗收 |
 |---|---|---|
 | `data/board_cache.py` | codec、shard builder、manifest、續跑 | 隨機盤／提子／pass 與現有介面逐元素一致；壞 shard 不可讀 |
-| `data/cv.py` | 新增 V1 棋局切分、校準／評估玩家切分 | 每級 80,000／20,000、棋局零交集，保留旧 API |
+| `data/cv.py` | 新增 V1 棋局切分、校準／評估玩家切分 | 每級 80,000／20,000、棋局零交集，保留舊 API |
 | `tasks/strength/dataset.py` | sample index、global batch sampler、歷史、D4 | 不跨局、不看未來、只取指定玩家、全 epoch 不漏不重 |
-| `models/strength_resnet.py` | 完整 ResNet 與 scalar head | shape、23,748,611 参数、block 相加後無 ReLU |
+| `models/strength_resnet.py` | 完整 ResNet 與 scalar head | shape、23,748,611 參數、block 相加後無 ReLU |
 | `tasks/strength/losses.py` | 全域 means、排序 loss | 1.678268 基準、單／多卡梯度對照 |
-| `tasks/strength/train_rank_v1.py` | DDP、短測、訓練／validation、續跑 | 尾批／SyncBN、一完整 step 的續跑对照 |
-| `tasks/strength/evaluate_rank_v1.py` | 手→盤→題、切點、分桶評分 | 校準／評估玩家互斥，题内盘等权 |
-| `configs/strength/rank_cnn_v1.json` | paths、codec、sampler、模型、optimizer、precision | 所有隱含預設显式化，保存 resolved config |
+| `tasks/strength/train_rank_v1.py` | DDP、短測、訓練／validation、續跑 | 尾批／SyncBN、一完整 step 的續跑對照 |
+| `tasks/strength/evaluate_rank_v1.py` | 手→盤→題、切點、分桶評分 | 校準／評估玩家互斥，題內盤等權 |
+| `configs/strength/rank_cnn_v1.json` | paths、codec、sampler、模型、optimizer、precision | 所有隱含預設明確化，保存 resolved config |
 
 後續落地建議拆成四次可審查交付：① 快取與切分／索引；② 動態輸入＋模型／loss；③ DDP＋短測／續跑；④ 校準評估＋一 epoch 實驗。這是程式模組分工，不需要不同 agent 同時修改共用檔案。
 

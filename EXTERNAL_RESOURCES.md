@@ -37,7 +37,6 @@
 | 工具 | 用途 | 範圍 |
 |---|---|---|
 | Claude Code（Anthropic，Claude Opus 5.5） | 程式撰寫與審查、資料稽核與 EDA 腳本、文獻調查、文件撰寫 | 全專案；所有程式由團隊審閱、執行並驗證 |
-| OpenAI Codex | 依賴相容性查核、Nano4 安裝文件與 CUDA／NCCL／DDP 環境檢查腳本 | requirements.txt、pyproject.toml、scripts/check_torch_ddp.py 與環境文件；Nano4 GPU 驗證待執行 |
 
 ## 算力環境與官方操作文件
 
@@ -46,4 +45,5 @@
 | 國網中心晶創 26（Nano4）H200 官方文件 | [系統規格](https://man.twcc.ai/@nano4-manual/SJuKzVlwbx)、[Slurm 佇列](https://man.twcc.ai/@nano4-manual/SJM_FuxDWe)、[登入與傳輸](https://man.twcc.ai/@nano4-manual/BydP-_lvZg)、[Modules](https://man.twcc.ai/@nano4-manual/BJyI6dgw-g)、[NRQ 說明](https://iservice.nchc.org.tw/nchc_service/nchc_service_qa.php?target=54)；2026-10-10 | 執行環境與作業限制回填至 CLAUDE.md §0 | 使用中（文件引用；尚未執行 HPC 作業） | 工程環境參考，非模型／資料；無分數增益數字 |
 | H200 硬體規格與 Nano4 系統登錄 | [NVIDIA H200](https://www.nvidia.com/en-us/data-center/h200/)、[TOP500 Nano4](https://www.top500.org/system/180421/)；2026-10-10 | 查核 GPU 型號與顯存規格 | 使用中（文件引用） | 硬體規格參考，非效能實測 |
 | PyTorch 官方安裝與分散式文件 | [歷史版本安裝](https://docs.pytorch.org/get-started/previous-versions/)、[Distributed](https://docs.pytorch.org/docs/2.6/distributed.html)、[torchrun](https://docs.pytorch.org/docs/2.6/elastic/run.html)；2026-10-11 | Windows／Linux CUDA 12.4 依賴來源與單節點 NCCL／DDP 環境檢查 | 使用中（文件引用與 API 使用） | 環境相容性設定，非模型增益；Nano4 尚未實測 |
+| PyTorch 2.6 DataLoader／可微 collective／SyncBN 官方文件與原始碼 | [DataLoader](https://docs.pytorch.org/docs/2.6/data.html)、[可微 all-reduce](https://raw.githubusercontent.com/pytorch/pytorch/v2.6.0/torch/distributed/nn/functional.py)、[DDP](https://github.com/pytorch/pytorch/blob/v2.6.0/torch/nn/parallel/distributed.py)、[SyncBN](https://github.com/pytorch/pytorch/blob/v2.6.0/torch/nn/modules/_functions.py)；2026-10-11 | STRENGTH_V1_IMPLEMENTATION.md：批量讀取、全域級別平均梯度尺度與尾批 BN 設計；閱讀 API／原始碼，未複製程式碼 | 使用中（設計文件引用；GPU 實作未完成） | 無模型分數或 Nano4 效能增益數字；梯度尺度待實測驗收 |
 | NVIDIA CUDA 12.4 Release Notes | [driver 相容表](https://docs.nvidia.com/cuda/archive/12.4.0/cuda-toolkit-release-notes/index.html)；2026-10-11 | 查核 Linux CUDA 12.4 driver 基準與 minor compatibility 限制 | 使用中（文件引用） | 環境參考，非效能實測 |
