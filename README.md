@@ -18,6 +18,8 @@ W1 完成：SGF 稽核、1M 盤轉檔、CV 切分與合成題組、兩賽官方�
 
 `features/sgf_planes.py` 現在輸出 `T×2×19×19` 的 float32 黑／白盤面；T 包含雙方所有落子與 pass。訓練讀取時才組合目前與前 7 手盤面，再加這一手的黑／白顏色層，形成 `18×19×19`，不預先存全量 18 層 tensor。只在樣本索引過濾指定玩家的手，基礎盤面仍保留雙方歷史。
 
+V1 的位元打包轉檔、續跑與按需解包程式已完成，使用方式見下方「棋力 V1：盤面快取與 DataLoader」。目前尚未執行官方百萬盤盤面轉檔；V1 的 train／validation 樣本索引、切分與完整訓練入口仍待實作。
+
 ## 上手
 
 使用標準版 CPython **3.11–3.13**（目前套件組合不支援 Python 3.14）；本機參考版本為 3.13.12。
@@ -65,7 +67,7 @@ python -m torch.distributed.run --standalone --nnodes=1 --nproc-per-node=2 \
 
 通過條件：所有 process 正常退出，log 的 JSON 顯示 `status: passed`、`world_size: 2`、`all_reduce_sum: 3.0`、`ddp_gradient: 1.5`。改跑 8 卡時，使用 `ddp-8gpu.log`，預期 sum 為 36.0、gradient 為 4.5；`pip-freeze.txt` 記錄包含間接依賴的實際版本。這是環境檢查；目前模型訓練入口尚未實作 DDP，後續訓練仍須包裝 `DistributedDataParallel` 並按 rank 分配資料。
 
-**資料**（不進 git）：從 [官方 Releases](https://github.com/AILAB-NDHU/aicup2026-go-dataset/releases) 下載 `aicup2026_go_training.tar.xz`，核對 SHA-256（見 CLAUDE.md 第 1 節），解壓出的 `training/` 放到 `data/training/`。11/04 發布的候選庫與測試題放 `data/raw/`。
+**資料**（不進 git）：從 [官方 Releases](https://github.com/AILAB-NDHU/aicup2026-go-dataset/releases) 下載 `aicup2026_go_training.tar.xz`，核對 SHA-256（見 CLAUDE.md 第 1 節）。目前原始 training CSV 位於 `data/raw/training/`，V1 盤面快取直接使用此路徑。以下既有 `preprocess train` 指令仍讀取 `data/training/`；使用 V1 時直接執行下一節的 `board_cache convert`，無須搬動資料或先執行舊轉檔。11/04 發布的候選庫與測試題放 `data/raw/`。
 
 **重建衍生資料**（全 CPU，依序執行，結果是確定性的，兩人重建出的檔案會逐位元相同）：
 
@@ -75,6 +77,156 @@ python -m go_aicup.data.cv                       # CV 切分 + 合成題組，�
 python -m go_aicup.features.game_stats           # EDA 用的盤面統計，約 10 秒
 python scripts/eda_report.py                     # 重產 notebooks/02_eda.md，約 2 分鐘
 ```
+
+## 棋力 V1：盤面快取與 DataLoader
+
+程式位置：[board_cache.py](src/go_aicup/data/board_cache.py) 負責轉檔、打包與解包；[dataset.py](src/go_aicup/tasks/strength/dataset.py) 提供 PyTorch DataLoader 使用的介面。下列命令在專案根目錄執行，環境先依「上手」安裝依賴與 `pip install -e .`。Windows 根目錄為 `D:\college\go_aicup_2026`；Nano4 使用自己的 checkout 路徑與 Conda `go` 環境。
+
+### 1. 轉檔與壓縮
+
+確認 `data/raw/training/` 包含 `train_D.csv`、`train_C.csv`、`train_B.csv`、`train_A.csv` 與 `train_1D.csv`～`train_6D.csv`。預設檢查每級 100,000 盤，共 1,000,000 盤；異常棋譜或盤數不符會報錯，不靜默跳過。
+
+```bash
+python -m go_aicup.data.board_cache convert
+```
+
+這個命令會實際開始全量轉檔。轉檔使用 CPU，逐批讀取 CSV，由各 worker 解析 SGF、逐盤重播並寫入自己的分片。預設每片最多 4,096 盤、不跨 rank；worker 數為可用 CPU 數與 8 的較小值，也會考慮 CPU affinity 與 `SLURM_CPUS_PER_TASK`。Nano4 請在 Slurm 分配的計算節點執行，使用單一轉檔主程序；耗時尚未全量實測。
+
+可以明確指定來源、目的與平行數；以下單行命令可用於 PowerShell 或 Bash，`--workers 8` 需要配置至少 8 個可用 CPU：
+
+```bash
+python -m go_aicup.data.board_cache convert --input-dir data/raw/training --output-dir data/processed/boards/strength_v1 --workers 8 --games-per-shard 4096
+```
+
+### 2. 資料格式與輸出位置
+
+預設輸出至 **`data/processed/boards/strength_v1/`**；本機完整路徑為 **`D:\college\go_aicup_2026\data\processed\boards\strength_v1\`**。
+
+```text
+data/processed/boards/strength_v1/
+  build.json                       # 來源／轉換程式 SHA-256、格式與分片設定
+  manifest.json                    # 全部成功後才發布的完成清單
+  games.parquet                    # game_index → shard_id、local_offset、length 等
+  shard_00000.npy                  # uint8[該片總手數, 2, 46] 打包盤面
+  shard_00000_moves.npy            # int16[該片總手數] 落點，361 表示 pass
+  shard_00000_colors.npy           # int8[該片總手數] 實際落子顏色，0 黑、1 白
+  shard_00000_games.parquet        # 該片棋局 metadata
+  shard_00000.done.json            # 該片檔案大小、shape 與 SHA-256
+  ...
+```
+
+T 為每盤雙方總手數，包含 pass，各盤 T 不同；邏輯上是一百萬個 `[T,2,19,19]`，實際以 offset／length 存入分片，沒有把所有棋局補成同一個 T。channel 0 固定黑棋、channel 1 固定白棋，每個盤面是該手落子與提子後的狀態。
+
+每層按 row-major 把 361 個 0／1 值打包成 46 bytes，固定 `bitorder="little"`，最後 7 個 padding bits 為零；因此每手兩層共 92 bytes。以 2 億手估算，打包盤面 payload 約 **18.4 GB**，另外還有 moves、colors、metadata 與暫存；實際大小依總手數而定。解包結果是 `uint8[T,2,19,19]`，值為 0／1。
+
+`games.parquet` 保留 `(rank, game_id)`、player_id、指定玩家顏色、source_row 與指定玩家手數供索引／稽核使用。`game_index` 是零起算的 metadata 列號；不可把跨級別重複的 `game_id` 當陣列索引。
+
+### 3. 中斷續跑與完整性檢查
+
+中斷後以相同來源、rank、預期盤數、分片大小與目的目錄重跑原命令即可續跑；worker 數可以調整。程式核對來源與轉換程式 SHA-256，再檢查已完成分片的檔案大小、shape 與 hash；完整分片跳過，缺失或損壞的分片重做。來源、轉換程式或分片設定改變時，請用新的 `--output-dir`，避免混用不同版本。
+
+整份成功後才會產生 `manifest.json`，讀取端要求 manifest 與各片完成標記一致。完成後可另外執行全檔 hash、padding 與顏色檢查；指定自訂快取路徑時，`verify` 也要傳入相同的 `--output-dir`：
+
+```bash
+python -m go_aicup.data.board_cache verify --output-dir data/processed/boards/strength_v1
+```
+
+成功時回報 `num_games`、`total_ply` 與 `payload_bytes`。這個檢查會讀取全部快取檔案，需要 I/O 時間；不產生未壓縮副本。
+
+### 4. Python 按需解包
+
+快取完成後即可使用下面的介面。程式只 memmap 分片並解包所需資料，不重新解析 SGF。
+
+```python
+from go_aicup.data.board_cache import BoardCache
+
+cache = BoardCache(max_open_shards=8)
+try:
+    boards = cache.game(0)                 # uint8[T, 2, 19, 19]，第 0 盤
+    first = cache.game(0, [0])             # uint8[1, 2, 19, 19]，只讀第 0 手
+    colors = cache.colors(0)              # int8[T]，實際落子顏色
+    history = cache.history(0, 0)         # uint8[8, 2, 19, 19]
+    inputs = cache.training_batch([0], [0])  # uint8[1, 18, 19, 19]
+finally:
+    cache.close()
+```
+
+`history()` 依目前手、前一手到前七手排序，包含雙方每一手；不足的歷史補零，禁止跨棋局。`training_batch()` 將這 8 個兩層盤面展成 channel 0～15，再加當手實際黑／白顏色的兩個全盤 channel 16／17。這個底層介面可讀任意合法 ply；下面的 Dataset 另檢查樣本是否為指定玩家落子。
+
+已有記憶體陣列時，可以直接使用 codec：
+
+```python
+from go_aicup.data.board_cache import pack_planes, unpack_planes
+
+packed = pack_planes(boards)       # uint8[T, 2, 46]
+restored = unpack_planes(packed)   # uint8[T, 2, 19, 19]
+```
+
+### 5. 訓練時的 DataLoader
+
+`PackedBoardDataset` 接收兩個等長的一維整數樣本索引：`game_indices` 與 `plies`。每一組 `(game_index, ply)` 必須是指定玩家實際落子後的盤面，包括指定玩家的 pass；不能只按手數奇偶選取。Dataset 遇到對手 ply 會明確報錯。
+
+以下示範在快取完成後取第 0 盤的指定玩家盤面，用於確認解包與 loader 介面。**這是單盤讀取範例，沒有建立正式 train／validation 切分，也沒有啟動模型訓練。** 將程式存成獨立 `.py` 後執行；Windows 多程序需要保留 `__main__` guard。
+
+```python
+import numpy as np
+import torch
+from torch.utils.data import DataLoader
+
+from go_aicup.data.board_cache import BoardCache
+from go_aicup.tasks.strength.dataset import PackedBoardDataset
+
+
+def main():
+    cache = BoardCache()
+    try:
+        game_index = 0
+        player_plies = np.flatnonzero(
+            cache.colors(game_index) == cache.player_colors[game_index]
+        ).astype(np.uint16)
+    finally:
+        cache.close()
+
+    game_indices = np.full(len(player_plies), game_index, dtype=np.uint32)
+    dataset = PackedBoardDataset(game_indices, player_plies)
+    loader = DataLoader(
+        dataset, batch_size=32, num_workers=2,
+        pin_memory=True, persistent_workers=True,
+    )
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    for batch in loader:
+        # CPU 保持 uint8；傳到裝置後再轉成模型需要的 dtype。
+        inputs = batch["planes"].to(device, non_blocking=True).float()
+        print(inputs.shape, batch["rank_id"].shape)
+        # inputs: [B, 18, 19, 19]；rank_id: [B]，D=0 ... 6D=9。
+    dataset.close()
+
+
+if __name__ == "__main__":
+    main()
+```
+
+Dataset 回傳 `planes`、`rank_id`、`game_index` 與 `ply`；只有 `planes` 作為模型輸入。批次取樣按 shard 分組讀取，再恢復原樣本順序；各 worker 自行開啟 memmap，預設最多保留 8 個 shard handle 組。
+
+正式的大型樣本索引建議傳入 `.npy` 路徑，讓 worker 按需 memmap，避免 Windows spawn 複製完整索引。例如，**在另行產生以下兩個檔案之後**：
+
+```python
+dataset = PackedBoardDataset(
+    "data/processed/strength_v1/YOUR_DATASET_ID/train_game.npy",
+    "data/processed/strength_v1/YOUR_DATASET_ID/train_ply.npy",
+    directory="data/processed/boards/strength_v1",
+)
+```
+
+`YOUR_DATASET_ID` 換成實際資料版本，`train_game.npy` 建議為 `uint32[N]`，`train_ply.npy` 為 `uint16[N]`。**這些索引檔不由 `board_cache convert` 產生，目前尚未實作 V1 的正式索引生成器。** 按級別 80,000／20,000 盤切分、只選指定玩家 ply、全域 shuffle 與 D4 仍屬後續工作；上述 `batch_size=32` 是讀取範例，不代表 V1 的正式全域 batch 設定。若改成 `num_workers=0`，同時移除 `persistent_workers=True`。
+
+### 6. 已完成的驗證
+
+```bash
+python -m pytest tests/test_board_cache.py tests/test_sgf_planes.py -q
+```
+
+這些測試使用合成棋譜，涵蓋打包／解包逐元素一致、little bit order、padding、提子、pass、實際顏色、歷史不跨局、分片續跑與損壞檔案檢查。先前完整測試結果為 **66 passed、1 skipped**；略過項是目前 Python 環境缺少 torch 的實際 DataLoader 多程序測試。沒有改用另一環境補驗，也尚未執行官方全量轉檔或 Nano4 效能驗證。本次 README 更新不會執行上述轉檔命令。
 
 ## 結構
 

@@ -123,19 +123,11 @@ def moves_to_planes(moves: np.ndarray, colors: np.ndarray) -> np.ndarray:
     return out.reshape(len(moves), N_CHANNELS, BOARD_SIZE, BOARD_SIZE)
 
 
-def sgf_to_planes(sgf_content: str) -> np.ndarray:
-    """Parse one SGF string and return (T, 2, 19, 19) float32 board planes.
+def parse_plane_game(sgf_content: str) -> sgflib.Game:
+    """Use the sole parser and validate an empty-board, linear 19x19 game.
 
-    Each timestep contains the post-move black (channel 0) and white
-    (channel 1) stone positions. T includes passes.
-
-    Supports the dataset's single linear game: optional root metadata and
-    exactly one B/W move per subsequent node (a move at the root is allowed).
-    An omitted SZ defaults to 19. Malformed SGF, variations, collections,
-    setup/edit properties (AB/AW/AE), and non-19 boards are rejected rather
-    than silently flattened or replayed from an incorrect starting position.
-    This wrapper reuses the project's sole SGF parser and never reads/writes
-    files; callers may read their own .sgf file and pass its text here.
+    Shared by the in-memory converter and the disk-cache builder, so cache
+    preparation can retain actual move colors without parsing the SGF twice.
     """
     game = sgflib.parse(sgf_content)
     if not game.ok:
@@ -161,4 +153,15 @@ def sgf_to_planes(sgf_content: str) -> np.ndarray:
     skeleton = re.sub(r"\s+", "", skeleton)
     if re.fullmatch(r"\(;[BW]?(?:;[BW])*\)", skeleton) is None:
         raise ValueError("SGF must be one linear game with one move per node")
+    return game
+
+
+def sgf_to_planes(sgf_content: str) -> np.ndarray:
+    """Return post-move black/white float32 planes shaped (T, 2, 19, 19).
+
+    T includes passes. Optional root metadata and a root move are supported;
+    an omitted SZ defaults to 19. Invalid games, variations, collections,
+    setup/edit properties and non-19 boards raise ValueError. No disk I/O.
+    """
+    game = parse_plane_game(sgf_content)
     return moves_to_planes(game.moves, game.colors)
