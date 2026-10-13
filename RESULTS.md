@@ -209,3 +209,24 @@ player-adversarial 頭（gradient reversal）或「每批次每位玩家只取�
 - 使用者確認帳號可使用 H200 `dev`、`8gpus`；官方規格、佇列限制與來源集中於 `CLAUDE.md` §0，文件引用登記於 `EXTERNAL_RESOURCES.md`。
 - 已回填 GPU／節點規格、Slurm job 時限、CPU／RAM 限制、登入／傳輸與 Modules 操作。
 - 同步更新 `EXECUTION_PLAN.md` 待辦與 README 入口；本紀錄補完 A-008 的 GPU 型號／排程器未知項，舊紀錄保留。帳號額度、軟體版本、實測吞吐量仍未知；算力預算仍待短測重估。
+
+### A-010 Strength V1 程式交付（2026-10-12，未驗證）
+
+**性質：** 依已確認的 `STRENGTH_V1_PLAN.md`／`STRENGTH_V1_IMPLEMENTATION.md` 撰寫程式。使用者指示「先寫程式不驗證」；本次沒有執行新程式、測試、正式轉檔或訓練。
+
+- ResNet：256 channels、20 residual blocks、18 層輸入、單一實數輸出；相加後無 ReLU。23,748,611 是設計參數數量，未於本次執行計數驗證。
+- 直接使用既有 `board_cache.py` 的 `uint8[total_ply,2,46]` 分片、實際 colors 與 game metadata；不變更快取格式、不另存全量 18 層。
+- 新增 V1 按棋局 80,000／20,000 每級切分與同玩家同色四桶題組；指定玩家 ply 索引、全域 uint32 排列、stateless D4、尾批有效 mask、FP32 跨卡 sum/count 與排序 loss。
+- 新增 DDP／SyncBN／BF16、AdamW、warmup／cosine、定時與 epoch checkpoint、各卡 RNG／資料指紋與續跑入口；預設先跑 1 epoch。未執行單／多卡梯度、SyncBN 尾批、續跑或顯存驗收。
+- 校準只用固定 training 題組的唯一棋局，以凍結模型推論；手→盤→題等權聚合，用四桶等權官方 score 擬合九個有序切點，validation 固定切點評估。切點綁定 checkpoint SHA-256。
+
+| 指標 | k=5 | k=10 | k=15 | k=20 |
+|---|---|---|---|---|
+| validation 官方 score／accuracy／MAE | 未知 | 未知 | 未知 | 未知 |
+| 預期效能增益 | 未知 | 未知 | 未知 | 未知 |
+
+本次訓練 updates=0、測試執行=0、新增模型權重=0；沒有提交檔、LB 預測或上傳。正式盤面數、玩家重疊率、GPU 記憶體與 GPU 小時仍未知。
+
+**程式／設定輸出：** `src/go_aicup/models/strength_resnet.py`；`src/go_aicup/tasks/strength/{dataset,prepare_rank_v1,losses,runtime,train_rank_v1,evaluate_rank_v1}.py`；`src/go_aicup/data/cv.py`；`configs/strength/rank_cnn_v1.json`。操作文件更新於 `README.md`，外部資源登記於 `EXTERNAL_RESOURCES.md`。
+
+**日後執行才產生：** `data/processed/cv/strength_v1_seed2026/`、`data/processed/strength_v1/seed2026/`、`outputs/rank_cnn_v1_seed2026/`；這些正式 V1 索引／權重／分數本次未產生。本機 run 輸出完整路徑為 `D:\college\go_aicup_2026\outputs\rank_cnn_v1_seed2026\`。

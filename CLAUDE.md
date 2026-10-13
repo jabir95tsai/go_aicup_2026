@@ -89,7 +89,9 @@ H200 佇列限制**每張 GPU 最多 12 CPU 核心、200GB 主記憶體**；200G
 
 **仍未知：** 專案 account／QoS、剩餘 GPU 小時、RQ／NRQ 身分、儲存配額、實際 driver／CUDA／PyTorch／NCCL 版本與排隊時間。晶創 26 另有 GB200／Arm 資源；本專案目前的 HPC 支援範圍限定上述 H200 佇列。
 
-**依賴安裝基準（2026-10-11）：** 本機 Windows 與 Nano4 Linux x86_64 共用 `requirements.txt` 的直接依賴 pins，使用標準 CPython 3.11–3.13、`torch==2.6.0+cu124` 與官方 CUDA 12.4 額外索引。Linux CUDA wheel 的 NCCL 依賴由 pip 安裝；系統 module 不必恰好是 CUDA 12.4，但 driver 必須相容。Nano4 的 Conda **`go`** 環境已建置（2026-10-11 使用者確認）；上述依賴 pins 是否已完整安裝、實際套件版本與多卡測試結果仍待驗證。安裝、driver／glibc 檢查與 `scripts/check_torch_ddp.py` 的 1／2／8 卡驗證方式見 [README 的 Nano4 段落](README.md#nano4-linux單節點多卡)；環境紀錄放 `outputs/rank_env_nano4/`。目前沒有 DDP 模型訓練入口，環境通過不代表訓練程式已支援多卡。
+**依賴安裝基準（2026-10-11）：** 本機 Windows 與 Nano4 Linux x86_64 共用 `requirements.txt` 的直接依賴 pins，使用標準 CPython 3.11–3.13、`torch==2.6.0+cu124` 與官方 CUDA 12.4 額外索引。Linux CUDA wheel 的 NCCL 依賴由 pip 安裝；系統 module 不必恰好是 CUDA 12.4，但 driver 必須相容。Nano4 的 Conda **`go`** 環境已建置（2026-10-11 使用者確認）；上述依賴 pins 是否已完整安裝、實際套件版本與多卡測試結果仍待驗證。安裝、driver／glibc 檢查與 `scripts/check_torch_ddp.py` 的 1／2／8 卡驗證方式見 [README 的 Nano4 段落](README.md#nano4-linux單節點多卡)；環境紀錄放 `outputs/rank_env_nano4/`。2026-10-12 已依確認的 V1 計畫撰寫 DDP 模型訓練入口；使用者要求先寫程式不驗證，因此單／多卡 loss 與梯度、SyncBN、尾批及續跑皆尚未驗收，環境通過不代表訓練程式通過。
+
+**棋力 V1 已確認例外與程式狀態（2026-10-12）：** 第一版依 [STRENGTH_V1_PLAN.md](STRENGTH_V1_PLAN.md) 與 [STRENGTH_V1_IMPLEMENTATION.md](STRENGTH_V1_IMPLEMENTATION.md) 使用固定黑／白 18 層歷史輸入、256-channel／20-block scalar ResNet、全域級別平均排序 loss、每級按棋局 80,000／20,000 切分與 training-only 切點校準；本檔以下我方／對方、softmax 與 player-disjoint 設定保留為其他路線規範，不取代本版已確認設定。V1 模型、DataLoader、索引、loss、DDP／checkpoint 及評估程式已撰寫；本次未執行驗證、全量資料處理或訓練，未產生權重、索引或分數。操作與路徑見 [README.md](README.md#棋力-v1資料準備訓練與評估)，後續驗收仍依兩份 V1 計畫執行。
 
 ### 仍待確認 ⏳
 

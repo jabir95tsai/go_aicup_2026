@@ -1,6 +1,6 @@
 # 第一版棋力辨識計畫：盤面 ResNet 與級別平均排序 loss
 
-更新日期：2026-10-11。狀態：已確認訓練方案，模型與訓練入口尚待實作。
+更新日期：2026-10-12。狀態：已確認訓練方案；模型、DataLoader、切分／索引、loss、DDP 訓練與校準評估程式已撰寫，依使用者要求尚未執行驗證。命令與實際程式路徑見 [README.md](README.md#棋力-v1資料準備訓練與評估)。
 
 本文件記錄本次討論確認的第一版棋力辨識方案。第一版的架構、資料切分、輸入與訓練目標以本文件為準；舊文件中的 Transformer、10-way softmax 與 player-disjoint CV 路線不作為這一版的實作規格。
 
@@ -172,7 +172,7 @@ Validation 固定樣本順序，使用 eval 模式、凍結 BN 統計，不更�
 
 ## 9. 檔案與輸出位置
 
-既有 [sgf_planes.py](src/go_aicup/features/sgf_planes.py) 提供兩層盤面；[test_sgf_planes.py](tests/test_sgf_planes.py) 驗證此介面。以下是待實作的檔案規劃，不代表目前已存在：
+既有 [sgf_planes.py](src/go_aicup/features/sgf_planes.py) 提供兩層盤面；[test_sgf_planes.py](tests/test_sgf_planes.py) 驗證此介面。以下程式已於 2026-10-12 撰寫，但未執行；新測試檔列為後續驗收工作，不代表已有測試結果：
 
 | 路徑 | 用途 |
 |---|---|

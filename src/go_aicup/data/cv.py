@@ -1,7 +1,8 @@
 """The only place splits and synthetic questions are made (CLAUDE.md section 5).
 
-Group key everywhere is `player_id`. Every generator asserts its own
-disjointness invariant before returning.
+The original generators use player-disjoint splits. Strength V1 explicitly
+uses the approved per-rank game split; its separate API records player
+overlap and preserves game disjointness instead (STRENGTH_V1_PLAN.md).
 
 Competition 2 (rank)
     `make_rank_folds`: players -> fold 0..4, or -1 for a fixed holdout
@@ -68,6 +69,83 @@ def player_table(meta: pd.DataFrame) -> pd.DataFrame:
 # --------------------------------------------------------------------------
 # competition 2
 # --------------------------------------------------------------------------
+
+def make_strength_v1_split(meta: pd.DataFrame, seed: int = SEED, *,
+                           expected_games_per_rank: int = 100_000,
+                           train_games_per_rank: int = 80_000) -> pd.DataFrame:
+    """Fixed game-level split; unique key is (rank, game_id), never game_id.
+
+    Smaller counts must be explicitly supplied for development data. This
+    function deliberately does not apply the legacy player-disjoint policy.
+    """
+    required = {"game_index", "rank", "rank_id", "game_id", "player_id", "color"}
+    if not required.issubset(meta.columns):
+        raise ValueError(f"missing metadata columns: {sorted(required - set(meta.columns))}")
+    if not 0 < train_games_per_rank < expected_games_per_rank:
+        raise ValueError("train count must be between zero and expected count")
+    if meta.duplicated(["rank", "game_id"]).any() or not meta["game_index"].is_unique:
+        raise ValueError("duplicate game keys or game_index")
+    if set(meta["rank_id"].astype(int)) != set(range(10)):
+        raise ValueError("Strength V1 requires all ten ranks")
+    if (meta.groupby("player_id", observed=True)["rank_id"].nunique() > 1).any():
+        raise ValueError("a player has multiple ranks")
+    table = meta.copy().sort_values("game_index").reset_index(drop=True)
+    split = np.full(len(table), "valid", dtype="U5")
+    rng = np.random.default_rng(seed)
+    for rank in range(10):
+        rows = np.flatnonzero(table["rank_id"].to_numpy() == rank)
+        if len(rows) != expected_games_per_rank:
+            raise ValueError(f"rank {rank}: expected {expected_games_per_rank} games, found {len(rows)}")
+        split[rng.permutation(rows)[:train_games_per_rank]] = "train"
+    table["split"] = split
+    train = set(table.loc[table["split"] == "train", "game_index"])
+    valid = set(table.loc[table["split"] == "valid", "game_index"])
+    assert not train.intersection(valid), "game overlap between V1 splits"
+    return table
+
+
+def strength_v1_overlap(table: pd.DataFrame) -> dict:
+    train = set(table.loc[table["split"] == "train", "player_id"].astype(str))
+    valid = set(table.loc[table["split"] == "valid", "player_id"].astype(str))
+    overlap = len(train & valid)
+    return {"train_players": len(train), "valid_players": len(valid),
+            "shared_players": overlap,
+            "valid_player_overlap_fraction": overlap / len(valid) if valid else 0.0}
+
+
+def make_strength_v1_questions(table: pd.DataFrame, split: str,
+                               n_questions: int = 10_000,
+                               seed: int = SEED) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Same-player/color questions from one game split, plus eligibility.
+
+    Each k/rank cell has the same number of questions. No repeated games
+    within a question; missing eligibility is an explicit error.
+    """
+    if split not in ("train", "valid") or n_questions < 40 or n_questions % 40:
+        raise ValueError("split must be train/valid and n_questions a positive multiple of 40")
+    subset = table.loc[table["split"] == split].set_index("game_index", drop=False)
+    eligibility = []
+    for rank in range(10):
+        ranked = subset.loc[subset["rank_id"] == rank]
+        counts = ranked.groupby(["player_id", "color"], observed=True).size()
+        for k in K_BUCKETS:
+            eligible = counts[counts >= k]
+            eligibility.append({"split": split, "rank_id": rank, "k": k,
+                                "player_color_groups": len(counts),
+                                "eligible_groups": len(eligible),
+                                "eligible_players": len({key[0] for key in eligible.index})})
+            if eligible.empty:
+                raise ValueError(f"{split}: no eligible players for rank={rank}, k={k}")
+    questions = make_rank_questions(subset, subset["player_id"].unique(),
+                                     n_questions, seed=seed, balance_rank=True)
+    allowed = set(subset.index)
+    for row in questions.itertuples(index=False):
+        games = np.asarray(row.games)
+        chosen = subset.loc[games]
+        assert len(np.unique(games)) == row.k and set(games).issubset(allowed)
+        assert chosen["player_id"].nunique() == chosen["color"].nunique() == 1
+        assert (chosen["rank_id"] == row.rank_id).all()
+    return questions, pd.DataFrame(eligibility)
 
 def make_rank_folds(meta: pd.DataFrame, seed: int = SEED) -> pd.DataFrame:
     players = player_table(meta)
