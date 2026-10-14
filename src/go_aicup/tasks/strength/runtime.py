@@ -1,38 +1,17 @@
-"""Shared V1 configuration and atomic artifact utilities; no import-time I/O."""
+"""V1 configuration and runtime setup; no import-time I/O."""
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from datetime import timedelta
 from pathlib import Path
 
 from go_aicup.paths import ROOT
+from go_aicup.artifacts import file_hash, object_hash, write_json
 
 
 DEFAULT_CONFIG = ROOT / "configs" / "strength" / "rank_cnn_v1.json"
-
-
-def file_hash(path: Path) -> str:
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as handle:
-        for block in iter(lambda: handle.read(4 * 1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def object_hash(value) -> str:
-    return hashlib.sha256(json.dumps(value, sort_keys=True, allow_nan=False).encode()).hexdigest()
-
-
-def write_json(path: Path, value) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + ".tmp")
-    temporary.write_text(json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n",
-                         encoding="utf-8")
-    os.replace(temporary, path)
 
 
 def read_config(path: Path = DEFAULT_CONFIG) -> dict:

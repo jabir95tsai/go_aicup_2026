@@ -15,9 +15,9 @@ from go_aicup.tasks.strength.dataset import PackedBoardDataset
 
 
 GAMES = [
-    "(;SZ[19];B[ba];W[aa];B[pp];W[qq];B[ab];W[];B[aa])",
-    "(;SZ[19];W[pd];W[];B[tt];W[dp])",
-    "(;SZ[19];B[ss];W[aa];B[])",
+    "(;SZ[19];B[ba];W[aa];B[pp];W[qq];B[ab];W[pd];B[aa])",
+    "(;SZ[19];B[pd];W[dp];B[pp];W[dd])",
+    "(;SZ[19];B[ss];W[aa];B[dd])",
 ]
 
 
@@ -58,7 +58,7 @@ def test_codec_binary_layout_and_batch_roundtrip():
     assert unpack_planes(np.empty((0, 2, 46), np.uint8)).shape == (0, 2, 19, 19)
 
 
-def test_codec_rejects_wrong_values_shapes_and_padding():
+def test_codec_rejects_wrong_values_shapes_and_ignores_padding():
     with pytest.raises(ValueError):
         pack_planes(np.full((1, 2, 19, 19), 0.5))
     with pytest.raises(ValueError):
@@ -67,8 +67,7 @@ def test_codec_rejects_wrong_values_shapes_and_padding():
         unpack_planes(np.zeros((2, 46), np.float32))
     corrupt = np.zeros((2, 46), np.uint8)
     corrupt[0, -1] = 2
-    with pytest.raises(ValueError, match="padding"):
-        unpack_planes(corrupt)
+    np.testing.assert_array_equal(unpack_planes(corrupt), np.zeros((2, 19, 19), np.uint8))
 
 
 def test_sharded_game_decompression_colors_and_lru(synthetic_cache):
@@ -84,13 +83,15 @@ def test_sharded_game_decompression_colors_and_lru(synthetic_cache):
         np.testing.assert_array_equal(decoded, expected)
         np.testing.assert_array_equal(cache.game(index, [len(expected) - 1, 0]), expected[[-1, 0]])
         assert len(cache._open) <= 1
-    np.testing.assert_array_equal(cache.colors(1), [1, 1, 0, 1])
+    np.testing.assert_array_equal(cache.colors(1), [0, 1, 0, 1])
     # Owned results survive eviction and closing the mapped file.
     copy = cache.packed(0)
     cache.game(5)
     cache.close()
     np.testing.assert_array_equal(unpack_planes(copy), sgf_to_planes(GAMES[0]))
-    assert verify_cache(output)["payload_bytes"] == 28 * 92
+    verified = verify_cache(output)
+    assert verified["payload_bytes"] == 28 * 92
+    assert verified["sampled_games"] == 4
 
 
 def test_history_batch_order_boundaries_and_actual_color(synthetic_cache):
@@ -117,16 +118,16 @@ def test_history_batch_order_boundaries_and_actual_color(synthetic_cache):
     cache.close()
 
 
-def test_dataset_selected_player_pass_and_pickle(synthetic_cache, tmp_path):
+def test_dataset_selected_player_and_pickle(synthetic_cache, tmp_path):
     _, output = synthetic_cache
     game_file, ply_file = tmp_path / "games.npy", tmp_path / "plies.npy"
-    # W pass in game 1 and B pass in game 2 must both be included.
+    # Select both white and black player plies.
     np.save(game_file, np.array([1, 2, 0, 5], np.uint32))
     np.save(ply_file, np.array([1, 2, 4, 0], np.uint16))
     dataset = PackedBoardDataset(game_file, ply_file, output, max_open_shards=1)
     batch = dataset.__getitems__([3, 0, 2, 1])
     assert [row["game_index"] for row in batch] == [5, 1, 0, 2]
-    assert batch[1]["planes"][17].all()  # actual W despite odd/even assumptions
+    assert batch[1]["planes"][17].all()
     restored = pickle.loads(pickle.dumps(dataset))
     np.testing.assert_array_equal(restored[0]["planes"], dataset[0]["planes"])
     with pytest.raises(ValueError, match="opponent"):
@@ -185,8 +186,8 @@ def test_source_or_config_changes_invalidate_resume(synthetic_cache):
 
 
 @pytest.mark.parametrize("games, expected, reason", [
-    (["(;SZ[19]AB[aa];B[bb])"], 1, "setup"),
-    (["(;SZ[19];B[aa];W[aa])"], 1, "move 2"),
+    (["(;SZ[19]AB[aa];B[bb])"], 1, "invalid SGF"),
+    (["(;SZ[19];B[zz])"], 1, "invalid SGF"),
     (GAMES, 4, "expected 4"),
 ])
 def test_bad_games_and_counts_never_publish_manifest(tmp_path, games, expected, reason):

@@ -3,7 +3,7 @@
 Every downstream job reads the store this script writes; nothing else parses
 SGF during training. Layout of a store `<name>` under `data/processed/`:
 
-    <name>_moves.npy    int16[N_MOVES]  point index 0..360, PASS = 361
+    <name>_moves.npy    int16[N_MOVES]  point index 0..360
     <name>_colors.npy   int8[N_MOVES]   0 = black, 1 = white (who played it)
     <name>_meta.parquet one row per game, row i <-> game i; columns include
                         `offset`, `length` (slice into the flat arrays)
@@ -79,6 +79,8 @@ def _parse_batch(contents: list[str]):
     hashes = np.zeros(len(contents), dtype=np.int64)
     for i, content in enumerate(contents):
         game = sgflib.parse(content)
+        if not game.ok:
+            raise ValueError(f"batch game {i}: {'; '.join(game.errors)}")
         moves.append(game.moves)
         colors.append(game.colors)
         lengths[i] = game.n_moves

@@ -55,7 +55,7 @@ def configure_torch(config: dict) -> None:
 
 
 def code_fingerprints() -> dict:
-    names = ("models/strength_resnet.py", "tasks/strength/dataset.py",
+    names = ("artifacts.py", "models/strength_resnet.py", "tasks/strength/dataset.py",
              "tasks/strength/losses.py", "tasks/strength/train_rank_v1.py",
              "tasks/strength/evaluate_rank_v1.py", "tasks/strength/runtime.py",
              "data/board_cache.py", "data/cv.py")

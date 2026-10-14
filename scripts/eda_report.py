@@ -157,7 +157,7 @@ def canonical_d4(prefix: np.ndarray, key_plies: int = 6) -> np.ndarray:
     for t in range(8):
         mapped = tables[t][prefix[:, :key_plies]].astype(np.int64)
         for j in range(key_plies):
-            keys[t] = keys[t] * 362 + mapped[:, j]
+            keys[t] = keys[t] * N_POINTS + mapped[:, j]
     best = keys.argmin(axis=0)
     out = np.empty_like(prefix)
     for t in range(8):
@@ -473,8 +473,6 @@ def _spatial_counts(moves, offsets, lengths, player_color, rank, phase_edges, ou
         r = rank[g]
         for i in range(lengths[g]):
             p = moves[off + i]
-            if p >= 361:
-                continue
             me = 1 if (i & 1) == player_color[g] else 0
             ph = 0
             if i >= phase_edges[2]:
@@ -578,11 +576,11 @@ def section_opening(d: Data) -> str:
         m = (d.rank == r) & black
         first = d.prefix[m, 0]
         first_d4 = d.prefix_d4[m, 0]
-        two = d.prefix_d4[m, 0].astype(np.int64) * 362 + d.prefix_d4[m, 2]
+        two = d.prefix_d4[m, 0].astype(np.int64) * N_POINTS + d.prefix_d4[m, 2]
         rows.append({
             "rank": RANKS[r],
-            "H(第一手) bits": entropy_bits(np.bincount(first, minlength=362)),
-            "H(第一手, D4) bits": entropy_bits(np.bincount(first_d4, minlength=362)),
+            "H(第一手) bits": entropy_bits(np.bincount(first, minlength=N_POINTS)),
+            "H(第一手, D4) bits": entropy_bits(np.bincount(first_d4, minlength=N_POINTS)),
             "H(黑前兩手, D4) bits": entropy_bits(np.unique(two, return_counts=True)[1]),
             "星位/小目佔比(D4)": np.isin(first_d4, star_komoku_points()).mean(),
             "開局唯一化深度 中位數": np.median(depth_d4[d.rank == r]),
@@ -639,10 +637,10 @@ def nb_opening_scores(prefix: np.ndarray, gallery_games: list[np.ndarray],
     """Per-slot categorical naive Bayes; (n_questions, n_candidates) summed log-likelihoods."""
     n_cand = len(gallery_games)
     n_slot = len(plies)
-    logp = np.zeros((n_cand, n_slot, 362), np.float32)
+    logp = np.zeros((n_cand, n_slot, N_POINTS), np.float32)
     for i, games in enumerate(gallery_games):
         for j, ply in enumerate(plies):
-            cnt = np.bincount(prefix[games, ply], minlength=362).astype(np.float64)
+            cnt = np.bincount(prefix[games, ply], minlength=N_POINTS).astype(np.float64)
             logp[i, j] = np.log((cnt + alpha * pop[j]) / (len(games) + alpha))
     scores = np.zeros((len(query_games), n_cand), np.float32)
     for q, games in enumerate(query_games):
@@ -689,7 +687,7 @@ def section_fingerprint(d: Data) -> str:
         outside = black & ~np.isin(d.pid, cand)
         for name, (kind, plies) in variants.items():
             prefix = d.prefix if kind == "raw" else d.prefix_d4
-            pop = np.stack([np.bincount(prefix[outside, p], minlength=362) for p in plies])
+            pop = np.stack([np.bincount(prefix[outside, p], minlength=N_POINTS) for p in plies])
             pop = (pop + 1) / (pop + 1).sum(axis=1, keepdims=True)
             scores = nb_opening_scores(prefix, gal_games, qry_games, plies, pop)
             ranked = cand[np.argsort(-scores, axis=1)[:, :5]]

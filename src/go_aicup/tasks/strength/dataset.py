@@ -1,7 +1,7 @@
 """DataLoader adapter for on-demand packed Strength V1 board decompression.
 
 Pass sample game/ply indices selected by the caller (only the labelled
-player's actual moves, including passes). CV splits are made only by data.cv.
+player's moves). CV splits are made only by data.cv.
 This module also supplies explicit global batch boundaries, disk-backed
 permutations and stateless D4. It never reads raw CSV/SGF.
 
@@ -29,7 +29,8 @@ from pathlib import Path
 
 import numpy as np
 
-from go_aicup.data.board_cache import BoardCache, DEFAULT_OUTPUT, _close_mmap
+from go_aicup.data.board_cache import BoardCache, DEFAULT_OUTPUT, _close_mmap, assemble_inputs
+from go_aicup.artifacts import file_hash, write_json
 
 
 def _open_index(value):
@@ -109,10 +110,7 @@ class PackedBoardDataset:
         histories, colors = self._cache.history_batch(games, plies)
         if np.any(colors != self._cache.player_colors[games]):
             raise ValueError("sample index contains an opponent ply")
-        inputs = np.empty((len(samples), 18, 19, 19), np.uint8)
-        inputs[:, :16] = histories.reshape(len(samples), 16, 19, 19)
-        inputs[:, 16] = (colors == 0)[:, None, None]
-        inputs[:, 17] = (colors == 1)[:, None, None]
+        inputs = assemble_inputs(histories, colors)
         if self.augment:
             for i, (sample, epoch, _) in enumerate(tasks):
                 transform = d4_id(self.seed, int(epoch), int(sample))
@@ -148,7 +146,6 @@ def create_permutation(directory: Path, length: int, seed: int, epoch: int) -> P
     Call on process zero, then barrier before readers open the result. No
     Python list containing the entire dataset is materialized.
     """
-    from go_aicup.tasks.strength.runtime import file_hash, write_json
     import json
 
     if length < 1 or length > np.iinfo(np.uint32).max:

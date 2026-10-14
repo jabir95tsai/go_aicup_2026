@@ -16,7 +16,7 @@
 
 W1 完成：SGF 稽核、1M 盤轉檔、CV 切分與合成題組、兩賽官方指標、訊號 EDA（細節見 `RESULTS.md` A-001～A-006）。2026-10-12 已依 [第一版計畫](STRENGTH_V1_PLAN.md) 撰寫 Nano4 盤面 ResNet、資料索引／DataLoader、全域級別平均排序 loss、DDP 訓練／續跑與 training-only 切點評估。**依使用者要求，本次只寫程式，未執行任何新程式或測試；正確性、顯存、吞吐與分數尚未驗證。**
 
-`features/sgf_planes.py` 現在輸出 `T×2×19×19` 的 float32 黑／白盤面；T 包含雙方所有落子與 pass。訓練讀取時才組合目前與前 7 手盤面，再加這一手的黑／白顏色層，形成 `18×19×19`，不預先存全量 18 層 tensor。只在樣本索引過濾指定玩家的手，基礎盤面仍保留雙方歷史。
+`features/sgf_planes.py` 輸出 `T×2×19×19` 的 float32 黑／白盤面；T 為雙方總落子數。唯一 parser 接收 `(;SZ[19];B[點位];W[點位];...)` 的線性棋譜，落點為 0～360，不支援 pass、setup 或其他 SGF 格式。訓練讀取時才組合目前與前 7 手盤面，再加這一手的黑／白顏色層，形成 `18×19×19`，不預先存全量 18 層 tensor。只在樣本索引過濾指定玩家的手，基礎盤面仍保留雙方歷史。
 
 V1 的位元打包轉檔、續跑與按需解包程式已完成，使用方式見下方「棋力 V1：盤面快取與 DataLoader」。目前尚未執行官方百萬盤盤面轉檔；本次也沒有產生正式 train／validation 索引或權重。新程式的執行方式見「棋力 V1：資料準備、訓練與評估」。
 
@@ -108,14 +108,14 @@ data/processed/boards/strength_v1/
   manifest.json                    # 全部成功後才發布的完成清單
   games.parquet                    # game_index → shard_id、local_offset、length 等
   shard_00000.npy                  # uint8[該片總手數, 2, 46] 打包盤面
-  shard_00000_moves.npy            # int16[該片總手數] 落點，361 表示 pass
+  shard_00000_moves.npy            # int16[該片總手數] 落點 0～360
   shard_00000_colors.npy           # int8[該片總手數] 實際落子顏色，0 黑、1 白
   shard_00000_games.parquet        # 該片棋局 metadata
   shard_00000.done.json            # 該片檔案大小、shape 與 SHA-256
   ...
 ```
 
-T 為每盤雙方總手數，包含 pass，各盤 T 不同；邏輯上是一百萬個 `[T,2,19,19]`，實際以 offset／length 存入分片，沒有把所有棋局補成同一個 T。channel 0 固定黑棋、channel 1 固定白棋，每個盤面是該手落子與提子後的狀態。
+T 為每盤雙方總落子數，各盤 T 不同；邏輯上是一百萬個 `[T,2,19,19]`，實際以 offset／length 存入分片，沒有把所有棋局補成同一個 T。channel 0 固定黑棋、channel 1 固定白棋，每個盤面是該手落子與提子後的狀態。
 
 每層按 row-major 把 361 個 0／1 值打包成 46 bytes，固定 `bitorder="little"`，最後 7 個 padding bits 為零；因此每手兩層共 92 bytes。以 2 億手估算，打包盤面 payload 約 **18.4 GB**，另外還有 moves、colors、metadata 與暫存；實際大小依總手數而定。解包結果是 `uint8[T,2,19,19]`，值為 0／1。
 
@@ -125,13 +125,13 @@ T 為每盤雙方總手數，包含 pass，各盤 T 不同；邏輯上是一百�
 
 中斷後以相同來源、rank、預期盤數、分片大小與目的目錄重跑原命令即可續跑；worker 數可以調整。程式核對來源與轉換程式 SHA-256，再檢查已完成分片的檔案大小、shape 與 hash；完整分片跳過，缺失或損壞的分片重做。來源、轉換程式或分片設定改變時，請用新的 `--output-dir`，避免混用不同版本。
 
-整份成功後才會產生 `manifest.json`，讀取端要求 manifest 與各片完成標記一致。完成後可另外執行全檔 hash、padding 與顏色檢查；指定自訂快取路徑時，`verify` 也要傳入相同的 `--output-dir`：
+整份成功後才會產生 `manifest.json`，讀取端要求 manifest 與各片完成標記一致。完成後可執行全檔 hash、shape、padding 與顏色檢查，並固定抽每個 shard 一盤，核對合法性稽核重播與快取；指定自訂快取路徑時，`verify` 也要傳入相同的 `--output-dir`：
 
 ```bash
 python -m go_aicup.data.board_cache verify --output-dir data/processed/boards/strength_v1
 ```
 
-成功時回報 `num_games`、`total_ply` 與 `payload_bytes`。這個檢查會讀取全部快取檔案，需要 I/O 時間；不產生未壓縮副本。
+成功時回報 `num_games`、`total_ply`、`payload_bytes` 與 `sampled_games`。一般轉檔不再逐盤解包比對，也不檢查占點、自殺與立即劫；可用 `sgf_to_planes(content, validate_moves=True)` 做明確的棋步稽核。`verify` 會讀取全部快取檔案，需要 I/O 時間；不產生未壓縮副本。
 
 ### 4. Python 按需解包
 
@@ -164,7 +164,7 @@ restored = unpack_planes(packed)   # uint8[T, 2, 19, 19]
 
 ### 5. 訓練時的 DataLoader
 
-`PackedBoardDataset` 接收兩個等長的一維整數樣本索引：`game_indices` 與 `plies`。每一組 `(game_index, ply)` 必須是指定玩家實際落子後的盤面，包括指定玩家的 pass；不能只按手數奇偶選取。Dataset 遇到對手 ply 會明確報錯。
+`PackedBoardDataset` 接收兩個等長的一維整數樣本索引：`game_indices` 與 `plies`。每一組 `(game_index, ply)` 必須是指定玩家落子後的盤面。依訓練集黑先、黑白交替且 pass=0 的已知條件，允許用零起算 ply 的奇偶選取。訓練資料仍依 `board_cache.py` 保存 `shard_XXXXX_colors.npy`；現行程式沿用 colors 選取指定玩家並組合顏色層，Dataset 仍檢查對手 ply。18 層組裝由快取與 Dataset 共用 `assemble_inputs()`。
 
 以下示範在快取完成後取第 0 盤的指定玩家盤面，用於確認解包與 loader 介面。**這是單盤讀取範例，沒有建立正式 train／validation 切分，也沒有啟動模型訓練。** 將程式存成獨立 `.py` 後執行；Windows 多程序需要保留 `__main__` guard。
 
@@ -226,7 +226,7 @@ dataset = PackedBoardDataset(
 python -m pytest tests/test_board_cache.py tests/test_sgf_planes.py -q
 ```
 
-這些測試使用合成棋譜，涵蓋打包／解包逐元素一致、little bit order、padding、提子、pass、實際顏色、歷史不跨局、分片續跑與損壞檔案檢查。先前完整測試結果為 **66 passed、1 skipped**；略過項是目前 Python 環境缺少 torch 的實際 DataLoader 多程序測試。沒有改用另一環境補驗，也尚未執行官方全量轉檔或 Nano4 效能驗證。本次 README 更新不會執行上述轉檔命令。
+測試使用無 pass 的合成棋譜，涵蓋打包／解包、little bit order、提子、顏色、歷史不跨局、分片續跑與損壞檔案檢查。2026-10-14 清理期間已完成分組測試與官方各級前 20 盤（共 200 盤）的一般／稽核模式對照，結果見 `RESULTS.md` A-011。之後依使用者要求停止測試，最終整套測試尚未完成；目前 Python 缺少 torch，DataLoader 多程序與 DDP 尚未驗收。未執行官方全量轉檔或 Nano4 效能驗證。
 
 ## 棋力 V1：資料準備、訓練與評估
 
@@ -267,7 +267,7 @@ python -m torch.distributed.run --standalone --nnodes=1 --nproc-per-node=8 -m go
 
 本機輸出根目錄的完整路徑為 **`D:\college\go_aicup_2026\outputs\rank_cnn_v1_seed2026\`**。
 
-`cv.py` 的 V1 API 是**按棋局**切分，保留既有 player-disjoint API。樣本索引只看實際顏色選取指定玩家的 ply，包含 pass；整個歷史仍保留雙方。每 epoch 全域打亂所有 training 盤面索引，各卡讀取同一 batch 的互斥部分。尾批缺級會明確記錄並跳過更新，optimizer／scheduler／BN 都不前進；補齊項不進入 SyncBN。
+`cv.py` 的 V1 API 是**按棋局**切分，保留既有 player-disjoint API。樣本索引依保存的 colors 選取指定玩家的 ply；整個歷史仍保留雙方。每 epoch 全域打亂所有 training 盤面索引，各卡讀取同一 batch 的互斥部分。尾批缺級會明確記錄並跳過更新，optimizer／scheduler／BN 都不前進；補齊項不進入 SyncBN。
 
 訓練 loss 只約束十級的全域平均分數。評估固定模型與 BN、不使用 D4；指定玩家各手平均成盤，再由同玩家同色的 k 盤等權平均成題。校準只推論固定 training 題組所需的唯一棋局，不把這個子集的分布宣稱為全量 training 分布；validation 推論整份指定玩家盤面。九個切點以四個 k 桶等權官方 score 的有序區間動態規劃擬合，平手分數不能拆分，切點綁定 checkpoint SHA-256。`metrics.json` 分別保存 batch loss、整體 rank mean loss、分布、k=5／10／15／20 的分數／accuracy／MAE／混淆矩陣和四桶等權總分。
 

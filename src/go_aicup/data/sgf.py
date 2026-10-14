@@ -1,14 +1,11 @@
 """SGF parsing — the single source of truth for turning `sgf_content` into moves.
 
-These records are minimal, machine-generated SGF (`(;SZ[19];B[qd];W[dp];...)`)
-with names, ranks, results and comments stripped by the organisers. This is
-therefore a tolerant scanner, not a full SGF-4 parser: anything it cannot read
-is *reported* on the returned object, never raised. Callers that care about
-data quality should check `Game.ok` / `Game.errors` rather than assuming
-success.
+The competition format is `(;SZ[19];B[qd];W[dp];...)`: one linear game,
+on-board moves only, no setup stones or metadata. Invalid input is reported
+in Game.errors; properties remain available for source-data audits.
 
 Coordinates: SGF encodes a point as [column][row] with 'a'..'s' for 0..18.
-We flatten to `row * 19 + col`, so 0..360, with PASS = 361.
+We flatten to `row * 19 + col`, so 0..360.
 """
 
 from __future__ import annotations
@@ -20,17 +17,14 @@ import numpy as np
 
 BOARD_SIZE = 19
 N_POINTS = BOARD_SIZE * BOARD_SIZE  # 361
-PASS = N_POINTS  # 361
 INVALID = -1
 
 BLACK, WHITE = 0, 1
 
-# One property: a 1-2 letter uppercase key followed by one or more [..] values.
-# `[^\]]` is safe here because these files carry no escaped brackets (no
-# comments survived anonymisation); `coverage` below is what catches the
-# day we are wrong about that.
+# Retain property names even in unsupported records for the audit report.
 _PROP_RE = re.compile(r"([A-Z]{1,2})((?:\[[^\]]*\])+)")
 _VAL_RE = re.compile(r"\[([^\]]*)\]")
+_GAME_RE = re.compile(r"\(;SZ\[19\](?:;[BW]\[[a-s]{2}\])+\)")
 
 
 @dataclass
@@ -40,9 +34,6 @@ class Game:
     props: dict[str, list[str]] = field(default_factory=dict)
     moves: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int16))
     colors: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int8))
-    setup_black: list[int] = field(default_factory=list)
-    setup_white: list[int] = field(default_factory=list)
-    coverage: float = 0.0  # fraction of the string the scanner accounted for
     errors: list[str] = field(default_factory=list)
 
     @property
@@ -65,9 +56,7 @@ class Game:
 
 
 def point_to_index(value: str) -> int:
-    """'qd' -> row*19+col. Empty string (or the legacy 'tt') is a pass."""
-    if value == "" or value == "tt":
-        return PASS
+    """'qd' -> row*19+col; return INVALID for points outside the board."""
     if len(value) != 2:
         return INVALID
     col = ord(value[0]) - 97
@@ -79,8 +68,6 @@ def point_to_index(value: str) -> int:
 
 def index_to_point(index: int) -> str:
     """Inverse of `point_to_index`, for round-trip verification."""
-    if index == PASS:
-        return ""
     if not (0 <= index < N_POINTS):
         raise ValueError(f"index out of range: {index}")
     row, col = divmod(index, BOARD_SIZE)
@@ -95,58 +82,15 @@ def parse(sgf: str) -> Game:
         game.errors.append("empty")
         return game
 
-    moves: list[int] = []
-    colors: list[int] = []
-    consumed = 0
-
+    sgf = sgf.strip()
     for match in _PROP_RE.finditer(sgf):
         key, raw = match.group(1), match.group(2)
-        consumed += match.end() - match.start()
-        values = _VAL_RE.findall(raw)
-
-        if key in ("B", "W"):
-            colour = BLACK if key == "B" else WHITE
-            for value in values:
-                index = point_to_index(value)
-                if index == INVALID:
-                    game.errors.append(f"bad move {key}[{value}]")
-                    continue
-                moves.append(index)
-                colors.append(colour)
-        elif key in ("AB", "AW"):
-            target = game.setup_black if key == "AB" else game.setup_white
-            for value in values:
-                index = point_to_index(value)
-                if index == INVALID or index == PASS:
-                    game.errors.append(f"bad setup {key}[{value}]")
-                    continue
-                target.append(index)
-            game.props.setdefault(key, []).extend(values)
-        else:
-            game.props.setdefault(key, []).extend(values)
-
-    game.moves = np.asarray(moves, dtype=np.int16)
-    game.colors = np.asarray(colors, dtype=np.int8)
-
-    # Structural punctuation the property regex legitimately skips.
-    structural = sum(sgf.count(character) for character in "();\n\r \t")
-    game.coverage = min(1.0, (consumed + structural) / len(sgf))
-    if game.coverage < 0.999:
-        game.errors.append(f"low coverage {game.coverage:.4f}")
-    if not moves:
-        game.errors.append("no moves")
-
-    size = game.board_size
-    if size is not None and size != BOARD_SIZE:
-        game.errors.append(f"board size {size}")
-
+        if key not in ("B", "W"):
+            game.props.setdefault(key, []).extend(_VAL_RE.findall(raw))
+    if _GAME_RE.fullmatch(sgf) is None:
+        game.errors.append("expected (;SZ[19];B[point];W[point];...) with on-board moves only")
+        return game
+    nodes = sgf[1:-1].split(";")[2:]
+    game.moves = np.asarray([point_to_index(node[2:4]) for node in nodes], dtype=np.int16)
+    game.colors = np.asarray([BLACK if node[0] == "B" else WHITE for node in nodes], dtype=np.int8)
     return game
-
-
-def move_tokens(game: Game) -> np.ndarray:
-    """Pack (colour, point) into a single token id in 0..723.
-
-    Token layout: `colour * 362 + point`, so black points are 0..361 and white
-    points are 362..723. This is the vocabulary the sequence model consumes.
-    """
-    return (game.colors.astype(np.int16) * (PASS + 1) + game.moves).astype(np.int16)

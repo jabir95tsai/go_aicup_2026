@@ -30,7 +30,6 @@ OUT_DIR = PROCESSED / "eda"
 
 SIZE = 19
 N_POINTS = SIZE * SIZE
-PASS = N_POINTS
 EARLY_PLIES = 60  # "opening" window for the low-line statistic
 
 
@@ -124,9 +123,6 @@ def _replay(moves, offsets, lengths, nb, nbc, early_plies, out):
         for i in range(lengths[g]):
             p = moves[off + i]
             side = i & 1
-            if p >= N_POINTS:  # pass (none in the train store, kept for safety)
-                out[g, side, 0] += 1.0
-                continue
             color = side + 1
             opp = 3 - color
             f = out[g, side]
@@ -165,23 +161,21 @@ def _replay(moves, offsets, lengths, nb, nbc, early_plies, out):
             # distances to the previous moves
             if i >= 1:
                 q = moves[off + i - 1]
-                if q < N_POINTS:
-                    dr = abs(r - q // SIZE)
-                    dc = abs(c - q % SIZE)
-                    f[7] += np.sqrt(dr * dr + dc * dc)
-                    f[8] += 1.0
-                    cheb = max(dr, dc)
-                    if cheb <= 2:
-                        f[9] += 1.0
-                    if cheb >= 6:
-                        f[10] += 1.0
+                dr = abs(r - q // SIZE)
+                dc = abs(c - q % SIZE)
+                f[7] += np.sqrt(dr * dr + dc * dc)
+                f[8] += 1.0
+                cheb = max(dr, dc)
+                if cheb <= 2:
+                    f[9] += 1.0
+                if cheb >= 6:
+                    f[10] += 1.0
             if i >= 2:
                 q = moves[off + i - 2]
-                if q < N_POINTS:
-                    dr = abs(r - q // SIZE)
-                    dc = abs(c - q % SIZE)
-                    f[11] += np.sqrt(dr * dr + dc * dc)
-                    f[12] += 1.0
+                dr = abs(r - q // SIZE)
+                dc = abs(c - q % SIZE)
+                f[11] += np.sqrt(dr * dr + dc * dc)
+                f[12] += 1.0
             # play, then resolve captures
             board[p] = color
             ever[p] = True
@@ -244,7 +238,6 @@ def replay(store: GameStore) -> np.ndarray:
 def to_frame(store: GameStore, sums: np.ndarray) -> pd.DataFrame:
     """Labelled-player perspective: me_* / op_* ratios + game-level columns."""
     pc = store.player_color.astype(np.int64)
-    assert (pc >= 0).all(), "store has no colour column"
     rows = np.arange(len(store))
     me = sums[rows, pc]
     op = sums[rows, 1 - pc]

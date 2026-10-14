@@ -123,7 +123,7 @@ def scan_sgf(files, limit: int | None) -> dict:
 
                 move_counts.append(game.n_moves)
                 board_sizes[game.board_size] += 1
-                if game.setup_black or game.setup_white:
+                if "AB" in game.props or "AW" in game.props:
                     setup_games += 1
                 for error in game.errors:
                     error_counts[error.split()[0]] += 1

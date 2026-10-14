@@ -180,11 +180,6 @@ def make_rank_folds(meta: pd.DataFrame, seed: int = SEED) -> pd.DataFrame:
 
 def assert_player_disjoint(players: pd.DataFrame) -> None:
     assert players["player_id"].is_unique, "a player appears in two folds"
-    groups = players.groupby("fold")["player_id"].apply(set)
-    folds = list(groups.index)
-    for i, a in enumerate(folds):
-        for b in folds[i + 1:]:
-            assert not (groups[a] & groups[b]), f"player overlap between folds {a},{b}"
 
 
 def game_folds(meta: pd.DataFrame, players: pd.DataFrame) -> np.ndarray:

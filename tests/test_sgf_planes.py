@@ -22,6 +22,7 @@ def test_coordinates_post_move_planes_and_color_channels():
     assert planes[2, 0, 15, 16] == 1
     np.testing.assert_array_equal(planes.sum(axis=(2, 3)), [[1, 0], [1, 1], [2, 1]])
     assert not (planes[:, 0] * planes[:, 1]).any()
+    np.testing.assert_array_equal(planes, sgf_to_planes("(;SZ[19];B[pd];W[dp];B[qp])", validate_moves=True))
 
 
 def test_post_move_boards_and_no_future_information():
@@ -46,24 +47,14 @@ def test_capture_preserves_historical_stones_and_allows_refill():
     assert planes[6, 1].sum() == 2
 
 
-@pytest.mark.parametrize("sgf, final_black", [
-    ("(;SZ[19];W[aa];W[ba];B[ab];B[bb];B[ca])", 3),
-    ("(;SZ[19];B[bb];W[cb];W[bc];B[ca];B[db];B[ac];B[bd];B[cc])", 6),
+@pytest.mark.parametrize("sgf, final_black, final_white", [
+    ("(;SZ[19];B[pd];W[aa];B[qq];W[ba];B[ab];W[pp];B[bb];W[dp];B[ca])", 5, 2),
+    ("(;SZ[19];B[bb];W[cb];B[pd];W[bc];B[ca];W[qq];B[db];W[pp];B[ac];W[dp];B[bd];W[dd];B[cc])", 7, 4),
 ])
-def test_multi_stone_and_separate_group_captures(sgf, final_black):
+def test_multi_stone_and_separate_group_captures(sgf, final_black, final_white):
     planes = sgf_to_planes(sgf)
     assert planes[-1, 0].sum() == final_black
-    assert planes[-1, 1].sum() == 0
-
-
-def test_passes_preserve_board_and_actual_colors_are_used():
-    planes = sgf_to_planes("(;SZ[19];W[pd];W[];B[tt];W[dp])")
-    assert planes.shape[0] == 4
-    assert planes[0, 0].sum() == 0
-    assert planes[0, 1, 3, 15] == 1  # white first, not inferred from parity
-    np.testing.assert_array_equal(planes[1], planes[0])
-    np.testing.assert_array_equal(planes[2], planes[0])
-    assert planes[3, 1].sum() == 2
+    assert planes[-1, 1].sum() == final_white
 
 
 def test_move_array_entrypoint_matches_sgf_without_mutating_inputs():
@@ -81,11 +72,6 @@ def test_move_array_entrypoint_matches_sgf_without_mutating_inputs():
     assert moves_to_planes([], []).shape == (0, 2, 19, 19)
 
 
-def test_root_move_and_default_board_size():
-    assert sgf_to_planes("(;W[pd])")[0, 1, 3, 15] == 1
-    assert sgf_to_planes("(;FF[4]GM[1]SZ[19];B[pd])").shape[0] == 1
-
-
 @pytest.mark.parametrize("content", [
     "", None, "(;SZ[19])", "(;SZ[9];B[aa])", "(;SZ[bad];B[aa])",
     "(;SZ[19][19];B[aa])", "(;SZ[19];B[zz])", "(;SZ[19];B[aa]",
@@ -93,6 +79,8 @@ def test_root_move_and_default_board_size():
     "(;SZ[19];B[aa])(;SZ[19];W[bb])", "(;SZ[19];B[aa]W[bb])",
     "(;SZ[19];B[aa][bb])", "(;SZ[19]AB[aa];B[bb])",
     "(;SZ[19]AW[aa];B[bb])", "(;SZ[19];B[aa];AE[aa];W[bb])",
+    "(;W[pd])", "(;FF[4]GM[1]SZ[19];B[pd])", "(;SZ[19];B[])",
+    "(;SZ[19];B[tt])",
 ])
 def test_invalid_or_unsupported_sgf_is_rejected(content):
     with pytest.raises(ValueError):
@@ -101,7 +89,7 @@ def test_invalid_or_unsupported_sgf_is_rejected(content):
 
 @pytest.mark.parametrize("moves, colors", [
     ([[0]], [0]), ([0], []), ([0.5], [0]), ([0], [0.5]),
-    ([-1], [0]), ([362], [0]), ([65536], [0]), ([0], [-1]),
+    ([-1], [0]), ([361], [0]), ([65536], [0]), ([0], [-1]),
     ([0], [2]), ([0], [256]), (["0"], [0]), ([True], [0]),
 ])
 def test_invalid_move_arrays_are_rejected_before_narrowing(moves, colors):
@@ -111,22 +99,19 @@ def test_invalid_move_arrays_are_rejected_before_narrowing(moves, colors):
 
 @pytest.mark.parametrize("content, reason", [
     ("(;SZ[19];B[aa];W[aa])", "occupied point"),
-    ("(;SZ[19];B[ba];B[ab];W[aa])", "suicide"),
+    ("(;SZ[19];B[ba];W[qq];B[ab];W[aa])", "suicide"),
 ])
 def test_invalid_board_moves_are_rejected(content, reason):
     with pytest.raises(ValueError, match=reason):
-        sgf_to_planes(content)
+        sgf_to_planes(content, validate_moves=True)
 
 
 KO_PREFIX = "(;SZ[19];B[ba];W[bb];B[ab];W[ca];B[bc];W[db];B[qq];W[cc];B[cb]"
 
 
-def test_immediate_ko_is_rejected_but_recapture_after_passes_is_allowed():
+def test_immediate_ko_is_rejected():
     with pytest.raises(ValueError, match="move 10 .*immediate ko recapture"):
-        sgf_to_planes(KO_PREFIX + ";W[bb])")
-    planes = sgf_to_planes(KO_PREFIX + ";W[];B[];W[bb])")
-    assert planes[-1, 1, 1, 1] == 1
-    assert planes[-1, 0, 1, 2] == 0
+        sgf_to_planes(KO_PREFIX + ";W[bb])", validate_moves=True)
 
 
 def main():

@@ -1,6 +1,6 @@
 # 棋力 V1：模型、訓練與 SGF 平行轉檔實作設計
 
-日期：2026-10-11；狀態更新：2026-10-12。依據：[STRENGTH_V1_PLAN.md](STRENGTH_V1_PLAN.md)。模型／DataLoader／索引／loss／DDP 訓練與校準評估程式現已撰寫；依使用者要求，未執行新程式或驗證、未啟動全量轉檔或 GPU 訓練。本文保留工程設計與待驗收 gate；操作及輸出位置見 [README.md](README.md#棋力-v1資料準備訓練與評估)。
+日期：2026-10-11；狀態更新：2026-10-14。依據：[STRENGTH_V1_PLAN.md](STRENGTH_V1_PLAN.md)。模型／DataLoader／索引／loss／DDP 訓練與校準評估程式已撰寫。已精簡 SGF／pass 支援與重複檢查，訓練資料仍保留 `board_cache.py` 的 `*_colors.npy`；部分測試結果見 `RESULTS.md` A-011，其後依使用者要求停止測試。未啟動全量轉檔或 GPU 訓練，單／多卡驗收仍待完成。本文保留工程設計與待驗收 gate；操作及輸出位置見 [README.md](README.md#棋力-v1資料準備訓練與評估)。
 
 沿用 V1 已確認設定：各級 80,000／20,000 盤、固定黑／白編碼、指定玩家落子後取樣、8 個雙方歷史盤面、20-block／256-channel ResNet、全域 16,384 盤面及級別平均排序 loss。舊文件的玩家互斥訓練切分、我方／對方正規化與 softmax 不替換本版設定。
 
@@ -26,16 +26,16 @@
 
 | 現有檔案 | 可以沿用 | 本版要新增或注意 |
 |---|---|---|
-| `data/sgf.py` | 唯一 parser、實際 move colors、pass 編碼 | 不另寫 regex parser |
+| `data/sgf.py` | 唯一 parser、落點解析 | 不另寫 regex parser |
 | `data/preprocess.py` | `ProcessPoolExecutor` 按批 parse、moves／colors npy、metadata parquet | 現在逐 rank 轉換，再合併；不是跨棋局盤面快取 |
 | `data/store.py` | `GameStore.game(i)` 的 moves／colors memmap slice | 本版不用 `perspective()`，保留黑／白 |
-| `features/sgf_planes.py` | Numba 重播、提子、pass、實際顏色、落子後盤面 | 目前只回傳一盤 float32 陣列，不寫快取 |
+| `features/sgf_planes.py` | Numba 重播、提子、落子後盤面 | 目前只回傳一盤 float32 陣列，不寫快取 |
 | `data/cv.py` | metadata、同玩家同色合成題、保存切分表的模式 | 新增具名 V1 按盤切分；保留舊 player-disjoint API |
 | `metrics.py` | 四個 k 桶的官方 score、acc、MAE | 本版總分另明確取四桶等權平均；目前 `all` 是所有題直接平均，僅桶數相等時等價 |
 
 目前 `data/processed/` 沒有 move store；原始資料實際在 `data/raw/training/`，但 `preprocess.py` 的 `TRAIN_DIR` 指向 `data/training/`。正式轉檔前需把來源／目的路徑接入 config 或 CLI，不能直接假設現有預設命令會找到 CSV，也不需要搬動原始資料。
 
-既有 parser 偏容錯；board cache 啟動前要檢查 metadata 的 `n_errors`、19 路／無 setup 等資料稽核條件。`moves_to_planes()` 只看 moves／colors，無法自行發現 SGF 的 AB／AW 等原始設定。異常棋局需帶唯一鍵明確報錯，不能靜默略過而讓 80,000／20,000 盤數失真。
+唯一 parser 在資料入口檢查 `SZ[19]`、線性棋譜與 0～360 落點，不支援 pass、setup 或其他 SGF 格式。異常棋局需帶唯一鍵明確報錯，不能靜默略過而讓 80,000／20,000 盤數失真。一般重播只處理落子與提子；占點、自殺與立即劫由 `validate_moves=True` 明確啟用。
 
 ## 3. 快取格式：以位元打包為正式格式
 
@@ -93,6 +93,8 @@ float32 留在現有公開轉換介面；快取層處理壓縮，讀取後仍得
 | worker 回傳 | shard ID、盤數、手數、bytes、耗時及檢查結果等小型摘要 |
 | 主程序 | 排程、顯示進度、收集狀態、驗證 manifest；不收大型 tensor |
 
+一般轉檔不再逐盤解包比對。`board_cache verify` 集中檢查全檔 hash／shape／padding／colors，並固定抽每個 shard 一盤做合法性稽核重播與快取對照。讀取端只在首次開啟 shard 時檢查陣列格式；18 層組裝共用 `assemble_inputs()`。
+
 以每盤 200 手估算，4,096 盤的 packed shard 約 75.4 MB；全量約 250 shards（按 rank 邊界切，尾 shard 較小）。實際按總手數與檔案大小監控，不能固定假設每盤一樣長。
 
 worker 根據該 shard 的 lengths 預先計算 local offsets／總 ply 數，用 `open_memmap` 配置 `.tmp.npy`，逐盤寫入 slice。一盤 T=200 的 float32 暫存約 0.55 MiB，因此不必先累積整個 shard 的 float32。重播後即可釋放該盤陣列。這樣峰值 RAM 不隨全量棋局數上升。
@@ -117,6 +119,8 @@ data/processed/boards/strength_v1_<cache-id>/
   manifest.json
   games.parquet                  # game_index → shard_id, local_offset, length
   shard_00000.npy                 # uint8[total_ply,2,46]，正式 packed 格式
+  shard_00000_moves.npy           # int16[total_ply]，落點 0～360
+  shard_00000_colors.npy          # int8[total_ply]，黑=0、白=1
   shard_00000.done.json
   ...
 data/processed/cv/
@@ -131,7 +135,7 @@ data/processed/strength_v1/<dataset-id>/
   manifest.json
 ```
 
-兩層快取保存**所有雙方 ply**；train／valid sample index 才選 `colors[ply] == player_color`。pass 納入，不按奇偶猜顏色。rank／player_color 從 game metadata 查，無須在每個 sample 重複保存。game_index 是 store row 對應，不能把不唯一的 game_id 直接當 array index。
+兩層快取保存**所有雙方 ply**，並沿用 `board_cache.py` 保存各分片的 `shard_XXXXX_colors.npy`（`int8[T]`，黑=0、白=1）。train／valid sample index 才選指定玩家的手。訓練集已確認黑先、黑白交替且 pass=0（`RESULTS.md` A-002），可用 `ply % 2 == player_color` 選取，不再要求 pass 相容支援。rank／player_color 從 game metadata 查，無須在每個 sample 重複保存。game_index 是 store row 對應，不能把不唯一的 game_id 直接當 array index。
 
 `game:uint32 + ply:uint16` 以兩個陣列保存共 6 bytes／樣本；約 8,000 萬 training 樣本是 480 MB。載入時把 batch 的索引轉成框架需要的整數型別。寫入前檢查 game／ply 上限；未來來源超過 dtype 上限須報錯或升版。
 
@@ -141,7 +145,7 @@ data/processed/strength_v1/<dataset-id>/
 
 ### 5.1 動態組合歷史
 
-給定 `(game_index, ply=t)`，讀 `P[t], P[t-1], ..., P[t-7]`。負數時刻直接補零；不得讀到同 shard 的上一盤。channel 16／17 使用 move store 的當手實際顏色。所有歷史使用同一個 D4 transform，顏色層不變。
+給定 `(game_index, ply=t)`，讀 `P[t], P[t-1], ..., P[t-7]`。負數時刻直接補零；不得讀到同 shard 的上一盤。channel 16／17 的當手顏色可由 `t % 2` 決定（黑=0、白=1）。所有歷史使用同一個 D4 transform，顏色層不變。
 
 正式 loader 一次讀取 `[8,2,46]` payload，解包得到 `[8,2,19,19]`，再 reshape 為 16 個棋子 channels，補兩層顏色成 `[18,19,19]`。CPU 優先保持 uint8，整批 pin memory、非同步 H2D，再在 GPU 轉成模型輸入 dtype。BF16 autocast 的輸出分數另轉 FP32 做 sum／loss。
 
@@ -270,7 +274,7 @@ validation 不參與切點搜尋；全份 validation 可用於固定切點後的
 
 | 待實作檔案 | 責任 | 首次驗收 |
 |---|---|---|
-| `data/board_cache.py` | packed 打包／解包、shard builder、manifest、續跑 | 隨機盤／提子／pass 解包後與現有介面逐元素一致；padding bits 為零；壞 shard 不可讀 |
+| `data/board_cache.py` | packed 打包／解包、shard builder、manifest、續跑 | 隨機盤／提子解包後與現有介面逐元素一致；padding bits 為零；壞 shard 不可讀 |
 | `data/cv.py` | 新增 V1 棋局切分、training 擬合題／validation 評估題 | 每級 80,000／20,000、棋局零交集，題組只取所屬 split，保留舊 API |
 | `tasks/strength/dataset.py` | sample index、global batch sampler、歷史、D4 | 不跨局、不看未來、只取指定玩家、全 epoch 不漏不重 |
 | `models/strength_resnet.py` | 完整 ResNet 與 scalar head | shape、23,748,611 參數、block 相加後無 ReLU |

@@ -7,7 +7,7 @@ I/O. Run (in a CPU allocation on Nano4, not on the login node)::
     python -m go_aicup.data.board_cache verify
 
 Defaults: input data/raw/training, output data/processed/boards/strength_v1.
-Each game has variable T (all actual moves, including both sides and passes).
+Each game has variable T (all moves by both sides).
 Logical shape is [N_games, T, 2, 19, 19]; storage is sharded uint8[sum(T),2,46].
 Plane 0 is black and plane 1 white, row-major, little bit order, zero padding.
 Every shard also retains int16 moves, int8 actual colors and game metadata.
@@ -36,6 +36,7 @@ import numpy as np
 import pandas as pd
 
 from go_aicup.paths import DATA, PROCESSED
+from go_aicup.artifacts import file_hash as _sha256, write_json as _json_write
 
 RANKS = ("D", "C", "B", "A", "1D", "2D", "3D", "4D", "5D", "6D")
 DEFAULT_INPUT = DATA / "raw" / "training"
@@ -66,32 +67,23 @@ def pack_planes(planes: np.ndarray) -> np.ndarray:
 def unpack_planes(packed: np.ndarray) -> np.ndarray:
     """Decompress [...,2,46] to contiguous uint8[...,2,19,19].
 
-    Exactly 361 bits are restored per channel. Nonzero padding is corruption,
-    not extra board points. Suitable for one game, histories or an entire batch.
+    Exactly 361 bits are restored per channel; padding is checked by
+    verify_cache(). Suitable for one game, histories or an entire batch.
     """
     packed = np.asarray(packed)
     if packed.dtype != np.uint8 or packed.ndim < 2 or packed.shape[-2:] != (2, 46):
         raise ValueError("packed must be uint8 with trailing shape (2, 46)")
-    if np.any(packed[..., -1] & np.uint8(254)):
-        raise ValueError("nonzero padding bits in packed boards")
     flat = np.unpackbits(packed, axis=-1, count=POINTS, bitorder=BITORDER)
     return np.ascontiguousarray(flat.reshape(packed.shape[:-1] + (19, 19)))
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(4 * 1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def _json_write(path: Path, value: dict) -> None:
-    temporary = path.with_name(path.name + ".tmp")
-    with temporary.open("w", encoding="utf-8", newline="\n") as handle:
-        json.dump(value, handle, indent=2, sort_keys=True)
-        handle.write("\n")
-    os.replace(temporary, path)
+def assemble_inputs(histories: np.ndarray, colors: np.ndarray) -> np.ndarray:
+    """Eight black/white histories plus the current move's two color planes."""
+    inputs = np.empty((len(colors), 18, 19, 19), np.uint8)
+    inputs[:, :16] = histories.reshape(len(colors), 16, 19, 19)
+    inputs[:, 16] = (colors == 0)[:, None, None]
+    inputs[:, 17] = (colors == 1)[:, None, None]
+    return inputs
 
 
 def _close_mmap(array: np.ndarray) -> None:
@@ -120,7 +112,7 @@ def _shard_check(directory: Path, summary: dict, hashes: bool = False) -> None:
             raise ValueError(f"missing or unsafe shard file: {filename}")
         if path.stat().st_size != record["bytes"]:
             raise ValueError(f"wrong file size: {path}")
-        if "shape" in record:
+        if hashes and "shape" in record:
             _array_check(path, record["dtype"], record["shape"])
         if hashes and _sha256(path) != record["sha256"]:
             raise ValueError(f"checksum mismatch: {path}")
@@ -189,9 +181,6 @@ def _write_shard(task: dict) -> dict:
             try:
                 planes = moves_to_planes(game.moves, game.colors)
                 packed = pack_planes(planes)
-                # A per-game gate includes captures, passes, bit order and padding.
-                if not np.array_equal(unpack_planes(packed), planes):
-                    raise ValueError("packed board round-trip mismatch")
                 arrays[f"{prefix}.npy"][span] = packed
                 arrays[f"{prefix}_moves.npy"][span] = game.moves
                 arrays[f"{prefix}_colors.npy"][span] = game.colors
@@ -302,7 +291,7 @@ def convert_training(input_directory: Path = DEFAULT_INPUT, directory: Path = DE
         sources.append({"rank": rank, "file": path.name,
                         "bytes": path.stat().st_size, "sha256": _sha256(path)})
     package = Path(__file__).resolve().parents[1]
-    converter_files = [Path(__file__), package / "data" / "sgf.py",
+    converter_files = [Path(__file__), package / "artifacts.py", package / "data" / "sgf.py",
                        package / "features" / "sgf_planes.py", package / "features" / "game_stats.py"]
     config = {
         "format_version": FORMAT_VERSION, "codec": CODEC, "bitorder": BITORDER,
@@ -500,6 +489,12 @@ class BoardCache:
         prefix = f"shard_{int(shard_id):05d}"
         arrays = tuple(np.load(self.directory / filename, mmap_mode="r", allow_pickle=False)
                        for filename in (f"{prefix}.npy", f"{prefix}_colors.npy"))
+        for array, (dtype, shape) in zip(arrays, ((np.uint8, (self._summaries[shard_id]["total_ply"], 2, 46)),
+                                                (np.int8, (self._summaries[shard_id]["total_ply"],)))):
+            if array.dtype != dtype or array.shape != shape:
+                for opened in arrays:
+                    _close_mmap(opened)
+                raise ValueError(f"invalid shard array: {shard_id}")
         self._open[shard_id] = arrays
         if len(self._open) > self.max_open_shards:
             _, old = self._open.popitem(last=False)
@@ -536,8 +531,6 @@ class BoardCache:
         _, colors = self._arrays(int(self.shard_ids[index]))
         start, length = int(self.offsets[index]), int(self.lengths[index])
         result = np.array(colors[start:start + length], copy=True)
-        if np.any((result != 0) & (result != 1)):
-            raise ValueError("invalid cached move color")
         return result
 
     def history_batch(self, game_indices, plies, *, steps: int = 8):
@@ -572,8 +565,6 @@ class BoardCache:
             block[~valid] = 0
             packed[selected] = block
             move_colors[selected] = colors[offsets + plies[selected]]
-        if np.any((move_colors != 0) & (move_colors != 1)):
-            raise ValueError("invalid cached move color")
         return unpack_planes(packed), move_colors
 
     def history(self, game_index: int, ply: int, *, steps: int = 8) -> np.ndarray:
@@ -582,16 +573,16 @@ class BoardCache:
     def training_batch(self, game_indices, plies) -> np.ndarray:
         """On-demand uint8[B,18,19,19], 8 histories then actual color planes."""
         histories, colors = self.history_batch(game_indices, plies)
-        inputs = np.empty((len(colors), 18, 19, 19), np.uint8)
-        inputs[:, :16] = histories.reshape(len(colors), 16, 19, 19)
-        inputs[:, 16] = (colors == 0)[:, None, None]
-        inputs[:, 17] = (colors == 1)[:, None, None]
-        return inputs
+        return assemble_inputs(histories, colors)
 
 
 def verify_cache(directory: Path = DEFAULT_OUTPUT) -> dict:
-    """Explicit full file-hash/padding check; never creates unpacked files."""
+    """Full hash/shape/padding/color check, plus one audited game per shard."""
+    from go_aicup.features.sgf_planes import moves_to_planes
+
     cache = BoardCache(directory)
+    rng = np.random.default_rng(2026)
+    sampled = 0
     try:
         for summary in cache.manifest["shards"]:
             _shard_check(cache.directory, summary, hashes=True)
@@ -602,8 +593,21 @@ def verify_cache(directory: Path = DEFAULT_OUTPUT) -> dict:
                 block = colors[begin:begin + 65536]
                 if np.any((block != 0) & (block != 1)):
                     raise ValueError("invalid move colors")
+            game = summary["game_start"] + int(rng.integers(summary["num_games"]))
+            start, length = int(cache.offsets[game]), int(cache.lengths[game])
+            moves = np.load(cache.directory / f"shard_{summary['shard_id']:05d}_moves.npy",
+                            mmap_mode="r", allow_pickle=False)
+            try:
+                replayed = moves_to_planes(moves[start:start + length], colors[start:start + length],
+                                            validate_moves=True)
+                if not np.array_equal(cache.game(game), replayed):
+                    raise ValueError(f"cached board replay mismatch: game {game}")
+            finally:
+                _close_mmap(moves)
+            sampled += 1
         return {"num_games": len(cache), "total_ply": cache.manifest["total_ply"],
-                "payload_bytes": cache.manifest["total_ply"] * 92}
+                "payload_bytes": cache.manifest["total_ply"] * 92,
+                "sampled_games": sampled}
     finally:
         cache.close()
 
