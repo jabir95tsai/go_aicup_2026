@@ -249,7 +249,7 @@ python -m torch.distributed.run --standalone --nnodes=1 --nproc-per-node=8 -m go
 python -m torch.distributed.run --standalone --nnodes=1 --nproc-per-node=8 -m go_aicup.tasks.strength.evaluate_rank_v1 --config configs/strength/rank_cnn_v1.json --checkpoint outputs/rank_cnn_v1_seed2026/last.json --output-dir outputs/rank_cnn_v1_seed2026/evaluation/manual_001
 ```
 
-新 run 更換 config 的 `paths.output_dir`；不得覆蓋既有非空 run。目前設定檔預設訓練 **10 epochs**，training 與 evaluation 的 **global batch 均為 65,536**，單節點 8 卡時每卡 8,192；更改 epochs 會改變 scheduler，應作為新 run，不能冒充相同設定的精確續跑。`--skip-evaluation` 僅供明確短跑；完整 run 預設在每 epoch 後評估。`training.max_runtime_seconds` 可設定這次作業允許的執行秒數，程式預留 `shutdown_margin_seconds=180` 並在共同 batch 邊界保存；SIGINT／SIGTERM 同樣請求保存。精確續跑要求相同 world_size、設定、程式指紋、索引及排列。BF16 不使用 GradScaler；FP16 模式保存 scaler。
+新 run 更換 config 的 `paths.output_dir`；不得覆蓋既有非空 run。目前設定檔預設訓練 **10 epochs**，training 與 evaluation 的 **global batch 均為 65,536**，單節點 8 卡時每卡 8,192；更改 epochs 會改變 scheduler，應作為新 run，不能冒充相同設定的精確續跑。`--skip-evaluation` 僅供明確短跑；完整 run 預設在每 epoch 後評估。`training.max_runtime_seconds` 可設定這次作業允許的執行秒數，程式預留 `shutdown_margin_seconds=180` 並在共同 batch 邊界保存；SIGINT／SIGTERM 同樣請求保存。精確續跑要求相同 world_size、設定、程式指紋、索引及排列。 每次新 checkpoint 與 `last.json` 完整發布後，只保留最新一份 `.pt` 與完成標記，刪除舊 checkpoint；不另存最佳權重。`best_score.json` 只記錄歷史最佳分數與評估路徑，歷次評估結果仍保留。BF16 不使用 GradScaler；FP16 模式保存 scaler。
 
 完整 256-channel／20-block 網路的預設 batch 面向 Nano4 H200。若要在本機撰寫小型開發設定，可明確修改 channels、blocks、batch、precision、workers，並使用不同 run／設定檔；這不代表正式 V1 的 H200 batch 已能在 8GB 顯存執行。正式顯存、步長秒數與完整 epoch 時間均未知，先依計畫短測再啟動長作業。
 
@@ -260,7 +260,7 @@ python -m torch.distributed.run --standalone --nnodes=1 --nproc-per-node=8 -m go
 | `data/processed/boards/strength_v1/` | 沿用 `board_cache` 的 packed shards、colors、moves、games metadata；不複製兩份快取 |
 | `data/processed/cv/strength_v1_seed2026/` | `strength_v1_games.parquet`、固定 training calibration／validation 題組、eligibility |
 | `data/processed/strength_v1/seed2026/` | train／valid／calibration 的 `*_game.npy`、`*_ply.npy`；build／manifest、hash、盤面數與玩家重疊率 |
-| `outputs/rank_cnn_v1_seed2026/` | resolved config、環境／程式指紋、資料 manifest、`train.jsonl`、session 時間與顯存紀錄、`last.json`／`best.json`／`finished.json` |
+| `outputs/rank_cnn_v1_seed2026/` | resolved config、環境／程式指紋、資料 manifest、`train.jsonl`、session 時間與顯存紀錄、`last.json`／`best_score.json`／`finished.json` |
 | `outputs/rank_cnn_v1_seed2026/permutations/` | 每 epoch 的 uint32 排列與 hash；續跑不使用 loader 預取游標 |
 | `outputs/rank_cnn_v1_seed2026/checkpoints/` | 原子發布的 `.pt` 和完成標記；模型、optimizer、scheduler、AMP、各卡 RNG／buffers、epoch／cursor／資料指紋 |
 | `outputs/rank_cnn_v1_seed2026/evaluation/epoch_0000/` | 手分數 npy（可設不保留）、盤／題預測、training-only `cutpoints.json`、`metrics.json`、完成標記 |

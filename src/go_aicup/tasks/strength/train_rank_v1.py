@@ -31,7 +31,7 @@ from go_aicup.tasks.strength.dataset import (GlobalBatchSampler, PackedBoardData
                                             create_permutation, make_loader)
 from go_aicup.tasks.strength.losses import distributed, global_rank_loss
 from go_aicup.tasks.strength.runtime import (DEFAULT_CONFIG, autocast_context, barrier,
-    check_index_hashes, file_hash, load_dataset_manifest, object_hash, read_config,
+    check_index_hashes, file_hash, load_dataset_manifest, model_state_hash, object_hash, read_config,
     setup_distributed, write_json)
 
 
@@ -142,8 +142,20 @@ def save_checkpoint(directory: Path, model, optimizer, scheduler, scaler,
                   "optimizer_steps": state["optimizer_steps"]}
         write_json(path.with_suffix(".complete.json"), record)
         write_json(directory / "last.json", record)
+        # Publish the replacement completely before removing previous weights.
+        prune_checkpoints(directory, path)
     barrier()
     return path
+
+
+def prune_checkpoints(directory: Path, latest: Path) -> None:
+    """Keep only the latest trainer checkpoint and its completion marker."""
+    for old in latest.parent.glob("update_*.pt"):
+        if old != latest:
+            old.unlink()
+            old.with_suffix(".complete.json").unlink(missing_ok=True)
+    # Historical best weights are not retained under latest-only retention.
+    (directory / "best.json").unlink(missing_ok=True)
 
 
 def resolve_checkpoint(path: Path) -> Path:
@@ -400,12 +412,7 @@ def train(config: dict, *, resume: Path | None = None,
                     # A completed evaluation must match the saved model weights.
                     if original["dataset_id"] != manifest["dataset_id"] or file_hash(output / "metrics.json") != record["metrics_sha256"]:
                         raise ValueError("completed evaluation integrity mismatch")
-                    bound_path = resolve_checkpoint(Path(original["checkpoint"]))
-                    if file_hash(bound_path) != original["checkpoint_sha256"]:
-                        raise ValueError("evaluation checkpoint checksum mismatch")
-                    bound = torch.load(bound_path, map_location="cpu", weights_only=False)
-                    if any(not torch.equal(value.detach().cpu(), bound["model"][name])
-                           for name, value in raw_model.state_dict().items()):
+                    if original["model_state_sha256"] != model_state_hash(raw_model):
                         raise ValueError("completed evaluation belongs to different weights")
                     if rank == 0:
                         result = original
@@ -430,9 +437,9 @@ def train(config: dict, *, resume: Path | None = None,
                     score = result["questions"]["validation"]["equal_k"]["score"]
                     if best[0] is None or score > best[0]:
                         best[0] = score
-                        checkpoint_reference = Path(result["checkpoint"])
-                        write_json(directory / "best.json", {"file": checkpoint_reference.name,
-                                    "sha256": result["checkpoint_sha256"], "validation_equal_k_score": score,
+                        write_json(directory / "best_score.json", {
+                                    "checkpoint_sha256": result["checkpoint_sha256"],
+                                    "weights_retained": False, "validation_equal_k_score": score,
                                     "metrics": str(Path(attempt[0]) / "metrics.json") if not completion.exists() else str(output / "metrics.json")})
                     log_event(directory, rank, {"event": "validation", "epoch": epoch,
                                                "equal_k": result["questions"]["validation"]["equal_k"],

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from datetime import timedelta
@@ -105,3 +106,14 @@ def autocast_context(config: dict, device):
     import torch
     dtype = torch.bfloat16 if config["precision"] == "bf16" else torch.float16
     return torch.autocast(device.type, dtype=dtype, enabled=config["precision"] != "fp32")
+
+
+def model_state_hash(model) -> str:
+    """Fingerprint weights and BN buffers independently of checkpoint metadata."""
+    import torch
+    digest = hashlib.sha256()
+    for name, tensor in sorted(model.state_dict().items()):
+        value = tensor.detach().cpu().contiguous()
+        digest.update(json.dumps([name, str(value.dtype), list(value.shape)]).encode())
+        digest.update(value.reshape(-1).view(torch.uint8).numpy().tobytes())
+    return digest.hexdigest()

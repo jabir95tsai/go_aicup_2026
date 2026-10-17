@@ -24,7 +24,7 @@ from go_aicup.models.strength_resnet import StrengthResNet
 from go_aicup.tasks.strength.dataset import GlobalBatchSampler, PackedBoardDataset, make_loader
 from go_aicup.tasks.strength.losses import distributed, rank_statistics, ranking_loss_from_means
 from go_aicup.tasks.strength.runtime import (DEFAULT_CONFIG, autocast_context, barrier,
-    check_index_hashes, file_hash, load_dataset_manifest, read_config,
+    check_index_hashes, file_hash, load_dataset_manifest, model_state_hash, read_config,
     setup_distributed, write_json)
 
 
@@ -280,6 +280,7 @@ def evaluate(model, config: dict, manifest: dict, checkpoint: Path, output: Path
             questions.assign(score=scores, prediction=predictions).to_parquet(
                 output / f"{name}_question_predictions.parquet", index=False)
         result = {"checkpoint": str(checkpoint), "checkpoint_sha256": cutpoints["checkpoint_sha256"],
+                  "model_state_sha256": model_state_hash(model),
                   "dataset_id": manifest["dataset_id"], "player_overlap": manifest["player_overlap"],
                   "calibration_scope": "only unique training games used by fixed calibration questions; frozen model/BN, no D4",
                   "cutpoints": cutpoints, "training_calibration": training_info,
