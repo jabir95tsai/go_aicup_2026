@@ -397,10 +397,10 @@ def train(config: dict, *, resume: Path | None = None,
                     last_path = save("periodic")
                     checkpoint_time = time.monotonic()
                 previous_step_end = time.monotonic()
-            # A checkpoint at an epoch boundary retains epoch + end cursor until
-            # its fixed-weight evaluation completes. Resume can finish that work.
+            # At the final epoch, retain epoch + end cursor until calibration
+            # and validation complete, so an interrupted evaluation can resume.
             last_path = save("epoch")
-            should_evaluate = (not skip_evaluation and (epoch + 1) % config["evaluation"]["every_epochs"] == 0)
+            should_evaluate = (not skip_evaluation and epoch + 1 == config["training"]["epochs"])
             if should_evaluate:
                 from go_aicup.tasks.strength.evaluate_rank_v1 import EvaluationInterrupted, evaluate
                 output = directory / "evaluation" / f"epoch_{epoch:04d}"

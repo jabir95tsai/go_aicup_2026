@@ -58,7 +58,6 @@
   },
   "evaluation": {
     "global_batch_size": 65536,
-    "every_epochs": 1,
     "save_ply_scores": true
   }
 }
