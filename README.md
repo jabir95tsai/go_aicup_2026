@@ -273,6 +273,29 @@ python -m torch.distributed.run --standalone --nnodes=1 --nproc-per-node=8 -m go
 
 本次沒有單／多卡 loss 與梯度、完整 SyncBN 尾批、checkpoint 續跑、cutpoint DP 或小樣本學習的測試結果；正式資料數、玩家重疊率、四桶分數與 Nano4 效能均須後續執行才知道。
 
+
+### 棋力 V1 視覺化
+
+完整評估後，以 CPU 讀取既有日誌、validation 題目預測與每盤分數，不重新推論：
+
+```bash
+python scripts/plot_rank_v1.py --run-dir outputs/rank_cnn_v1_seed2026
+```
+
+預設選擇 run 內最新、含 `complete.json` 的 `evaluation/epoch_XXXX/`，在該目錄的 `plots/` 產出三張 PNG：
+
+- `loss_vs_step.png`：全域 optimizer step 對 training ranking loss，附最近 50 筆已記錄更新的移動平均；加上所有已完成評估的 validation batch loss（按 batch 樣本數加權平均），依 checkpoint 檔名的精確 optimizer step 對齊。這不是整份驗證集十級均值計算的 loss，且未使用 D4；續跑重播的 training step 以新分支取代。
+- `confusion_matrix.png`：k=5／10／15／20 四個 10×10 子圖；橫軸預測、縱軸真實級別，每格顯示列百分比與題數。
+- `score_distributions_cutpoints.png`：單一座標圖呈現十個真實級別的每盤 scalar 分數密度直方圖。每盤只計一筆，使用完整 validation 推論後指定玩家所有手的平均值（`valid_game_scores.parquet`）；不按 k 分組、不重複計入同盤。保留 training-only 題目校準的 9 個切點作參考：切點適用題目平均分數，不能視為已針對單盤校準。重合切點以 t1–t9 分別標示，不重新擬合切點。
+
+可用 `--evaluation-dir <path>` 指定已完成評估、`--output-dir <path>` 指定圖檔目錄、`--smooth-window 1` 關閉平滑、`--bins 50` 設定分布圖區間數。腳本核對評估完成標記、metrics hash、checkpoint hash 與切點解碼結果；不需 torch 或 GPU。圖表反映該評估的 split，現行 V1 的 game-disjoint 分數不能直接解讀為未見玩家表現。
+
+只有短跑日誌時可先產出一張 loss 圖（若已有完成評估則也會加入 validation loss），預設存至 `<run-dir>/plots/`：
+
+```bash
+python scripts/plot_rank_v1.py --run-dir outputs/rank_v1_short_100_20261017_135242/run_socket --loss-only
+```
+
 ## 結構
 
 詳見 CLAUDE.md 第 10 節。重點：
