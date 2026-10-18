@@ -108,9 +108,13 @@ def load_validation_losses(run: Path, selected: Path | None) -> tuple[np.ndarray
         if match is None:
             raise ValueError(f"Cannot recover optimizer step from checkpoint: {metrics['checkpoint']}")
         step = int(match.group(1))
-        loss = metrics["validation"]["batch_loss_sample_weighted"]
-        if loss is None or not np.isfinite(loss):
-            raise ValueError(f"Missing/nonfinite validation batch loss: {directory}")
+        loss = metrics["validation"].get("batch_loss_sample_weighted")
+        if loss is None:
+            warnings.warn(f"Skipping unavailable validation batch loss: {directory}. "
+                          "Evaluation batches may not contain all ten ranks.")
+            continue
+        if not np.isfinite(loss):
+            raise ValueError(f"Nonfinite validation batch loss: {directory}")
         rows[step] = float(loss)
     steps = np.asarray(sorted(rows), dtype=int)
     return steps, np.asarray([rows[step] for step in steps])
@@ -147,7 +151,8 @@ def plot_loss(steps, losses, output: Path, window: int, validation_steps, valida
     if len(validation_steps):
         ax.plot(validation_steps, validation_losses, "o-", color="#e45756", linewidth=1.8,
                 label="Validation batch loss (sample-weighted)")
-    ax.set(title="Strength V1: training and validation loss", xlabel="Optimizer step (global, across resumes)",
+    title = "Strength V1: training and validation loss" if len(validation_steps) else "Strength V1: training loss"
+    ax.set(title=title, xlabel="Optimizer step (global, across resumes)",
            ylabel="Global rank-mean ranking loss")
     ax.grid(alpha=0.2)
     ax.legend()
@@ -195,7 +200,7 @@ def plot_distributions(table: pd.DataFrame, boundaries, output: Path, label: str
                 transform=ax.get_xaxis_transform(), ha="center", va="top", fontsize=8)
     ax.set(title=f"Validation per-game score distributions | {label}\n"
                  "One score per game: mean over all positions of the designated player\n"
-                 "Dashed lines: training question cutpoints (reference only for individual games)",
+                 "Dashed lines: saved training cutpoints (reference for individual games)",
            xlabel="Game scalar score (mean over designated player's positions)",
            ylabel="Density within true rank")
     ax.grid(alpha=0.15)
@@ -205,12 +210,67 @@ def plot_distributions(table: pd.DataFrame, boundaries, output: Path, label: str
     save_figure(fig, output, "score_distributions_cutpoints.png")
 
 
+def plot_compact(args):
+    from go_aicup.tasks.strength.infer_rank_v1 import LOSS_DTYPE
+    losses = np.load(args.run_dir / "losses.npy", allow_pickle=False)
+    if (losses.dtype != LOSS_DTYPE or losses.ndim != 1 or not len(losses)
+            or (losses["step"] < 0).any() or (np.diff(losses["step"]) <= 0).any()
+            or not np.isfinite(losses["train_loss"]).all()
+            or not np.isfinite(losses["valid_loss"]).all()):
+        raise ValueError("Invalid or empty full-dataset losses.npy")
+    if args.evaluation_dir:
+        raise ValueError("--evaluation-dir applies only to legacy runs")
+    payload = config = manifest = None
+    if not args.loss_only:
+        from go_aicup.tasks.strength.evaluate_rank_v1 import load_saved_run
+        payload, config, manifest = load_saved_run(args.run_dir, args.dataset_dir, args.cache_dir)
+    output = args.output_dir or args.run_dir / "plots"
+    output.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(11, 5), layout="constrained")
+    ax.plot(losses["step"], losses["train_loss"], "o-", label="Full training loss (eval mode)")
+    ax.plot(losses["step"], losses["valid_loss"], "o-", label="Full validation loss (eval mode)")
+    ax.set(title="Strength V1: full-dataset ranking losses", xlabel="Optimizer step",
+           ylabel="Ranking loss from full-dataset rank means")
+    ax.grid(alpha=0.2)
+    ax.legend()
+    save_figure(fig, output, "loss_vs_step.png")
+    if args.loss_only:
+        return
+    from go_aicup.data.board_cache import _close_mmap
+    from go_aicup.tasks.strength.evaluate_rank_v1 import aggregate_games, question_scores, decode_scores
+    directory = Path(config["paths"]["dataset_dir"])
+    meta = pd.read_parquet(directory / "strength_v1_games.parquet")
+    scores = np.load(args.run_dir / "valid_scores.npy", mmap_mode="r", allow_pickle=False)
+    indices = np.load(directory / "valid_game.npy", mmap_mode="r", allow_pickle=False)
+    try:
+        if scores.dtype != np.float32 or scores.shape != indices.shape or scores.shape != (manifest["sets"]["valid"]["num_samples"],):
+            raise ValueError("Validation scores disagree with indices/manifest")
+        means, counts = aggregate_games(scores, indices, len(meta))
+    finally:
+        _close_mmap(scores)
+        _close_mmap(indices)
+    selected = counts > 0
+    if not np.array_equal(selected, meta["split"].to_numpy() == "valid") or not np.array_equal(counts[selected], meta.loc[selected, "player_ply_count"].to_numpy()):
+        raise ValueError("Validation game coverage mismatch")
+    boundaries = np.asarray(payload["cutpoints"]["boundaries"])
+    questions = pd.read_parquet(directory / "strength_v1_validation_questions.parquet")
+    values = question_scores(questions, means)
+    table = questions.assign(score=values, prediction=decode_scores(values, boundaries))
+    games = meta.loc[selected, ["game_index", "rank_id"]].assign(score=means[selected], player_plies=counts[selected])
+    label = f"seed {payload['seed']} | step {payload['optimizer_steps']}"
+    plot_confusion(table, output, label)
+    plot_distributions(games, boundaries, output, label, args.bins)
+    print("Cutpoints fitted on all training plies; game/question means use the same boundaries.")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", type=Path, required=True, help="Run containing train.jsonl")
     parser.add_argument("--evaluation-dir", type=Path,
                         help="Specific completed evaluation; default: latest completed epoch in run")
     parser.add_argument("--output-dir", type=Path, help="Default: selected evaluation/plots, or run/plots for loss-only")
+    parser.add_argument("--dataset-dir", type=Path, help="Compact run: relocated processed directory")
+    parser.add_argument("--cache-dir", type=Path, help="Compact run: relocated board cache")
     parser.add_argument("--loss-only", action="store_true", help="Plot loss without requiring evaluation")
     parser.add_argument("--smooth-window", type=int, default=50, help="Trailing logged updates; 1 disables smoothing")
     parser.add_argument("--bins", type=int, default=50, help="Common histogram bins")
@@ -220,6 +280,9 @@ def main() -> None:
     if args.loss_only and args.evaluation_dir:
         parser.error("--loss-only cannot be combined with --evaluation-dir")
     try:
+        if (args.run_dir / "losses.npy").exists():
+            plot_compact(args)
+            return
         steps, losses = load_loss(args.run_dir / "train.jsonl")
         evaluation = args.evaluation_dir
         if not args.loss_only:

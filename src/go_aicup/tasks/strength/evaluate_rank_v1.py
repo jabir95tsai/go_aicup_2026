@@ -1,35 +1,20 @@
-"""Fixed-weight V1 inference, train-only ordered cutpoints and k-bucket scores.
-
-All positions -> equal-weight game means -> equal-weight same-player/color
-question means. Calibration uses only the fixed training questions. No
-validation labels enter the cutpoint optimizer.
-"""
-
+"""CPU evaluation of saved, index-aligned V1 scores; no model inference."""
 from __future__ import annotations
 
 import argparse
 import json
-import os
+import tempfile
 from pathlib import Path
-import time
 
 import numpy as np
 import pandas as pd
 import torch
-import torch.distributed as dist
 
 from go_aicup.data.board_cache import _close_mmap
 from go_aicup.metrics import K_BUCKETS, NEAR, rank_report
-from go_aicup.models.strength_resnet import StrengthResNet
-from go_aicup.tasks.strength.dataset import GlobalBatchSampler, PackedBoardDataset, make_loader
-from go_aicup.tasks.strength.losses import distributed, rank_statistics, ranking_loss_from_means
-from go_aicup.tasks.strength.runtime import (DEFAULT_CONFIG, autocast_context, barrier,
-    check_index_hashes, file_hash, load_dataset_manifest, model_state_hash, read_config,
-    setup_distributed, write_json)
+from go_aicup.tasks.strength.runtime import file_hash, load_dataset_manifest, check_index_hashes
 
-
-class EvaluationInterrupted(RuntimeError):
-    """All processes stopped at a shared inference batch boundary."""
+CHUNK = 1_000_000
 
 
 def decode_scores(scores, boundaries) -> np.ndarray:
@@ -41,61 +26,68 @@ def decode_scores(scores, boundaries) -> np.ndarray:
     return np.searchsorted(boundaries, scores, side="right").astype(np.int64)
 
 
-def fit_cutpoints(scores, rank_ids, k) -> dict:
-    """Exact ordered-interval DP, weighting each of the four k buckets 1/4.
+def fit_cutpoints(scores, rank_ids, *, scratch_dir=None, stop_check=None) -> dict:
+    """Exact ordered-interval DP on ALL training plies, each weighted equally.
 
-    Equal scores are indivisible. Empty intervals/repeated boundaries are
-    legal. Ties use the first predecessor for reproducible backtracking.
-    Complexity O(10 * number_of_distinct_scores), excluding sorting.
+    Vectorized prefix maxima preserve first-predecessor ties. Backpointers
+    use temporary uint32 memmaps rather than nine in-memory int64 vectors.
+    Equal scores are indivisible; repeated boundaries/empty ranks are legal.
     """
-    scores = np.asarray(scores, dtype=np.float64)
-    rank_ids, k = np.asarray(rank_ids, dtype=np.int64), np.asarray(k, dtype=np.int64)
-    if scores.ndim != 1 or not len(scores) or scores.shape != rank_ids.shape or scores.shape != k.shape:
-        raise ValueError("calibration inputs must be nonempty equal-length vectors")
-    if not np.isfinite(scores).all() or np.any((rank_ids < 0) | (rank_ids > 9)):
-        raise ValueError("invalid calibration scores or ranks")
-    if set(k.tolist()) != set(K_BUCKETS):
-        raise ValueError("calibration requires all four k buckets")
-    weights = np.empty(len(scores), dtype=np.float64)
-    for bucket in K_BUCKETS:
-        selected = k == bucket
-        weights[selected] = 0.25 / int(selected.sum())
-    unique, inverse = np.unique(scores, return_inverse=True)
-    rewards = np.zeros((10, len(unique)), dtype=np.float64)
-    for prediction in range(10):
-        error = np.abs(rank_ids - prediction)
-        reward = np.where(error == 0, 1.0, np.where(error == 1, NEAR, 0.0)) * weights
-        rewards[prediction] = np.bincount(inverse, weights=reward, minlength=len(unique))
-    prefix = np.pad(np.cumsum(rewards, axis=1), ((0, 0), (1, 0)))
-    previous = prefix[0].copy()
-    predecessors = np.zeros((10, len(unique) + 1), dtype=np.int64)
-    for prediction in range(1, 10):
-        candidates = previous - prefix[prediction]
-        best, where = -np.inf, 0
-        current = np.empty_like(previous)
-        for end, candidate in enumerate(candidates):
-            if candidate > best:
-                best, where = float(candidate), end
-            predecessors[prediction, end] = where
-            current[end] = prefix[prediction, end] + best
-        previous = current
-    ends = [0] * 9
-    end = len(unique)
-    for prediction in range(9, 0, -1):
-        end = int(predecessors[prediction, end])
-        ends[prediction - 1] = end
+    scores, labels = np.asarray(scores), np.asarray(rank_ids)
+    if scores.ndim != 1 or not len(scores) or scores.shape != labels.shape:
+        raise ValueError("nonempty equal-length score/label vectors required")
+    for start in range(0, len(scores), CHUNK):
+        values, ranks = scores[start:start + CHUNK], labels[start:start + CHUNK]
+        if not np.isfinite(values).all() or np.any((ranks < 0) | (ranks > 9)) or ranks.dtype.kind not in "iu":
+            raise ValueError("invalid training scores or ranks")
+    order = np.argsort(scores, kind="stable")
+    sorted_scores = scores[order]
+    sorted_labels = labels[order].astype(np.int8, copy=False)
+    del order
+    starts = np.r_[0, np.flatnonzero(sorted_scores[1:] != sorted_scores[:-1]) + 1]
+    unique = sorted_scores[starts].astype(np.float64)
+    del sorted_scores
+    size = len(unique) + 1
+    if size > np.iinfo(np.uint32).max:
+        raise ValueError("too many unique scores for uint32 DP")
+
+    def prefix_for(prediction):
+        reward = (sorted_labels == prediction).astype(np.float64)
+        reward += (np.abs(sorted_labels - prediction) == 1) * NEAR
+        prefix = np.empty(size, dtype=np.float64)
+        prefix[0] = 0.0
+        np.cumsum(np.add.reduceat(reward, starts) / len(scores), out=prefix[1:])
+        return prefix
+
+    previous = prefix_for(0)
+    with tempfile.TemporaryDirectory(prefix="cutpoints_", dir=scratch_dir) as temporary:
+        pointers = np.lib.format.open_memmap(Path(temporary) / "predecessors.npy", mode="w+",
+                                             dtype=np.uint32, shape=(9, size))
+        try:
+            for prediction in range(1, 10):
+                if stop_check is not None and stop_check():
+                    raise InterruptedError("cutpoint fitting interrupted")
+                prefix = prefix_for(prediction)
+                candidates = previous - prefix
+                maxima = np.maximum.accumulate(candidates)
+                records = np.r_[True, candidates[1:] > maxima[:-1]]
+                predecessors = np.where(records, np.arange(size, dtype=np.uint32), np.uint32(0))
+                np.maximum.accumulate(predecessors, out=pointers[prediction - 1])
+                previous = prefix + maxima
+            ends, end = [0] * 9, len(unique)
+            for prediction in range(9, 0, -1):
+                end = int(pointers[prediction - 1, end])
+                ends[prediction - 1] = end
+        finally:
+            _close_mmap(pointers)
     above_max = float(np.nextafter(unique[-1], np.inf))
     if not np.isfinite(above_max):
-        raise ValueError("calibration score magnitude cannot be represented by finite cutpoints")
+        raise ValueError("finite upper cutpoint cannot be represented")
     boundaries = [float(unique[index]) if index < len(unique) else above_max for index in ends]
-    predictions = decode_scores(scores, boundaries)
-    score = sum(float((np.where(np.abs(predictions[k == bucket] - rank_ids[k == bucket]) == 0, 1.0,
-                    np.where(np.abs(predictions[k == bucket] - rank_ids[k == bucket]) == 1, NEAR, 0.0))).mean())
-                for bucket in K_BUCKETS) / 4
-    return {"boundaries": boundaries, "training_equal_k_score": score,
-            "dp_reward": float(previous[-1]), "unique_scores": len(unique),
-            "empty_predicted_ranks": sorted(set(range(10)) - set(predictions.tolist())),
-            "boundary_rule": "searchsorted(side=right); score equal to cutpoint enters higher interval"}
+    return {"boundaries": boundaries, "training_ply_score": float(previous[-1]),
+            "unique_scores": len(unique), "num_training_plies": len(scores),
+            "scope": "all training positions; equal weight per position; no validation labels",
+            "boundary_rule": "searchsorted(side=right)"}
 
 
 def question_scores(questions: pd.DataFrame, games: np.ndarray) -> np.ndarray:
@@ -111,213 +103,116 @@ def question_scores(questions: pd.DataFrame, games: np.ndarray) -> np.ndarray:
     return np.asarray(result)
 
 
-def distribution(scores, labels) -> dict:
-    scores, labels = np.asarray(scores), np.asarray(labels)
-    if not len(scores) or not np.isfinite(scores).all():
-        raise ValueError("empty/nonfinite score distribution")
-    low, high = float(scores.min()), float(scores.max())
-    if low == high:
-        low, high = low - 0.5, high + 0.5
-    histograms, records = [], []
-    for rank in range(10):
-        values = scores[labels == rank]
-        if not len(values):
-            raise ValueError(f"distribution missing rank {rank}")
-        hist, edges = np.histogram(values, bins=64, range=(low, high))
-        histograms.append(hist / len(values))
-        records.append({"rank_id": rank, "n": len(values), "mean": float(values.mean(dtype=np.float64)),
-                        "std": float(values.std(dtype=np.float64)),
-                        "quantiles_05_25_50_75_95": np.quantile(values, [0.05, 0.25, 0.5, 0.75, 0.95]).tolist(),
-                        "histogram": hist.tolist()})
-    return {"ranks": records, "histogram_edges": edges.tolist(),
-            "adjacent_histogram_overlap": [float(np.minimum(histograms[r], histograms[r + 1]).sum())
-                                            for r in range(9)]}
+def score_report(scores, labels, boundaries) -> dict:
+    """Chunked metrics, avoiding full-size prediction/error arrays."""
+    totals = np.zeros(3, dtype=np.float64)
+    for start in range(0, len(scores), CHUNK):
+        error = np.abs(decode_scores(scores[start:start + CHUNK], boundaries) - labels[start:start + CHUNK])
+        totals += [np.where(error == 0, 1., np.where(error == 1, NEAR, 0.)).sum(),
+                   (error == 0).sum(), error.sum()]
+    return dict(zip(("score", "acc", "mae"), (totals / len(scores)).tolist()))
 
 
-@torch.no_grad()
-def infer_positions(model, config: dict, manifest: dict, prefix: str, output: Path,
-                    device, rank: int, world: int, stop_check=None):
-    directory = Path(config["paths"]["dataset_dir"])
-    meta = pd.read_parquet(Path(config["paths"]["cache_dir"]) / "games.parquet")
-    dataset = PackedBoardDataset(directory / f"{prefix}_game.npy", directory / f"{prefix}_ply.npy",
-                                Path(config["paths"]["cache_dir"]),
-                                max_open_shards=config["loader"]["max_open_shards"], seed=config["seed"])
-    sampler = GlobalBatchSampler(len(dataset), config["evaluation"]["global_batch_size"], rank=rank, world_size=world)
-    options = {key: config["loader"][key] for key in
-               ("num_workers", "prefetch_factor", "pin_memory", "persistent_workers")}
-    loader = make_loader(dataset, sampler, **options)
-    score_path = output / f"{prefix}_ply_scores.npy"
-    if rank == 0:
-        output.mkdir(parents=True, exist_ok=True)
-        array = np.lib.format.open_memmap(score_path, mode="w+", dtype=np.float32, shape=(len(dataset),))
-        array[:] = np.nan
-        array.flush()
-        _close_mmap(array)
-    barrier()
-    score_store = np.load(score_path, mmap_mode="r+", allow_pickle=False)
-    game_sums = np.zeros(len(meta), dtype=np.float64)
-    game_counts = np.zeros(len(meta), dtype=np.float64)
-    rank_sums = torch.zeros(10, dtype=torch.float64, device=device)
-    rank_counts = torch.zeros(10, dtype=torch.float64, device=device)
-    batch_losses, missing_batches = [], []
-    started = time.monotonic()
-    model.eval()
-    try:
-        for step, batch in enumerate(loader):
-            stopping = torch.tensor(int(stop_check is not None and stop_check()),
-                                    device=device, dtype=torch.int32)
-            if distributed():
-                dist.all_reduce(stopping, op=dist.ReduceOp.MAX)
-            if stopping.item():
-                raise EvaluationInterrupted("inference interrupted; partial outputs have no complete.json")
-            valid = batch["valid"].bool()
-            labels = batch["rank_id"][valid].to(device, non_blocking=True)
-            if valid.any():
-                x = batch["planes"][valid].to(device, dtype=torch.float32, non_blocking=True)
-                if config["training"]["channels_last"]:
-                    x = x.contiguous(memory_format=torch.channels_last)
-                with autocast_context(config, device):
-                    scores = model(x).float()
-            else:
-                scores = torch.empty(0, device=device, dtype=torch.float32)
-            sums, counts = rank_statistics(scores, labels, differentiable=False)
-            rank_sums += sums.double()
-            rank_counts += counts.double()
-            if (counts > 0).all():
-                batch_losses.append({"batch": step, "n": int(counts.sum().item()),
-                                     "loss": float(ranking_loss_from_means(sums / counts).item())})
-            else:
-                missing_batches.append({"batch": step, "n": int(counts.sum().item()),
-                                        "missing_ranks": torch.where(counts == 0)[0].tolist()})
-            values = scores.cpu().numpy()
-            indices = batch["sample_index"][valid].numpy()
-            games = batch["game_index"][valid].numpy()
-            score_store[indices] = values
-            np.add.at(game_sums, games, values)
-            np.add.at(game_counts, games, 1)
-            if rank == 0 and (step + 1) % config["training"]["log_every_steps"] == 0:
-                print(f"eval {prefix}: batch {step + 1}/{len(sampler)}", flush=True)
-        score_store.flush()
-    finally:
-        dataset.close()
-        _close_mmap(score_store)
-    if distributed():
-        for array in (game_sums, game_counts):
-            tensor = torch.from_numpy(array).to(device)
-            dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
-            array[:] = tensor.cpu().numpy()
-    if int(game_counts.sum()) != manifest["sets"][prefix]["num_samples"]:
-        raise ValueError("inference did not cover each sample exactly once")
-    game_scores = np.full(len(meta), np.nan, dtype=np.float64)
-    np.divide(game_sums, game_counts, out=game_scores, where=game_counts > 0)
-    barrier()
-    diagnostics = None
-    if rank == 0:
-        selected = game_counts > 0
-        np.save(output / f"{prefix}_game_scores.npy", game_scores)
-        meta.loc[selected, ["game_index", "rank_id", "player_id", "color"]].assign(
-            score=game_scores[selected], player_plies=game_counts[selected].astype(np.int64)
-        ).to_parquet(output / f"{prefix}_game_scores.parquet", index=False)
-        ply_scores = np.load(score_path, mmap_mode="r", allow_pickle=False)
-        game_indices = np.load(directory / f"{prefix}_game.npy", mmap_mode="r", allow_pickle=False)
-        try:
-            ply_labels = meta["rank_id"].to_numpy()[game_indices]
-            ply_distribution = distribution(ply_scores, ply_labels)
-        finally:
-            _close_mmap(ply_scores)
-            _close_mmap(game_indices)
-        means = (rank_sums / rank_counts).float()
-        diagnostics = {"num_samples": int(game_counts.sum()), "num_games": int(selected.sum()),
-                       "seconds": time.monotonic() - started,
-                       "batch_loss_unweighted": float(np.mean([row["loss"] for row in batch_losses])) if batch_losses else None,
-                       "batch_loss_sample_weighted": float(np.average([row["loss"] for row in batch_losses],
-                                                          weights=[row["n"] for row in batch_losses])) if batch_losses else None,
-                       "batch_losses": batch_losses, "missing_rank_batches": missing_batches,
-                       "whole_dataset_mean_loss": float(ranking_loss_from_means(means).item()),
-                       "rank_means": means.cpu().tolist(), "rank_counts": rank_counts.cpu().tolist(),
-                       "ordered_means": bool((means[1:] > means[:-1]).all().item()),
-                       "ply_distribution": ply_distribution,
-                       "game_distribution": distribution(game_scores[selected], meta["rank_id"].to_numpy()[selected])}
-        if not config["evaluation"]["save_ply_scores"]:
-            score_path.unlink()
-    return game_scores, diagnostics
+def aggregate_games(scores, indices, num_games):
+    sums = np.zeros(num_games, dtype=np.float64)
+    counts = np.zeros(num_games, dtype=np.int64)
+    for start in range(0, len(scores), CHUNK):
+        games = indices[start:start + CHUNK]
+        values = scores[start:start + CHUNK]
+        if not np.isfinite(values).all() or np.any((games < 0) | (games >= num_games)):
+            raise ValueError("nonfinite scores or invalid game indices")
+        sums += np.bincount(games.astype(np.int64), weights=values, minlength=num_games)
+        counts += np.bincount(games.astype(np.int64), minlength=num_games)
+    means = np.full(num_games, np.nan)
+    np.divide(sums, counts, out=means, where=counts > 0)
+    return means, counts
 
 
-def evaluate(model, config: dict, manifest: dict, checkpoint: Path, output: Path,
-             device, rank: int = 0, world: int = 1, stop_check=None) -> dict | None:
-    if rank == 0 and output.exists() and any(output.iterdir()):
-        raise ValueError(f"evaluation output must be new/empty: {output}")
-    barrier()
-    training_games, training_info = infer_positions(model, config, manifest, "calibration", output, device, rank, world, stop_check)
-    validation_games, validation_info = infer_positions(model, config, manifest, "valid", output, device, rank, world, stop_check)
-    result = None
-    if rank == 0:
-        cv_dir = Path(config["paths"]["cv_dir"])
-        train_questions = pd.read_parquet(cv_dir / "strength_v1_train_calibration_questions.parquet")
-        valid_questions = pd.read_parquet(cv_dir / "strength_v1_validation_questions.parquet")
-        train_scores = question_scores(train_questions, training_games)
-        valid_scores = question_scores(valid_questions, validation_games)
-        cutpoints = fit_cutpoints(train_scores, train_questions["rank_id"], train_questions["k"])
-        cutpoints.update(checkpoint_sha256=file_hash(checkpoint), dataset_id=manifest["dataset_id"],
-                         training_questions_sha256=manifest["cv_files"]["strength_v1_train_calibration_questions.parquet"]["sha256"])
-        write_json(output / "cutpoints.json", cutpoints)
-        reports = {}
-        for name, questions, scores in (("training", train_questions, train_scores),
-                                        ("validation", valid_questions, valid_scores)):
-            predictions = decode_scores(scores, cutpoints["boundaries"])
-            report = rank_report(predictions, questions["rank_id"].to_numpy(), questions["k"].to_numpy())
-            equal_k = {key: float(report.loc[[str(k) for k in K_BUCKETS], key].mean())
-                       for key in ("score", "acc", "mae")}
-            confusion = {}
-            for k in K_BUCKETS:
-                mask = questions["k"].to_numpy() == k
-                matrix = np.zeros((10, 10), dtype=np.int64)
-                np.add.at(matrix, (questions["rank_id"].to_numpy()[mask], predictions[mask]), 1)
-                confusion[str(k)] = matrix.tolist()
-            reports[name] = {"by_k": report.to_dict(orient="index"), "equal_k": equal_k,
-                             "confusion_true_rows_pred_columns": confusion,
-                             "question_distribution": distribution(scores, questions["rank_id"].to_numpy())}
-            questions.assign(score=scores, prediction=predictions).to_parquet(
-                output / f"{name}_question_predictions.parquet", index=False)
-        result = {"checkpoint": str(checkpoint), "checkpoint_sha256": cutpoints["checkpoint_sha256"],
-                  "model_state_sha256": model_state_hash(model),
-                  "dataset_id": manifest["dataset_id"], "player_overlap": manifest["player_overlap"],
-                  "calibration_scope": "only unique training games used by fixed calibration questions; frozen model/BN, no D4",
-                  "cutpoints": cutpoints, "training_calibration": training_info,
-                  "validation": validation_info, "questions": reports}
-        write_json(output / "metrics.json", result)
-        write_json(output / "complete.json", {"checkpoint_sha256": cutpoints["checkpoint_sha256"],
-                                               "metrics_sha256": file_hash(output / "metrics.json")})
-        print(json.dumps(reports["validation"]["equal_k"], indent=2), flush=True)
-    barrier()
-    return result
-
-
-def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-    parser.add_argument("--checkpoint", type=Path, required=True)
-    parser.add_argument("--output-dir", type=Path, required=True)
-    args = parser.parse_args(argv)
-    config = read_config(args.config)
+def load_saved_run(run: Path, dataset_dir: Path | None = None, cache_dir: Path | None = None):
+    """Validate artifact hashes, model identity and external processed inputs."""
+    run = Path(run)
+    payload = torch.load(run / "model.pt", map_location="cpu", weights_only=False)
+    if payload.get("artifact_format") != "strength_v1_compact_1":
+        raise ValueError("expected a completed compact V1 model.pt")
+    config = payload["config"]
+    if dataset_dir is not None:
+        config["paths"]["dataset_dir"] = str(dataset_dir.resolve())
+    if cache_dir is not None:
+        config["paths"]["cache_dir"] = str(cache_dir.resolve())
     manifest = load_dataset_manifest(config)
+    if manifest["dataset_id"] != payload["dataset_id"] or config["seed"] != payload["seed"]:
+        raise ValueError("score dataset/seed mismatch")
     check_index_hashes(config, manifest)
-    from go_aicup.tasks.strength.train_rank_v1 import configure_torch, resolve_checkpoint
-    configure_torch(config)
-    checkpoint_path = resolve_checkpoint(args.checkpoint.resolve())
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    if checkpoint["dataset_id"] != manifest["dataset_id"] or checkpoint["config"]["model"] != config["model"]:
-        raise ValueError("checkpoint dataset/model does not match evaluation config")
-    device, rank, world = setup_distributed(config)
-    try:
-        model = StrengthResNet(**config["model"]).to(device)
-        model.load_state_dict(checkpoint["model"])
-        if config["training"]["channels_last"]:
-            model.to(memory_format=torch.channels_last)
-        evaluate(model, config, manifest, checkpoint_path, args.output_dir.resolve(), device, rank, world)
-    finally:
-        if distributed():
-            dist.destroy_process_group()
+    for name, digest in payload["artifact_sha256"].items():
+        if name not in ("losses.npy", "train_scores.npy", "valid_scores.npy") or file_hash(run / name) != digest:
+            raise ValueError(f"artifact integrity mismatch: {name}")
+    return payload, config, manifest
+
+
+def evaluate_saved(run: Path, *, payload=None, dataset_dir=None, cache_dir=None,
+                   fit=False, stop_check=None):
+    """Return reports from saved scores. Training passes its unpublished payload."""
+    run = Path(run)
+    if payload is None:
+        payload, config, manifest = load_saved_run(run, dataset_dir, cache_dir)
+    else:
+        config = payload["config"]
+        manifest = load_dataset_manifest(config)
+    directory = Path(config["paths"]["dataset_dir"])
+    meta = pd.read_parquet(directory / "strength_v1_games.parquet")
+    if not np.array_equal(meta["game_index"], np.arange(len(meta))):
+        raise ValueError("game_index must match metadata row order")
+    all_labels = meta["rank_id"].to_numpy(dtype=np.int8)
+    results = {"seed": payload["seed"], "dataset_id": manifest["dataset_id"],
+               "player_overlap": manifest["player_overlap"]}
+    boundaries = None if fit else payload["cutpoints"]["boundaries"]
+    for prefix in ("train", "valid"):
+        scores = np.load(run / f"{prefix}_scores.npy", mmap_mode="r", allow_pickle=False)
+        indices = np.load(directory / f"{prefix}_game.npy", mmap_mode="r", allow_pickle=False)
+        plies = np.load(directory / f"{prefix}_ply.npy", mmap_mode="r", allow_pickle=False)
+        try:
+            expected = manifest["sets"][prefix]
+            if scores.dtype != np.float32 or scores.shape != (expected["num_samples"],) or indices.shape != scores.shape or plies.shape != scores.shape:
+                raise ValueError(f"{prefix}: invalid score/index shape or dtype")
+            games, counts = aggregate_games(scores, indices, len(meta))
+            selected = counts > 0
+            if selected.sum() != expected["num_games"] or not np.array_equal(selected, meta["split"].to_numpy() == prefix):
+                raise ValueError(f"{prefix}: incorrect game coverage")
+            if not np.array_equal(counts[selected], meta.loc[selected, "player_ply_count"].to_numpy()):
+                raise ValueError(f"{prefix}: incorrect per-game ply coverage")
+            labels = all_labels[indices]
+            if prefix == "train" and fit:
+                payload["cutpoints"] = fit_cutpoints(scores, labels, scratch_dir=run, stop_check=stop_check)
+                boundaries = payload["cutpoints"]["boundaries"]
+            results[prefix] = {"plies": score_report(scores, labels, boundaries),
+                               "games": score_report(games[selected], all_labels[selected], boundaries),
+                               "num_samples": len(scores), "num_games": int(selected.sum())}
+            if prefix == "valid":
+                questions = pd.read_parquet(directory / "strength_v1_validation_questions.parquet")
+                for row in questions.itertuples(index=False):
+                    chosen = meta.iloc[np.asarray(row.games, dtype=np.int64)]
+                    if not (chosen["split"] == "valid").all() or not (chosen["rank_id"] == row.rank_id).all() or chosen["player_id"].nunique() != 1 or chosen["color"].nunique() != 1:
+                        raise ValueError("invalid validation question membership")
+                values = question_scores(questions, games)
+                predictions = decode_scores(values, boundaries)
+                report = rank_report(predictions, questions["rank_id"].to_numpy(), questions["k"].to_numpy())
+                results["questions"] = {"by_k": report.to_dict(orient="index"),
+                    "equal_k": {key: float(report.loc[[str(k) for k in K_BUCKETS], key].mean()) for key in ("score", "acc", "mae")}}
+        finally:
+            for array in (scores, indices, plies):
+                _close_mmap(array)
+    results["cutpoints"] = payload["cutpoints"]
+    return results
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--run-dir", type=Path, required=True)
+    parser.add_argument("--dataset-dir", type=Path, help="Override processed location after moving artifacts")
+    parser.add_argument("--cache-dir", type=Path, help="Override shared board cache location")
+    args = parser.parse_args(argv)
+    result = evaluate_saved(args.run_dir, dataset_dir=args.dataset_dir, cache_dir=args.cache_dir)
+    print(json.dumps(result, indent=2, allow_nan=False))
     return 0
 
 

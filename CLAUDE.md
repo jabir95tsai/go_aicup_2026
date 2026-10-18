@@ -97,6 +97,8 @@ H200 佇列限制**每張 GPU 最多 12 CPU 核心、200GB 主記憶體**；200G
 
 **棋力 V1 校準時機更新（2026-10-17）：** 依使用者決定，只在全部設定 epochs 完成後，以最終模型建立一次 training-only 的 9 個切點並評估 validation，不再每 epoch 校準／評估。訓練期間仍定時與每 epoch 保存最新 checkpoint；中途達到更新／時間上限不建立切點，最終評估中斷則續跑重試。
 
+**棋力 V1 精簡流程更新（2026-10-18）：** 依使用者確認，各 seed 自行切分、訓練 1 epoch；每 100 steps 與最後一步完整推論 training／validation，以全資料各 rank 平均 score 計 loss。processed 統一放每 seed 的 strength_v1 目錄，取消獨立 cv／calibration 子集；切點改由全部 training 逐手分數擬合。成功後 run 僅留 model.pt、losses.npy、train_scores.npy、valid_scores.npy；評估直接讀保存的分數。此更新取代上方 10/17 校準流程，詳見 README；未啟動正式訓練。
+
 ### 仍待確認 ⏳
 
 | 項目 | 為什麼重要 | 何時／去哪查 |

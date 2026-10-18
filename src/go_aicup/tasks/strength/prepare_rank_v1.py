@@ -1,4 +1,4 @@
-"""Explicit game splits, fixed questions and compact player-ply indices.
+"""Self-contained game splits, validation questions and player-ply indices.
 
 Consumes board_cache's games.parquet and actual color memmaps. No CSV/SGF
 parsing, board decompression, GPU allocation or training occurs here.
@@ -65,13 +65,12 @@ def write_sample_indices(cache: BoardCache, meta: pd.DataFrame, selected_games,
 
 def prepare(config: dict) -> Path:
     directory = Path(config["paths"]["dataset_dir"])
-    cv_directory = Path(config["paths"]["cv_dir"])
     cache = BoardCache(Path(config["paths"]["cache_dir"]),
                        max_open_shards=config["loader"]["max_open_shards"])
     try:
-        identity = {"format_version": 1, "cache_build_id": cache.manifest["build_id"],
+        identity = {"format_version": 2, "cache_build_id": cache.manifest["build_id"],
                     "split_config": config["split"], "questions_config": config["questions"],
-                    "seed": config["seed"], "cv_dir": str(cv_directory),
+                    "seed": config["seed"],
                     "generator_sha256": {name: file_hash(path) for name, path in {
                         "cv.py": Path(__file__).resolve().parents[2] / "data" / "cv.py",
                         "prepare_rank_v1.py": Path(__file__),
@@ -79,38 +78,32 @@ def prepare(config: dict) -> Path:
         build_path = directory / "build.json"
         if build_path.exists():
             if json.loads(build_path.read_text(encoding="utf-8")) != identity:
-                raise ValueError("preparation settings/code changed; choose new dataset and CV directories")
+                raise ValueError("preparation settings/code changed; choose a new dataset directory")
             if (directory / "manifest.json").exists():
                 record = load_dataset_manifest(config)
                 check_index_hashes(config, record)
                 return directory / "manifest.json"
         else:
-            for target in (directory, cv_directory):
+            for target in (directory,):
                 if target.exists() and any(target.iterdir()):
                     raise ValueError(f"refusing to replace an unrelated nonempty directory: {target}")
             directory.mkdir(parents=True, exist_ok=True)
-            cv_directory.mkdir(parents=True, exist_ok=True)
             write_json(build_path, identity)
         meta = pd.read_parquet(cache.directory / "games.parquet")
         if not np.array_equal(meta["game_index"], np.arange(len(meta))):
             raise ValueError("cache game_index must match metadata row order")
         table = make_strength_v1_split(meta, config["seed"], **config["split"])
-        train_questions, train_eligibility = make_strength_v1_questions(
-            table, "train", config["questions"]["train_calibration"], config["seed"] + 1)
-        valid_questions, valid_eligibility = make_strength_v1_questions(
+        valid_questions, _ = make_strength_v1_questions(
             table, "valid", config["questions"]["validation"], config["seed"] + 2)
-        cv_tables = {"strength_v1_games.parquet": table,
-                     "strength_v1_train_calibration_questions.parquet": train_questions,
-                     "strength_v1_validation_questions.parquet": valid_questions,
-                     "strength_v1_eligibility.parquet": pd.concat([train_eligibility, valid_eligibility], ignore_index=True)}
-        for name, frame in cv_tables.items():
-            temporary = cv_directory / (name + ".tmp")
+        tables = {"strength_v1_games.parquet": table,
+                     "strength_v1_validation_questions.parquet": valid_questions}
+        for name, frame in tables.items():
+            temporary = directory / (name + ".tmp")
             frame.to_parquet(temporary, index=False)
-            os.replace(temporary, cv_directory / name)
+            os.replace(temporary, directory / name)
         selections = {
             "train": table.loc[table["split"] == "train", "game_index"].to_numpy(),
             "valid": table.loc[table["split"] == "valid", "game_index"].to_numpy(),
-            "calibration": np.unique(np.concatenate(train_questions["games"].to_numpy())),
         }
         sets = {name: write_sample_indices(cache, meta, games, directory, name)
                 for name, games in selections.items()}
@@ -118,11 +111,11 @@ def prepare(config: dict) -> Path:
                     "sha256": file_hash(directory / f"{prefix}_{kind}.npy"),
                     "bytes": (directory / f"{prefix}_{kind}.npy").stat().st_size}
                  for prefix in sets for kind in ("game", "ply")}
-        cv_files = {name: {"sha256": file_hash(cv_directory / name),
-                           "bytes": (cv_directory / name).stat().st_size} for name in cv_tables}
-        record = dict(identity, complete=True, sets=sets, files=files, cv_files=cv_files,
+        table_files = {name: {"sha256": file_hash(directory / name),
+                           "bytes": (directory / name).stat().st_size} for name in tables}
+        record = dict(identity, complete=True, sets=sets, files=files, table_files=table_files,
                       player_overlap=strength_v1_overlap(table),
-                      note="Game-disjoint split; players may overlap. Calibration uses training games only.")
+                      note="Game-disjoint split; players may overlap. Cutpoints use all training positions.")
         record["dataset_id"] = object_hash(record)
         write_json(directory / "manifest.json", record)
         print(json.dumps({"sets": sets, "player_overlap": record["player_overlap"]}, indent=2), flush=True)

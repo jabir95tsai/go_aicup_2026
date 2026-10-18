@@ -26,8 +26,10 @@ def read_config(path: Path = DEFAULT_CONFIG) -> dict:
         raise ValueError("precision must be bf16, fp16 or fp32")
     if config["device"] not in ("cuda", "cpu"):
         raise ValueError("device must be cuda or cpu")
-    if not 1 <= config["training"]["epochs"] <= 10:
-        raise ValueError("V1 supports one to ten epochs")
+    if config["training"]["epochs"] != 1:
+        raise ValueError("compact V1 training requires exactly one epoch")
+    if config["training"].get("evaluate_every_steps", 100) < 1:
+        raise ValueError("evaluate_every_steps must be positive")
     if config["training"]["global_batch_size"] < 10:
         raise ValueError("global batch must fit all ten ranks")
     if config["device"] == "cpu" and config["precision"] != "fp32":
@@ -41,7 +43,7 @@ def load_dataset_manifest(config: dict) -> dict:
     cache = json.loads((Path(config["paths"]["cache_dir"]) / "manifest.json").read_text(encoding="utf-8"))
     expected = {"cache_build_id": cache["build_id"], "split_config": config["split"],
                 "questions_config": config["questions"], "seed": config["seed"]}
-    if record.get("complete") is not True or record.get("format_version") != 1:
+    if record.get("complete") is not True or record.get("format_version") != 2:
         raise ValueError("dataset preparation has not completed")
     if object_hash({key: value for key, value in record.items() if key != "dataset_id"}) != record.get("dataset_id"):
         raise ValueError("dataset manifest fingerprint mismatch")
@@ -51,8 +53,8 @@ def load_dataset_manifest(config: dict) -> dict:
         path = directory / name
         if Path(name).name != name or not path.is_file() or path.stat().st_size != info["bytes"]:
             raise ValueError(f"missing/invalid dataset file: {name}")
-    for name, info in record["cv_files"].items():
-        path = Path(config["paths"]["cv_dir"]) / name
+    for name, info in record["table_files"].items():
+        path = directory / name
         if Path(name).name != name or file_hash(path) != info["sha256"]:
             raise ValueError(f"CV file changed: {name}")
     return record

@@ -230,71 +230,70 @@ python -m pytest tests/test_board_cache.py tests/test_sgf_planes.py -q
 
 ## 棋力 V1：資料準備、訓練與評估
 
-**2026-10-12 狀態：以下入口已撰寫，未執行、未驗證。所有命令是後續操作說明，本次沒有啟動它們。** 先完成上述 board cache 轉檔，再依序產生索引與訓練。設定檔為 [configs/strength/rank_cnn_v1.json](configs/strength/rank_cnn_v1.json)；相對資料路徑以 repo 根目錄解析，Nano4 可改為絕對路徑。
+2026-10-18 更新：三個 seed（2027／2028／2029）各自切分、各訓練 1 epoch。預設設定 `rank_cnn_v1.json` 與 seed2027 相同；原 seed2026 資料與輸出不遷移、不刪除。以下是操作說明，修改程式不代表已啟動正式訓練。
+
+啟用 `go` 環境；先完成上方共用 board cache，再在計算 allocation 依序執行：
 
 ```bash
-# CPU 資料準備；在計算 allocation 執行，不用 torchrun。
-python -m go_aicup.tasks.strength.prepare_rank_v1 --config configs/strength/rank_cnn_v1.json
+# 每個 seed 的 split、validation 題目與逐手索引全部放在自己的 dataset_dir。
+for seed in 2027 2028 2029; do
+  python -m go_aicup.tasks.strength.prepare_rank_v1 --config configs/strength/rank_cnn_v1_seed${seed}.json
+done
 
-# Nano4 單節點 8 卡；目前設定檔預設 10 epochs、global batch 65536，每卡 8192。
-python -m torch.distributed.run --standalone --nnodes=1 --nproc-per-node=8 -m go_aicup.tasks.strength.train_rank_v1 --config configs/strength/rank_cnn_v1.json
+# 下例為單節點 8 卡，三個 seed 依序訓練。正式啟動前先量測耗時與顯存。
+for seed in 2027 2028 2029; do
+  python -m torch.distributed.run --standalone --nnodes=1 --nproc-per-node=8 -m go_aicup.tasks.strength.train_rank_v1 --config configs/strength/rank_cnn_v1_seed${seed}.json
+done
 
-# 明確短跑；max-steps 是總 optimizer updates 上限，不是本次新增 steps。
-python -m torch.distributed.run --standalone --nnodes=1 --nproc-per-node=8 -m go_aicup.tasks.strength.train_rank_v1 --config configs/strength/rank_cnn_v1.json --max-steps 100 --skip-evaluation
+# 中斷續跑需要相同 config、程式、dataset、world_size。
+python -m torch.distributed.run --standalone --nnodes=1 --nproc-per-node=8 -m go_aicup.tasks.strength.train_rank_v1 --config configs/strength/rank_cnn_v1_seed2027.json --resume outputs/rank_cnn_v1_seed2027/last.json
 
-# 相同 config／資料／程式／world_size，從最後完成的 batch cursor 續跑。
-python -m torch.distributed.run --standalone --nnodes=1 --nproc-per-node=8 -m go_aicup.tasks.strength.train_rank_v1 --config configs/strength/rank_cnn_v1.json --resume outputs/rank_cnn_v1_seed2026/last.json
-
-# 單獨評估已有完整 checkpoint；output-dir 必須是新的或空的目錄。
-python -m torch.distributed.run --standalone --nnodes=1 --nproc-per-node=8 -m go_aicup.tasks.strength.evaluate_rank_v1 --config configs/strength/rank_cnn_v1.json --checkpoint outputs/rank_cnn_v1_seed2026/last.json --output-dir outputs/rank_cnn_v1_seed2026/evaluation/manual_001
+# 完成後 CPU 直接讀保存的 scores，不重新推論或擬合切點，不額外寫檔。
+python -m go_aicup.tasks.strength.evaluate_rank_v1 --run-dir outputs/rank_cnn_v1_seed2027
 ```
 
-新 run 更換 config 的 `paths.output_dir`；不得覆蓋既有非空 run。目前設定檔預設訓練 **10 epochs**，training 與 evaluation 的 **global batch 均為 65,536**，單節點 8 卡時每卡 8,192；更改 epochs 會改變 scheduler，應作為新 run，不能冒充相同設定的精確續跑。`--skip-evaluation` 僅供明確短跑；完整 run 僅在全部 epochs 訓練完成後，以最終模型建立一次 training-only 的 9 個切點並評估 validation；中途達到 `--max-steps` 或時間限制只保存 checkpoint，不建立切點。最終評估若中斷，續跑會重試未完成的評估。`training.max_runtime_seconds` 可設定這次作業允許的執行秒數，程式預留 `shutdown_margin_seconds=180` 並在共同 batch 邊界保存；SIGINT／SIGTERM 同樣請求保存。精確續跑要求相同 world_size、設定、程式指紋、索引及排列。 每次新 checkpoint 與 `last.json` 完整發布後，只保留最新一份 `.pt` 與完成標記，刪除舊 checkpoint；不另存最佳權重。`best_score.json` 只記錄歷史最佳分數與評估路徑，歷次評估結果仍保留。BF16 不使用 GradScaler；FP16 模式保存 scaler。
+使用同一份 Slurm 腳本分別提交三個獨立的單節點作業（每份獨占 1 節點／8 GPU；不會由腳本替你提交其他作業）：
 
-完整 256-channel／20-block 網路的預設 batch 面向 Nano4 H200。若要在本機撰寫小型開發設定，可明確修改 channels、blocks、batch、precision、workers，並使用不同 run／設定檔；這不代表正式 V1 的 H200 batch 已能在 8GB 顯存執行。正式顯存、步長秒數與完整 epoch 時間均未知，先依計畫短測再啟動長作業。
+```bash
+sbatch --job-name=rank2027 --export=ALL,SEED=2027 scripts/train_rank_v1.slurm
+sbatch --job-name=rank2028 --export=ALL,SEED=2028 scripts/train_rank_v1.slurm
+sbatch --job-name=rank2029 --export=ALL,SEED=2029 scripts/train_rank_v1.slurm
+```
 
-資料與輸出預設位置如下，**本次只有新增／修改程式與文件，以下衍生檔尚未產生**：
+腳本預設 `SEED=2027`，也可直接修改該行。每份作業先準備該 seed 資料，再啟動訓練；存在 `last.json` 時自動續跑。預設 24 小時、64 CPU、1400 GiB RAM；是否同時啟動由排程器決定。需要 account 時，在 `sbatch` 加 `-A <account>`。若改節點路徑，須同步調整腳本 `--chdir` 與 `PROJECT_DIR`；`PYTHON_BIN` 預設使用 `$HOME/.conda/envs/go/bin/python`。Slurm 日誌為 repo 下的 `slurm-<job-name>-<job-id>.out`。
 
-| 位置 | 執行後的內容 |
+
+每級 training／validation 各 80,000／20,000 盤，允許玩家重疊。seed 同時控制切分、模型初始化、shuffle 與 D4。預設 global batch 為 65,536，8 卡時每卡 8,192；3060 Ti 開發需另設小模型／batch 的 CPU 或 GPU 設定。
+
+`training.evaluate_every_steps=100`：在 step 100、200……與 epoch 最後一步，凍結模型／BN、關閉 D4，完整推論 training 和 validation。loss 由整份資料各 rank 的平均 scalar score 計算，並非 batch loss 平均。中途只保留總和／計數；最後一次同時保存完整逐手 score。`losses.npy` 為 structured array，欄位為 `step:int64, train_loss:float64, valid_loss:float64`。不額外保存訓練 batch loss。
+
+| 位置 | 內容 |
 |---|---|
-| `data/processed/boards/strength_v1/` | 沿用 `board_cache` 的 packed shards、colors、moves、games metadata；不複製兩份快取 |
-| `data/processed/cv/strength_v1_seed2026/` | `strength_v1_games.parquet`、固定 training calibration／validation 題組、eligibility |
-| `data/processed/strength_v1/seed2026/` | train／valid／calibration 的 `*_game.npy`、`*_ply.npy`；build／manifest、hash、盤面數與玩家重疊率 |
-| `outputs/rank_cnn_v1_seed2026/` | resolved config、環境／程式指紋、資料 manifest、`train.jsonl`、session 時間與顯存紀錄、`last.json`／`best_score.json`／`finished.json` |
-| `outputs/rank_cnn_v1_seed2026/permutations/` | 每 epoch 的 uint32 排列與 hash；續跑不使用 loader 預取游標 |
-| `outputs/rank_cnn_v1_seed2026/checkpoints/` | 原子發布的 `.pt` 和完成標記；模型、optimizer、scheduler、AMP、各卡 RNG／buffers、epoch／cursor／資料指紋 |
-| `outputs/rank_cnn_v1_seed2026/evaluation/epoch_0009/`（10 epochs） | 手分數 npy（可設不保留）、盤／題預測、training-only `cutpoints.json`、`metrics.json`、完成標記 |
+| `data/processed/boards/strength_v1/` | 共用 packed board cache 與 metadata |
+| `data/processed/strength_v1/seed{seed}/` | `build.json`、`manifest.json`、`strength_v1_games.parquet`、`strength_v1_validation_questions.parquet`、train／valid 的 `*_game.npy` 與 `*_ply.npy` |
+| `outputs/rank_cnn_v1_seed{seed}/` | 成功後只有 `model.pt`、`losses.npy`、`train_scores.npy`、`valid_scores.npy` |
 
-本機輸出根目錄的完整路徑為 **`D:\college\go_aicup_2026\outputs\rank_cnn_v1_seed2026\`**。
+不建立獨立 cv 目錄、calibration 子集或 training 校準題。分數是 `float32[N]`，`scores[i]` 精確對應 processed 中的 `game[i]`／`ply[i]`，涵蓋指定玩家的所有落子位置。processed 索引需保留，各 seed 的陣列不能直接逐列對齊。
 
-`cv.py` 的 V1 API 是**按棋局**切分，保留既有 player-disjoint API。樣本索引依保存的 colors 選取指定玩家的 ply；整個歷史仍保留雙方。每 epoch 全域打亂所有 training 盤面索引，各卡讀取同一 batch 的互斥部分。尾批缺級會明確記錄並跳過更新，optimizer／scheduler／BN 都不前進；補齊項不進入 SyncBN。
+切點使用所有 training 逐手 score 與 rank 標籤，以逐手等權官方 score 的有序區間 DP 擬合 9 個切點；平手 score 不拆分，允許重複切點。回溯表使用暫存 memmap，排序和向量運算仍需要額外主機 RAM 與磁碟。validation 不參與切點擬合。每盤平均指定玩家全部位置，再將題內各盤等權平均後套用同一組切點。評估報告包含 training／validation 逐手及每盤成績，validation 題目 k=5／10／15／20 與 equal-k 成績；不產生 training 題目成績。
 
-訓練 loss 只約束十級的全域平均分數。評估固定模型與 BN、不使用 D4；指定玩家各手平均成盤，再由同玩家同色的 k 盤等權平均成題。校準只推論固定 training 題組所需的唯一棋局，不把這個子集的分布宣稱為全量 training 分布；validation 推論整份指定玩家盤面。九個切點以四個 k 桶等權官方 score 的有序區間動態規劃擬合，平手分數不能拆分，切點綁定 checkpoint SHA-256。`metrics.json` 分別保存 batch loss、整體 rank mean loss、分布、k=5／10／15／20 的分數／accuracy／MAE／混淆矩陣和四桶等權總分。
+`model.pt` 保存權重、BN buffers、seed、設定、dataset ID、索引／score 雜湊、程式／環境資訊及切點，不含 optimizer 等續跑狀態。評估會核對 processed 與 score 雜湊。搬移資料後可加 `--dataset-dir`／`--cache-dir` 指定新位置。
 
-本次沒有單／多卡 loss 與梯度、完整 SyncBN 尾批、checkpoint 續跑、cutpoint DP 或小樣本學習的測試結果；正式資料數、玩家重疊率、四桶分數與 Nano4 效能均須後續執行才知道。
+訓練期間只保留最新 checkpoint、排列、暫存設定與進度；SIGINT／SIGTERM、時間上限會在共同推論／訓練 batch 邊界保存，完整評估中斷會續跑重試。loss 記錄以 checkpoint 內資料為準，續跑丟棄未提交分支。成功寫出及驗證四份最終檔案後才清理暫存；共享 processed 和舊 run 保留。`--max-steps` 是總更新上限；`--skip-evaluation` 只供明確短測，保留 checkpoint，不執行最終清理。
 
+以舊 seed2026 規模估計，每 seed 約 1,355 updates、14 次完整評估；三個 seed 共約 46.6 億位置推論，另加訓練。每 seed score 約 444 MB。正式耗時、顯存及 CUDA／SyncBN／8 卡效能尚需在計算節點量測，不在登入節點訓練。
 
 ### 棋力 V1 視覺化
 
-完整評估後，以 CPU 讀取既有日誌、validation 題目預測與每盤分數，不重新推論：
-
 ```bash
-python scripts/plot_rank_v1.py --run-dir outputs/rank_cnn_v1_seed2026
+python scripts/plot_rank_v1.py --run-dir outputs/rank_cnn_v1_seed2027
+# 尚未完成時可只讀已完成的完整資料 loss。
+python scripts/plot_rank_v1.py --run-dir outputs/rank_cnn_v1_seed2027 --loss-only
 ```
 
-預設選擇 run 內最新、含 `complete.json` 的 `evaluation/epoch_XXXX/`，在該目錄的 `plots/` 產出三張 PNG：
+新格式直接讀取 `.npy` 與保存的切點，預設在 `<run-dir>/plots/` 產生 `loss_vs_step.png`、`confusion_matrix.png`、`score_distributions_cutpoints.png`；圖表只在執行此指令時產生。曲線是完整資料 rank-mean loss，混淆矩陣分 k 桶，每盤分布由逐手 score 聚合。切點是逐手擬合，畫在每盤分布上供參考。可用 `--output-dir`、`--bins`，或搬移資料時用 `--dataset-dir`／`--cache-dir`。新格式需 CPU PyTorch 讀取 `model.pt`，不使用 GPU。
 
-- `loss_vs_step.png`：全域 optimizer step 對 training ranking loss，附最近 50 筆已記錄更新的移動平均；加上所有已完成評估的 validation batch loss（按 batch 樣本數加權平均），依 checkpoint 檔名的精確 optimizer step 對齊。這不是整份驗證集十級均值計算的 loss，且未使用 D4；續跑重播的 training step 以新分支取代。
-- `confusion_matrix.png`：k=5／10／15／20 四個 10×10 子圖；橫軸預測、縱軸真實級別，每格顯示列百分比與題數。
-- `score_distributions_cutpoints.png`：單一座標圖呈現十個真實級別的每盤 scalar 分數密度直方圖。每盤只計一筆，使用完整 validation 推論後指定玩家所有手的平均值（`valid_game_scores.parquet`）；不按 k 分組、不重複計入同盤。保留 training-only 題目校準的 9 個切點作參考：切點適用題目平均分數，不能視為已針對單盤校準。重合切點以 t1–t9 分別標示，不重新擬合切點。
-
-可用 `--evaluation-dir <path>` 指定已完成評估、`--output-dir <path>` 指定圖檔目錄、`--smooth-window 1` 關閉平滑、`--bins 50` 設定分布圖區間數。腳本核對評估完成標記、metrics hash、checkpoint hash 與切點解碼結果；不需 torch 或 GPU。圖表反映該評估的 split，現行 V1 的 game-disjoint 分數不能直接解讀為未見玩家表現。
-
-只有短跑日誌時可先產出一張 loss 圖（若已有完成評估則也會加入 validation loss），預設存至 `<run-dir>/plots/`：
-
-```bash
-python scripts/plot_rank_v1.py --run-dir outputs/rank_v1_short_100_20261017_135242/run_socket --loss-only
-```
+舊 seed2026 run 的 JSONL／evaluation 格式仍可繪圖：保留 `--evaluation-dir`、`--smooth-window` 與原有 hash 檢查；validation batch loss 缺少或為 null 時警告並略過，仍畫其他資料。舊格式不依賴 PyTorch。
 
 ## 結構
 

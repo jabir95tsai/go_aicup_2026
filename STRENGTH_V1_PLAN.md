@@ -1,5 +1,13 @@
 # 第一版棋力辨識計畫：盤面 ResNet 與級別平均排序 loss
 
+> **2026-10-18 已確認的新流程（取代下文舊 calibration／輸出規格）：**
+> 三個 seed 2027／2028／2029 各自切分並訓練 1 epoch；每 100 optimizer steps 與最後一步，凍結 BN／關閉 D4，完整推論 training／validation，先求整份資料各 rank 的平均 score 再算 ranking loss。
+> 切分表、validation 題目與 train／valid 逐手索引統一放 `data/processed/strength_v1/seed{seed}/`，取消獨立 cv 目錄、calibration 子集和 training 校準題。
+> 最後完整推論保存所有指定玩家落子 score（float32 npy，與 processed 索引對齊）；9 個切點用所有 training 逐手 score／標籤等權擬合，validation 不參與。
+> 成功驗收後 run 只留 `model.pt`、`losses.npy`、`train_scores.npy`、`valid_scores.npy`；權重內嵌 seed、設定、雜湊及切點。中途保留最新續跑 checkpoint；最終成功才清理。評估／繪圖讀保存分數，validation 分 k 評分。
+> 操作及當前限制以 [README.md](README.md#棋力-v1資料準備訓練與評估) 為準；下文保留原設計背景。未執行正式訓練或 GPU 驗收。
+
+
 更新日期：2026-10-14。狀態：已確認訓練方案；模型、DataLoader、切分／索引、loss、DDP 訓練與校準評估程式已撰寫，完整訓練與單／多卡驗收仍未執行。已精簡 SGF／pass 支援與重複檢查，訓練資料仍保留 `board_cache.py` 的 `*_colors.npy`。清理期間的部分測試結果見 `RESULTS.md` A-011；其後依使用者要求停止測試，最終整套驗證尚未完成。命令與實際程式路徑見 [README.md](README.md#棋力-v1資料準備訓練與評估)。
 
 本文件記錄本次討論確認的第一版棋力辨識方案。第一版的架構、資料切分、輸入與訓練目標以本文件為準；舊文件中的 Transformer、10-way softmax 與 player-disjoint CV 路線不作為這一版的實作規格。

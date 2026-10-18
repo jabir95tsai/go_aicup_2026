@@ -1,28 +1,26 @@
 {
   "format_version": 1,
   "cache_codec": "packed",
-  "seed": 2026,
+  "seed": 2028,
   "device": "cuda",
   "precision": "bf16",
   "paths": {
     "cache_dir": "data/processed/boards/strength_v1",
-    "cv_dir": "data/processed/cv/strength_v1_seed2026",
-    "dataset_dir": "data/processed/strength_v1/seed2026",
-    "output_dir": "outputs/rank_cnn_v1_seed2026"
+    "dataset_dir": "data/processed/strength_v1/seed2028",
+    "output_dir": "outputs/rank_cnn_v1_seed2028"
   },
   "split": {
     "expected_games_per_rank": 100000,
     "train_games_per_rank": 80000
   },
   "questions": {
-    "train_calibration": 10000,
     "validation": 10000
   },
   "model": {
     "channels": 256,
     "blocks": 20,
     "hidden_size": 256,
-    "bn_eps": 0.00001,
+    "bn_eps": 1e-05,
     "bn_momentum": 0.1
   },
   "loader": {
@@ -36,17 +34,19 @@
   "optimizer": {
     "lr": 0.001,
     "weight_decay": 0.0001,
-    "betas": [0.9, 0.999],
-    "eps": 0.00000001
+    "betas": [
+      0.9,
+      0.999
+    ],
+    "eps": 1e-08
   },
   "training": {
-    "epochs": 10,
+    "epochs": 1,
     "global_batch_size": 65536,
     "warmup_fraction": 0.05,
     "minimum_lr_ratio": 0.0,
     "gradient_clip_norm": 1.0,
     "checkpoint_seconds": 900,
-    "log_every_steps": 10,
     "max_runtime_seconds": null,
     "shutdown_margin_seconds": 180,
     "max_steps": null,
@@ -54,10 +54,10 @@
     "channels_last": false,
     "cudnn_benchmark": false,
     "deterministic": true,
-    "allow_tf32": false
+    "allow_tf32": false,
+    "evaluate_every_steps": 100
   },
   "evaluation": {
-    "global_batch_size": 65536,
-    "save_ply_scores": true
+    "global_batch_size": 65536
   }
 }

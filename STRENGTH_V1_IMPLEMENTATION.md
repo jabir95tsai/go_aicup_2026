@@ -1,5 +1,13 @@
 # 棋力 V1：模型、訓練與 SGF 平行轉檔實作設計
 
+> **2026-10-18 已確認的新流程（取代下文舊 calibration／輸出規格）：**
+> 三個 seed 2027／2028／2029 各自切分並訓練 1 epoch；每 100 optimizer steps 與最後一步，凍結 BN／關閉 D4，完整推論 training／validation，先求整份資料各 rank 的平均 score 再算 ranking loss。
+> 切分表、validation 題目與 train／valid 逐手索引統一放 `data/processed/strength_v1/seed{seed}/`，取消獨立 cv 目錄、calibration 子集和 training 校準題。
+> 最後完整推論保存所有指定玩家落子 score（float32 npy，與 processed 索引對齊）；9 個切點用所有 training 逐手 score／標籤等權擬合，validation 不參與。
+> 成功驗收後 run 只留 `model.pt`、`losses.npy`、`train_scores.npy`、`valid_scores.npy`；權重內嵌 seed、設定、雜湊及切點。中途保留最新續跑 checkpoint；最終成功才清理。評估／繪圖讀保存分數，validation 分 k 評分。
+> 操作及當前限制以 [README.md](README.md#棋力-v1資料準備訓練與評估) 為準；下文保留原設計背景。未執行正式訓練或 GPU 驗收。
+
+
 日期：2026-10-11；狀態更新：2026-10-14。依據：[STRENGTH_V1_PLAN.md](STRENGTH_V1_PLAN.md)。模型／DataLoader／索引／loss／DDP 訓練與校準評估程式已撰寫。已精簡 SGF／pass 支援與重複檢查，訓練資料仍保留 `board_cache.py` 的 `*_colors.npy`；部分測試結果見 `RESULTS.md` A-011，其後依使用者要求停止測試。未啟動全量轉檔或 GPU 訓練，單／多卡驗收仍待完成。本文保留工程設計與待驗收 gate；操作及輸出位置見 [README.md](README.md#棋力-v1資料準備訓練與評估)。
 
 沿用 V1 已確認設定：各級 80,000／20,000 盤、固定黑／白編碼、指定玩家落子後取樣、8 個雙方歷史盤面、20-block／256-channel ResNet、全域 16,384 盤面及級別平均排序 loss。舊文件的玩家互斥訓練切分、我方／對方正規化與 softmax 不替換本版設定。
