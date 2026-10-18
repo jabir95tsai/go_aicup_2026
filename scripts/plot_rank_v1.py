@@ -200,7 +200,7 @@ def plot_distributions(table: pd.DataFrame, boundaries, output: Path, label: str
                 transform=ax.get_xaxis_transform(), ha="center", va="top", fontsize=8)
     ax.set(title=f"Validation per-game score distributions | {label}\n"
                  "One score per game: mean over all positions of the designated player\n"
-                 "Dashed lines: saved training cutpoints (reference for individual games)",
+                 "Dashed lines: saved training cutpoints",
            xlabel="Game scalar score (mean over designated player's positions)",
            ylabel="Density within true rank")
     ax.grid(alpha=0.15)
@@ -227,10 +227,10 @@ def plot_compact(args):
     output = args.output_dir or args.run_dir / "plots"
     output.mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(figsize=(11, 5), layout="constrained")
-    ax.plot(losses["step"], losses["train_loss"], "o-", label="Full training loss (eval mode)")
-    ax.plot(losses["step"], losses["valid_loss"], "o-", label="Full validation loss (eval mode)")
-    ax.set(title="Strength V1: full-dataset ranking losses", xlabel="Optimizer step",
-           ylabel="Ranking loss from full-dataset rank means")
+    ax.plot(losses["step"], losses["train_loss"], "o-", label="Training batch loss (train mode)")
+    ax.plot(losses["step"], losses["valid_loss"], "o-", label="Validation loss (fixed 100,000 positions; eval mode)")
+    ax.set(title=f"Strength V1: ranking losses | {args.run_dir.name}", xlabel="Optimizer step",
+           ylabel="Ranking loss")
     ax.grid(alpha=0.2)
     ax.legend()
     save_figure(fig, output, "loss_vs_step.png")
@@ -258,9 +258,10 @@ def plot_compact(args):
     table = questions.assign(score=values, prediction=decode_scores(values, boundaries))
     games = meta.loc[selected, ["game_index", "rank_id"]].assign(score=means[selected], player_plies=counts[selected])
     label = f"seed {payload['seed']} | step {payload['optimizer_steps']}"
-    plot_confusion(table, output, label)
+    if not args.skip_confusion:
+        plot_confusion(table, output, label)
     plot_distributions(games, boundaries, output, label, args.bins)
-    print("Cutpoints fitted on all training plies; game/question means use the same boundaries.")
+    print("Cutpoint scope: " + payload["cutpoints"]["scope"])
 
 
 def main() -> None:
@@ -271,6 +272,7 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, help="Default: selected evaluation/plots, or run/plots for loss-only")
     parser.add_argument("--dataset-dir", type=Path, help="Compact run: relocated processed directory")
     parser.add_argument("--cache-dir", type=Path, help="Compact run: relocated board cache")
+    parser.add_argument("--skip-confusion", action="store_true", help="Produce only loss and per-game distributions")
     parser.add_argument("--loss-only", action="store_true", help="Plot loss without requiring evaluation")
     parser.add_argument("--smooth-window", type=int, default=50, help="Trailing logged updates; 1 disables smoothing")
     parser.add_argument("--bins", type=int, default=50, help="Common histogram bins")
@@ -299,7 +301,8 @@ def main() -> None:
         plot_loss(steps, losses, output, args.smooth_window, validation_steps, validation_losses)
         if not args.loss_only:
             label = f"{evaluation.name} | checkpoint {metrics['checkpoint_sha256'][:12]}"
-            plot_confusion(table, output, label)
+            if not args.skip_confusion:
+                plot_confusion(table, output, label)
             plot_distributions(games, boundaries, output, label, args.bins)
             print("Validation split: " + json.dumps(metrics.get("player_overlap", {})))
     except (ValueError, KeyError, OSError) as exc:

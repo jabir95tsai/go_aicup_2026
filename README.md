@@ -275,7 +275,7 @@ sbatch --job-name=rank2029 --export=ALL,SEED=2029 scripts/train_rank_v1.slurm
 
 不建立獨立 cv 目錄、calibration 子集或 training 校準題。分數是 `float32[N]`，`scores[i]` 精確對應 processed 中的 `game[i]`／`ply[i]`，涵蓋指定玩家的所有落子位置。processed 索引需保留，各 seed 的陣列不能直接逐列對齊。
 
-切點使用所有 training 逐手 score 與 rank 標籤，以逐手等權官方 score 的有序區間 DP 擬合 9 個切點；平手 score 不拆分，允許重複切點。回溯表使用暫存 memmap，排序和向量運算仍需要額外主機 RAM 與磁碟。validation 不參與切點擬合。每盤平均指定玩家全部位置，再將題內各盤等權平均後套用同一組切點。評估報告包含 training／validation 逐手及每盤成績，validation 題目 k=5／10／15／20 與 equal-k 成績；不產生 training 題目成績。
+切點使用所有 training 每盤平均 score 與 rank 標籤，以每盤等權官方 score 的有序區間 DP 擬合 9 個切點；平手 score 不拆分，允許重複切點。回溯表使用暫存 memmap，排序和向量運算仍需要額外主機 RAM 與磁碟。validation 不參與切點擬合。每盤平均指定玩家全部位置，再將題內各盤等權平均後套用同一組切點。評估報告包含 training／validation 逐手及每盤成績，validation 題目 k=5／10／15／20 與 equal-k 成績；不產生 training 題目成績。
 
 `model.pt` 保存權重、BN buffers、seed、設定、dataset ID、索引／score 雜湊、程式／環境資訊及切點，不含 optimizer 等續跑狀態。評估會核對 processed 與 score 雜湊。搬移資料後可加 `--dataset-dir`／`--cache-dir` 指定新位置。
 
@@ -289,9 +289,11 @@ sbatch --job-name=rank2029 --export=ALL,SEED=2029 scripts/train_rank_v1.slurm
 python scripts/plot_rank_v1.py --run-dir outputs/rank_cnn_v1_seed2027
 # 尚未完成時可只讀已完成的完整資料 loss。
 python scripts/plot_rank_v1.py --run-dir outputs/rank_cnn_v1_seed2027 --loss-only
+# 只畫 loss 與十級每盤平均分數分布（兩張）
+python scripts/plot_rank_v1.py --run-dir outputs/rank_cnn_v1_seed2027 --skip-confusion
 ```
 
-新格式直接讀取 `.npy` 與保存的切點，預設在 `<run-dir>/plots/` 產生 `loss_vs_step.png`、`confusion_matrix.png`、`score_distributions_cutpoints.png`；圖表只在執行此指令時產生。曲線是完整資料 rank-mean loss，混淆矩陣分 k 桶，每盤分布由逐手 score 聚合。切點是逐手擬合，畫在每盤分布上供參考。可用 `--output-dir`、`--bins`，或搬移資料時用 `--dataset-dir`／`--cache-dir`。新格式需 CPU PyTorch 讀取 `model.pt`，不使用 GPU。
+新格式直接讀取 `.npy` 與保存的切點，預設在 `<run-dir>/plots/` 產生 `loss_vs_step.png`、`confusion_matrix.png`、`score_distributions_cutpoints.png`；圖表只在執行此指令時產生。目前 losses.npy 的 train_loss 是當步訓練 batch loss（train mode），valid_loss 是固定抽樣 100,000 手（每級 10,000 手、不放回、由 seed 決定）的 rank-mean loss（eval mode）；舊版 legacy_full_losses.json 定義不同，不混接。混淆矩陣分 k 桶，每盤分布由指定玩家的逐手 score 先取盤內平均，每盤等權。切點由 training 每盤平均分數擬合。可用 `--output-dir`、`--bins`，或搬移資料時用 `--dataset-dir`／`--cache-dir`。新格式需 CPU PyTorch 讀取 `model.pt`，不使用 GPU。
 
 舊 seed2026 run 的 JSONL／evaluation 格式仍可繪圖：保留 `--evaluation-dir`、`--smooth-window` 與原有 hash 檢查；validation batch loss 缺少或為 null 時警告並略過，仍畫其他資料。舊格式不依賴 PyTorch。
 
@@ -314,3 +316,9 @@ python scripts/plot_rank_v1.py --run-dir outputs/rank_cnn_v1_seed2027 --loss-onl
 5. **AI CUP 提交只用同一個帳號**（帳號：**待定**）。兩人都可以操作上傳，但**絕不能用各自的個人帳號**（規則：隊員各自上傳 = 多重帳號 → 喪失資格）。
    每日 5 次額度兩人共用、計分看最後一次上傳 → 上傳前先在 `RESULTS.md` 登記 tag／預期分數，11/24 當天先講好由誰做最後一次
 6. 隊伍之間不分享程式與特徵；repo 保持 private
+
+既有 run 改以 training 每盤平均分數重新擬合切點（只更新 model.pt 的切點，保留模型權重與保存的 score）：
+
+```bash
+python -m go_aicup.tasks.strength.evaluate_rank_v1 --run-dir outputs/rank_cnn_v1_seed2027 --refit-cutpoints
+```

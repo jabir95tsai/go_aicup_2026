@@ -281,3 +281,24 @@ player-adversarial 頭（gradient reversal）或「每批次每位玩家只取�
 在 go Conda 環境使用合成資料執行 `PYTHONPATH=src python -m pytest -q`：**81 passed（34.92 秒）**。新增驗證包含：切點對照窮舉最佳解、完整 loss／逐手索引對齊、BN 推論不變、不中斷與中斷續跑的權重／loss／score 逐元素一致、評估及最終切點中斷恢復、成功後四檔清理、score hash 損壞拒絕、三張實際圖檔，以及兩個 CPU/Gloo process 對照 serial（401 samples，最後一個 process 無有效尾批樣本）。另通過 syntax compile 與 git diff whitespace 檢查。
 
 此次未啟動官方資料準備或正式模型訓練，沒有新增正式 outputs run。新流程的 CUDA／SyncBN／8 卡與完整資料切點擬合成本尚未驗收；k=5／10／15／20 正式分數均未知。操作方式與預估成本見 README。
+
+
+### A-014 Three-seed CPU visualizations（2026-10-18）
+
+依使用者要求在登入節點 `25a-lgn05`，使用 go 環境、單執行緒 CPU，讀取 seed2027／2028／2029 已保存結果，各產生兩張 PNG：`outputs/rank_cnn_v1_seed{seed}/plots/loss_vs_step.png` 與 `score_distributions_cutpoints.png`，共六張。未執行模型推論或訓練。分布使用 validation 全部 200,000 盤、每級 20,000 盤，指定玩家逐手 scalar score 先取盤內平均，每盤等權；製圖程式已驗證 score／索引 hash、每盤覆蓋與手數一致。loss 圖為當步 training batch loss（train mode）與全 validation rank-mean loss（eval mode），不混接定義不同的 legacy_full_losses.json；2027／2028 各 12 個紀錄點（step 300–1355），2029 共 14 點（step 100–1355）。新增 `--skip-confusion` 選項並修正 loss 圖例，README 補重跑指令；三次製圖均 exit 0，六張 PNG 驗證通過，git diff --check 通過。本次未計算 k 桶分數。
+
+
+A-014 更正（2026-10-18）：上段將橘線 valid_loss 誤記為全 validation，實際依 train_rank_v1.validation_sample_indices 為每級固定不放回抽樣 10,000 手，共 100,000 手，由各 seed 決定；每個評估 step 使用同一組樣本。已修正繪圖圖例、README 並重畫三個 seed 的 loss_vs_step.png。完整 validation 分數仍用於每盤分布圖，與 loss 抽樣範圍不同。
+
+
+### A-015 Training game-mean cutpoint calibration（2026-10-18）
+
+依使用者要求，切點由全部 training 的指定玩家逐手 scalar score 先取每盤平均，再以每盤等權官方 score 擬合有序區間；每 seed 800,000 盤，不使用 validation 標籤。登入節點單執行緒 CPU 使用既有 score 重擬合 seed2027／2028／2029，原子更新 model.pt 的切點，並逐元素確認模型權重不變，保存的 losses／scores 未改寫。訓練收尾流程亦改用每盤擬合；新增 --refit-cutpoints 供既有 run 使用。
+
+| Seed | k=5 | k=10 | k=15 | k=20 | Equal-k |
+|---|---|---|---|---|---|
+| 2027 | 0.312799 | 0.330387 | 0.338884 | 0.350654 | 0.333181 |
+| 2028 | 0.300215 | 0.323040 | 0.352314 | 0.372288 | 0.336964 |
+| 2029 | 0.301448 | 0.319964 | 0.324084 | 0.345367 | 0.322716 |
+
+各 run 的 plots/ 保存 cutpoints_before_game_refit.json（舊逐手切點）、game_cutpoint_evaluation.json（新完整評估），並重畫 loss_vs_step.png 與 score_distributions_cutpoints.png。驗證：切點 DP 對照窮舉、完整收尾及續跑一致性共 2 passed、6 deselected（20.97s）；新增斷言確認 200 盤合成 training 的擬合筆數與官方每盤得分一致。語法解析與 git diff --check 通過。此變更不改 loss 定義、訓練權重或 split；本結果沿用 V1 game-disjoint split，非 player-disjoint 泛化分數。

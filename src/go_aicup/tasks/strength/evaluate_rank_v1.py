@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import tempfile
 from pathlib import Path
 
@@ -27,7 +28,7 @@ def decode_scores(scores, boundaries) -> np.ndarray:
 
 
 def fit_cutpoints(scores, rank_ids, *, scratch_dir=None, stop_check=None) -> dict:
-    """Exact ordered-interval DP on ALL training plies, each weighted equally.
+    """Exact ordered-interval DP on ALL training game means, each weighted equally.
 
     Vectorized prefix maxima preserve first-predecessor ties. Backpointers
     use temporary uint32 memmaps rather than nine in-memory int64 vectors.
@@ -84,9 +85,9 @@ def fit_cutpoints(scores, rank_ids, *, scratch_dir=None, stop_check=None) -> dic
     if not np.isfinite(above_max):
         raise ValueError("finite upper cutpoint cannot be represented")
     boundaries = [float(unique[index]) if index < len(unique) else above_max for index in ends]
-    return {"boundaries": boundaries, "training_ply_score": float(previous[-1]),
-            "unique_scores": len(unique), "num_training_plies": len(scores),
-            "scope": "all training positions; equal weight per position; no validation labels",
+    return {"boundaries": boundaries, "training_game_score": float(previous[-1]),
+            "unique_scores": len(unique), "num_training_games": len(scores),
+            "scope": "all training game means; equal weight per game; no validation labels",
             "boundary_rule": "searchsorted(side=right)"}
 
 
@@ -182,7 +183,7 @@ def evaluate_saved(run: Path, *, payload=None, dataset_dir=None, cache_dir=None,
                 raise ValueError(f"{prefix}: incorrect per-game ply coverage")
             labels = all_labels[indices]
             if prefix == "train" and fit:
-                payload["cutpoints"] = fit_cutpoints(scores, labels, scratch_dir=run, stop_check=stop_check)
+                payload["cutpoints"] = fit_cutpoints(games[selected], all_labels[selected], scratch_dir=run, stop_check=stop_check)
                 boundaries = payload["cutpoints"]["boundaries"]
             results[prefix] = {"plies": score_report(scores, labels, boundaries),
                                "games": score_report(games[selected], all_labels[selected], boundaries),
@@ -210,8 +211,20 @@ def main(argv=None):
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--dataset-dir", type=Path, help="Override processed location after moving artifacts")
     parser.add_argument("--cache-dir", type=Path, help="Override shared board cache location")
+    parser.add_argument("--refit-cutpoints", action="store_true",
+                        help="Refit on training game means and atomically update model.pt")
     args = parser.parse_args(argv)
-    result = evaluate_saved(args.run_dir, dataset_dir=args.dataset_dir, cache_dir=args.cache_dir)
+    if args.refit_cutpoints:
+        payload, _, _ = load_saved_run(args.run_dir, args.dataset_dir, args.cache_dir)
+        result = evaluate_saved(args.run_dir, payload=payload, fit=True)
+        temporary = args.run_dir / "model.pt.refit.tmp"
+        try:
+            torch.save(payload, temporary)
+            os.replace(temporary, args.run_dir / "model.pt")
+        finally:
+            temporary.unlink(missing_ok=True)
+    else:
+        result = evaluate_saved(args.run_dir, dataset_dir=args.dataset_dir, cache_dir=args.cache_dir)
     print(json.dumps(result, indent=2, allow_nan=False))
     return 0
 

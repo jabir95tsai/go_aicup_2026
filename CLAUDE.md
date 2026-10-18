@@ -99,6 +99,8 @@ H200 佇列限制**每張 GPU 最多 12 CPU 核心、200GB 主記憶體**；200G
 
 **棋力 V1 精簡流程更新（2026-10-18）：** 依使用者確認，各 seed 自行切分、訓練 1 epoch；每 100 steps 與最後一步完整推論 training／validation，以全資料各 rank 平均 score 計 loss。processed 統一放每 seed 的 strength_v1 目錄，取消獨立 cv／calibration 子集；切點改由全部 training 逐手分數擬合。成功後 run 僅留 model.pt、losses.npy、train_scores.npy、valid_scores.npy；評估直接讀保存的分數。此更新取代上方 10/17 校準流程，詳見 README；未啟動正式訓練。
 
+**棋力 V1 切點更新（2026-10-18）：** 依使用者要求，切點改用全部 training 每盤的指定玩家逐手 score 平均值擬合，每盤等權，最佳化官方得分；不使用 validation 標籤。此更新取代先前逐手等權切點設定，排序 loss 與 loss 抽樣不變。
+
 ### 仍待確認 ⏳
 
 | 項目 | 為什麼重要 | 何時／去哪查 |

@@ -87,7 +87,7 @@ def test_cutpoints_match_exhaustive_ordered_partitions(tmp_path):
         best = max(best, np.where(error == 0, 1, np.where(error == 1, np.exp(-1), 0)).mean())
     actual = score_report(scores, labels, result["boundaries"])["score"]
     assert actual == pytest.approx(best)
-    assert result["training_ply_score"] == pytest.approx(best)
+    assert result["training_game_score"] == pytest.approx(best)
     assert not list(tmp_path.iterdir())
     tied = fit_cutpoints(np.zeros(10, np.float32), np.arange(10, dtype=np.int8))
     assert len(set(decode_scores(np.zeros(10), tied["boundaries"]))) == 1
@@ -155,6 +155,9 @@ def test_resume_matches_uninterrupted_and_only_four_final_files(compact_data, tm
         assert "optimizer" not in payload and payload["seed"] == config["seed"]
         result = evaluate_saved(run)
         assert set(result["questions"]["by_k"]) >= {"5", "10", "15", "20"}
+        assert payload["cutpoints"]["num_training_games"] == 200
+        assert payload["cutpoints"]["training_game_score"] == pytest.approx(result["train"]["games"]["score"])
+        assert "equal weight per game" in payload["cutpoints"]["scope"]
     first, second = Path(full["paths"]["output_dir"]), Path(resumed["paths"]["output_dir"])
     for name in ("losses.npy", "train_scores.npy", "valid_scores.npy"):
         np.testing.assert_array_equal(np.load(first / name), np.load(second / name))
