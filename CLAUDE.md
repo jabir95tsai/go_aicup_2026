@@ -101,7 +101,7 @@ H200 佇列限制**每張 GPU 最多 12 CPU 核心、200GB 主記憶體**；200G
 
 **棋力 V1 切點更新（2026-10-18）：** 依使用者要求，切點改用全部 training 每盤的指定玩家逐手 score 平均值擬合，每盤等權，最佳化官方得分；不使用 validation 標籤。此更新取代先前逐手等權切點設定，排序 loss 與 loss 抽樣不變。
 
-**棋力 V2 計畫（2026-10-18）：** 依使用者要求，逐樣本固定錨點 MSE＋有停止條件的間隔懲罰已記錄於 [STRENGTH_V2_PLAN.md](STRENGTH_V2_PLAN.md)。超參數、受控比較與 gate 為待驗證提案；尚未實作或啟動訓練。
+**棋力 V2 計畫（2026-10-19 更新）：** 依使用者要求，沿用 V1 ResNet，最後線性 head 由 `361→256→1` 改為 `361→256→10`，以 softmax 輸出十級機率、逐樣本 cross entropy 訓練（訓練 loss 直接接收 logits）。此方案取代原錨點 MSE＋間隔懲罰；單盤分類取指定玩家所有手的 softmax confidence 總和最大類別；多盤題目已確認先算每盤十類平均機率，再按每盤等權平均；相鄰級加權的官方得分解碼仍為待釐清提案，不擬合 scalar 切點。每 100 steps 沿用 V1 的最近 training batch loss 與固定抽樣 validation loss，新增 validation 官方分數；中途官方分數的評分單位及集合範圍待釐清，全部訓練結束保存完整 validation 每盤分類結果，輸出目錄固定為 `outputs/v2_strength/`，正式檔案為 `model.pt`、`losses.npy`、`validation_catagory.npy`（拼字依使用者指定）；保存每盤 confidence 總和與手數，不要求保存全量逐手機率或最終 training 推論。最終評估規劃由 CPU 讀取已存每盤 confidence、重用固定 validation 題目，報告單盤與 k=5／10／15／20 成績；題目 argmax／score_rank 分開列報，不依 validation 自動挑選解碼。視覺化規劃包含 loss／score 曲線、單盤與各 k 混淆矩陣、各級成績、平均 confidence 熱圖及條件相符的 V1 比較，圖表由保存產物重建、僅指定 export 目錄時額外匯出。詳見 [STRENGTH_V2_PLAN.md](STRENGTH_V2_PLAN.md)；受控比較與 gate 仍為待驗證提案，尚未實作或啟動訓練。
 
 ### 仍待確認 ⏳
 
