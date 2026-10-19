@@ -17,6 +17,8 @@ def load_dataset_manifest(config: dict) -> dict:
     cache = json.loads((Path(config["paths"]["cache_dir"]) / "manifest.json").read_text(encoding="utf-8"))
     expected = {"cache_build_id": cache["build_id"], "split_config": config["split"],
                 "questions_config": config["questions"], "seed": config["seed"]}
+    if "monitoring" in config:
+        expected["monitoring_config"] = config["monitoring"]
     if record.get("complete") is not True or record.get("format_version") != 2:
         raise ValueError("dataset preparation has not completed")
     if object_hash({key: value for key, value in record.items() if key != "dataset_id"}) != record.get("dataset_id"):

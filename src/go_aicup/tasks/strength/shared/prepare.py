@@ -62,6 +62,23 @@ def write_sample_indices(cache: BoardCache, meta: pd.DataFrame, selected_games,
             "per_rank_samples": per_rank.tolist()}
 
 
+def select_monitoring_games(table: pd.DataFrame, seed: int, games_per_rank: int) -> np.ndarray:
+    """Sample whole validation games; independent of row order and game length."""
+    if type(games_per_rank) is not int or games_per_rank < 1:
+        raise ValueError("games_per_rank must be a positive integer")
+    if not table["game_index"].is_unique:
+        raise ValueError("duplicate game_index in monitoring source")
+    rng = np.random.default_rng(seed)
+    selected = []
+    for rank_id in range(10):
+        candidates = np.sort(table.loc[(table["split"] == "valid") &
+            (table["rank_id"] == rank_id), "game_index"].to_numpy(dtype=np.int64))
+        if len(candidates) < games_per_rank:
+            raise ValueError(f"validation rank {rank_id} needs at least {games_per_rank} games")
+        selected.append(rng.choice(candidates, games_per_rank, replace=False))
+    return np.sort(np.concatenate(selected)).astype(np.uint32)
+
+
 def prepare(config: dict) -> Path:
     directory = Path(config["paths"]["dataset_dir"])
     cache = BoardCache(Path(config["paths"]["cache_dir"]),
@@ -74,6 +91,8 @@ def prepare(config: dict) -> Path:
                         "cv.py": Path(__file__).resolve().parents[3] / "data" / "cv.py",
                         "shared/prepare.py": Path(__file__),
                     }.items()}}
+        if "monitoring" in config:
+            identity["monitoring_config"] = config["monitoring"]
         build_path = directory / "build.json"
         if build_path.exists():
             if json.loads(build_path.read_text(encoding="utf-8")) != identity:
@@ -104,12 +123,23 @@ def prepare(config: dict) -> Path:
             "train": table.loc[table["split"] == "train", "game_index"].to_numpy(),
             "valid": table.loc[table["split"] == "valid", "game_index"].to_numpy(),
         }
+        if "monitoring" in config:
+            monitoring_games = select_monitoring_games(
+                table, config["seed"], config["monitoring"]["games_per_rank"])
+            selections["monitor"] = monitoring_games
+            temporary = directory / "monitor_games.npy.tmp"
+            with temporary.open("wb") as handle:
+                np.save(handle, monitoring_games, allow_pickle=False)
+            os.replace(temporary, directory / "monitor_games.npy")
         sets = {name: write_sample_indices(cache, meta, games, directory, name)
                 for name, games in selections.items()}
         files = {f"{prefix}_{kind}.npy": {
                     "sha256": file_hash(directory / f"{prefix}_{kind}.npy"),
                     "bytes": (directory / f"{prefix}_{kind}.npy").stat().st_size}
                  for prefix in sets for kind in ("game", "ply")}
+        if "monitoring" in config:
+            path = directory / "monitor_games.npy"
+            files[path.name] = {"sha256": file_hash(path), "bytes": path.stat().st_size}
         table_files = {name: {"sha256": file_hash(directory / name),
                            "bytes": (directory / name).stat().st_size} for name in tables}
         record = dict(identity, complete=True, sets=sets, files=files, table_files=table_files,

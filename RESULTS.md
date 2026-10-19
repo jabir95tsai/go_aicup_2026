@@ -302,3 +302,23 @@ A-014 更正（2026-10-18）：上段將橘線 valid_loss 誤記為全 validatio
 | 2029 | 0.301448 | 0.319964 | 0.324084 | 0.345367 | 0.322716 |
 
 各 run 的 plots/ 保存 cutpoints_before_game_refit.json（舊逐手切點）、game_cutpoint_evaluation.json（新完整評估），並重畫 loss_vs_step.png 與 score_distributions_cutpoints.png。驗證：切點 DP 對照窮舉、完整收尾及續跑一致性共 2 passed、6 deselected（20.97s）；新增斷言確認 200 盤合成 training 的擬合筆數與官方每盤得分一致。語法解析與 git diff --check 通過。此變更不改 loss 定義、訓練權重或 split；本結果沿用 V1 game-disjoint split，非 player-disjoint 泛化分數。
+
+
+### A-016 Strength V2 config and whole-game monitoring indices（2026-10-19）
+
+依使用者要求完成 V2 實作第二步。新增 `configs/strength/rank_cnn_v2_seed2027.json`、`tasks/strength/v2/config.py` 與 `v2/prepare.py`；seed=2027、global batch=65,536、1 epoch，optimizer／scheduler／BN／SyncBN／precision／D4 沿用 V1。共用 prepare 沿用 `data.cv` 的同 seed 切分與固定 validation 題目產生器；V2 dataset 另存 `data/processed/strength_v2/seed2027/`，預定模型輸出 `outputs/v2_strength/`。
+
+監控從 validation 每級固定無放回抽取 5,000 整盤，共 50,000 盤；保存 `monitor_games.npy` 唯一棋局清單，以及 `monitor_game.npy`／`monitor_ply.npy` 的指定玩家全部落子。manifest 保存監控設定、整盤數、總手數、每級手數及索引指紋，沿用 split 玩家重疊揭露。完成後重跑讀保存索引，不重新抽樣；改設定不覆寫既有 dataset。單盤 argmax 與多盤 score_rank 規格記於 config，評分程式仍未實作。
+
+驗證：go Conda 環境以 `OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONPATH=src python -m pytest -q tests/test_strength_v2_prepare.py tests/test_rank_compact.py` 執行 **12 passed（26.44s）**，其中 4 項為新增測試。新增測試使用合成 metadata／顏色快取介面，涵蓋整盤平衡與固定抽樣、不同 seed、黑白全部指定玩家落子覆蓋、重跑不抽樣、設定變動及索引損壞拒絕，以及 V2／共用 V1 同 seed 切分、固定題目與完整 train／valid 索引逐位元組一致。既有 compact V1 訓練／評估／續跑回歸通過；V2 CLI help 與 git diff --check 通過。
+
+未執行官方全量資料準備、V2 模型 forward 或正式訓練，未產生正式 V2 模型、loss 或分類結果。正式監控總手數、資料準備耗時與 GPU 小時未知；k=5／10／15／20 的 V2 分數均未知。模型／CE loss／訓練／評估／繪圖仍待後續步驟實作。
+
+
+### A-017 Strength V2 ten-class model and global cross entropy（2026-10-19）
+
+依使用者要求完成 V2 實作第三步，新增 `tasks/strength/v2/model.py` 與 `v2/losses.py`。模型直接沿用 shared backbone，末層 `Linear(256,10)` 回傳原始 B×10 logits，類別順序 D、C、B、A、1D..6D；預設參數 23,750,924。softmax 留在推論端；不載入 V1 訓練權重。CE 無類別權重、label smoothing=0、逐有效樣本等權，FP32 loss 總和除以 int64 全域有效樣本數，不要求每批涵蓋十級。mask 在 CE 前排除補齊樣本；各卡可有不同有效數或零有效數，全域零有效則拒絕。可微全域 SUM 的梯度倍數由 DDP 參數梯度平均抵消，不另加 world_size 縮放。函式回傳 differentiable loss、detached loss_sum 與 valid_count，供後續訓練／監控接線。
+
+驗證：go Conda 環境執行 `OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONPATH=src python -m pytest -q tests/test_strength_v2_model_loss.py`：**6 passed（6.23s）**。涵蓋 B=1 輸出維度、softmax 列和、類別順序、meta device 正式模型參數計數、零 logits CE=log(10)、提高真實類別 logit 時 loss 降低、補齊樣本零梯度與非有限 padding 排除、BF16 logits 的 FP32 CE、非法標籤及全域零有效樣本拒絕；實際兩程序 CPU/Gloo DDP 線性模型驗證有效數 3:2、2:0（含實體空 batch）的全域 loss、sum、count、參數梯度與單程序對照一致，亦驗證已初始化 process group 內關閉同步的本地統計及跨卡非法資料／全空錯誤傳遞。
+
+未啟動正式訓練或官方資料推論；完整 CNN 的 CUDA／SyncBN／多 GPU 訓練尚未驗收。V2 k=5／10／15／20 分數與正式 GPU 小時未知。第四步推論聚合及後續訓練、評估、圖表仍待實作。

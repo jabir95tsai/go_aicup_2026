@@ -1,6 +1,6 @@
 # 第二版棋力辨識計畫：沿用 V1 ResNet 的十級分類
 
-更新日期：2026-10-19。狀態：依使用者要求更新 V2 設計；尚未實作或執行訓練。此版本取代原本的逐樣本錨點 MSE＋間隔懲罰方案。
+更新日期：2026-10-19。狀態：依使用者要求更新 V2 設計；已實作第二步 config／資料索引準備與第三步十類模型／CE loss；推論聚合、訓練與評估待實作，未啟動正式資料準備或訓練。此版本取代原本的逐樣本錨點 MSE＋間隔懲罰方案。
 
 競賽規則、資料與工作方式以 [CLAUDE.md](CLAUDE.md) 為準。V2 沿用 V1 模型架構與資料流程，將最後線性 head 從 `361→256→1` 改為 `361→256→10`，以 softmax 輸出十級機率，使用 cross entropy 訓練。
 
@@ -132,7 +132,7 @@ V2 不進行 V1／V2 比較，不安排 V1 對照訓練、比較圖或相對增�
 
 每盤平均機率可由 `confidence_sum / num_moves` 還原，支援多盤等權聚合，不必重新產生盤面或保存逐手機率。訓練期間可保存暫時續跑 checkpoint；最終三個檔案成功寫入後才清理暫存。其他 seed 的 V2 訓練須使用各自獨立輸出目錄，不覆寫此目錄既有結果；額外目錄命名於開跑前記錄。
 
-本次僅修改計畫，不修改 V1 模型、訓練程式或 config，不執行轉檔與訓練；尚未產生上述模型與結果檔案。V2 產物不覆寫 V1。
+目前已實作第二步：`configs/strength/rank_cnn_v2_seed2027.json`、`strength.v2.config` 與 `strength.v2.prepare`。共用資料準備新增固定整盤監控集合與全部指定玩家逐手索引，保存至 `data/processed/strength_v2/seed2027/`；沿用同 seed 的 split 與固定題目產生器。第三步已新增 `strength.v2.model.StrengthResNet`（十類 logits）與 `strength.v2.losses.global_cross_entropy`（FP32、有效 mask、全域有效樣本平均）；已以合成 CPU／兩程序 Gloo 驗證不等樣本與零有效尾批的 loss／梯度一致性。CUDA／SyncBN 尚未驗收。未啟動官方全量資料準備或訓練，尚未產生上述正式模型與結果檔案。V2 產物不覆寫 V1。
 
 ## 8. 最終評估流程（本次規劃，待實作）
 
