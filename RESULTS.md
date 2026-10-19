@@ -191,3 +191,14 @@ player-adversarial 頭（gradient reversal）或「每批次每位玩家只取�
 - [ ] 測試題 `num_games` 是否真的 5/10/15/20 各 100
 - [x] 兩賽的評估指標與 baseline 分數（A-006）
 - [ ] **競賽一 baseline 0.2845 vs 合成驗證 0.93 的落差來源**（A-006 警訊）：真實候選庫第一手集中度、查詢盤與候選盤的開局分布是否一致
+
+
+### D-001 文獻對照計畫修訂（2026-10-05）
+
+**性質：** 使用者要求修改計畫；僅文件修改，沒有新實驗、分數或訓練授權。同步更新 CLAUDE.md、STRATEGY.md、EXECUTION_PLAN.md。
+
+- 主力由預設座標 Transformer 改為先做文獻對照，再比較盤面與序列；HumanSL 小樣本與 GE2E 盤面路線提前。
+- Kuboki AIIDE 2025 正式版 Table 6 同一玩家 accuracy（5/10/15）為 56.9/60.0/61.6%，同段位抽樣為 68.1/81.3/88.7%。L-001 的舊版數字保留歷史，後續引用須註版本。來源：https://ojs.aaai.org/index.php/AIIDE/article/download/36812/38950/40889
+- NeurIPS 正式版 Table 2，去前 15 手的主要 unseen 設定 P@1=0.860，reference/query 各 100 盤。L-001 中 0.39 與 ArcFace 不收斂的確切條件／版本本次未定位，暫不作設計依據。來源：https://papers.nips.cc/paper_files/paper/2021/file/ccf8111910291ba472b385e9c5f59099-Paper.pdf
+- 不再把手級監督宣稱為獨立樣本增加 200 倍，也不以合成題數推論本地驗證必然更可信。修正 11/04 前上傳及每日收尾的過時排程。
+- 各實驗數值 gate、抽樣規模與長訓練預算仍須先討論；此修訂不填造預期增益。
