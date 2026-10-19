@@ -332,3 +332,22 @@ A-014 更正（2026-10-18）：上段將橘線 valid_loss 誤記為全 validatio
 驗證：go Conda 環境執行 `OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONPATH=src python -m pytest -q tests/test_strength_v2_model_loss.py`：**6 passed（6.23s）**。涵蓋 B=1 輸出維度、softmax 列和、類別順序、meta device 正式模型參數計數、零 logits CE=log(10)、提高真實類別 logit 時 loss 降低、補齊樣本零梯度與非有限 padding 排除、BF16 logits 的 FP32 CE、非法標籤及全域零有效樣本拒絕；實際兩程序 CPU/Gloo DDP 線性模型驗證有效數 3:2、2:0（含實體空 batch）的全域 loss、sum、count、參數梯度與單程序對照一致，亦驗證已初始化 process group 內關閉同步的本地統計及跨卡非法資料／全空錯誤傳遞。
 
 未啟動正式訓練或官方資料推論；完整 CNN 的 CUDA／SyncBN／多 GPU 訓練尚未驗收。V2 k=5／10／15／20 分數與正式 GPU 小時未知。第四步推論聚合及後續訓練、評估、圖表仍待實作。
+
+
+### E1-001 手工特徵 + LightGBM（本機，2026-10-19）
+
+**性質：** EXECUTION_PLAN E1，本機 CPU，約 3 分鐘；不佔上傳額度，不是提交候選。用來在 V2 結果出來前，先確認有沒有便宜的路線能過 baseline 0.4631。
+**設定：** 與 A-006 線性探針相同：26 維 me_/op_ 統計（實際 47 欄 + length）、`rank_questions` 題組；評估集 f4 + holdout 共 14,000 題，與訓練玩家零重疊（程式內 assert）。一律用 `score_rank` 解碼。程式 `python -m go_aicup.tasks.strength.gbdt_e1`，輸出 `outputs/rank_gbdt_e1/`（report.csv、summary.json、各變體機率與模型）。
+
+| 變體（相對前一列只改一個變數） | k=5 | k=10 | k=15 | k=20 | all |
+|---|---|---|---|---|---|
+| lr（f0–f3 題均值，重現 A-006） | 0.350 | 0.398 | 0.440 | 0.459 | **0.412** |
+| gbdt（換成 LightGBM；f0–f2 訓練、f3 early stop） | 0.333 | 0.383 | 0.406 | 0.431 | 0.388 |
+| gbdt_std（+ 題內 std 特徵） | 0.330 | 0.387 | 0.405 | 0.430 | 0.388 |
+| gbdt_game（訓練單位改為單盤：fold 0–2 玩家的盤，題 = k 盤 log-prob 平均） | 0.351 | 0.389 | 0.400 | 0.427 | 0.392 |
+
+- LR 逐位重現 0.4117 → 管線無誤。
+- 三個 GBDT 變體在 all 都比 LR 低 0.02，k=15/20 低 0.03–0.04。只有 gbdt_game 在 k=5 打平 LR（0.351 vs 0.350）。
+- 注意：gbdt 少用了 f3（拿去 early stop），訓練題數是 LR 的 75%，比較對 GBDT 略不利；但差距 0.024 不太可能全部來自這裡（未驗證）。
+- 機制推測（未驗證）：題級訓練樣本只有約 4.3k 位玩家，非線性模型容易學到玩家特有的組合；線性模型較平滑。單盤訓練的樣本雖多，但同玩家的盤高度相關。
+- **結論：** 在這組手工特徵上，換非線性模型沒有增益，E1 這條線過不了 0.4631。瓶頸在單盤表徵，不在分類器；保險線要改從表徵下手（例如 HumanSL 特徵），不再在 GBDT 超參上花時間。
