@@ -1,6 +1,6 @@
 """Feature policy: what a model is allowed to see (CLAUDE.md section 4).
 
-Three rules are enforced in code rather than remembered:
+Feature and augmentation rules for the current pipelines:
 
 1. Identifier / bookkeeping columns never become features. Test questions
    carry only `question_id`, so any CV score that touched `game_id`,
@@ -8,8 +8,6 @@ Three rules are enforced in code rather than remembered:
 2. The only SGF content that exists on the training side is `SZ` plus moves
    (A-001). A feature derived from any other property is banned until the
    release audit shows it on both sides.
-3. Target-derived statistics are fitted out-of-fold only
-   (`FoldSafeTargetEncoder`).
 
 Plus the task-specific augmentation policy: D4 symmetry is on for rank
 prediction (strength is orientation-free) and off for player identification
@@ -19,9 +17,6 @@ prediction (strength is orientation-free) and off for player identification
 from __future__ import annotations
 
 from collections.abc import Iterable
-
-import numpy as np
-import pandas as pd
 
 # Columns that exist in our processed metadata but must never reach a model.
 BANNED_EXACT = frozenset({
@@ -79,41 +74,3 @@ def check_augment(task: str, d4: bool) -> None:
         raise FeaturePolicyError(f"unknown task {task!r}")
     if d4 and not D4_AUGMENT[task]:
         raise FeaturePolicyError(f"D4 augmentation is forbidden for task {task!r}")
-
-
-class FoldSafeTargetEncoder:
-    """Smoothed mean-target encoding, fitted only on the rows it is given.
-
-    Use `oof_encode` for training rows: each row is encoded with statistics
-    from the other folds only, never from its own fold.
-    """
-
-    def __init__(self, smoothing: float = 20.0):
-        self.smoothing = smoothing
-        self.table_: pd.Series | None = None
-        self.prior_: float = 0.0
-
-    def fit(self, keys, y) -> "FoldSafeTargetEncoder":
-        frame = pd.DataFrame({"k": np.asarray(keys), "y": np.asarray(y, float)})
-        self.prior_ = float(frame["y"].mean())
-        stats = frame.groupby("k")["y"].agg(["sum", "count"])
-        self.table_ = (stats["sum"] + self.smoothing * self.prior_) / (
-            stats["count"] + self.smoothing
-        )
-        return self
-
-    def transform(self, keys) -> np.ndarray:
-        if self.table_ is None:
-            raise RuntimeError("fit before transform")
-        mapped = pd.Series(np.asarray(keys)).map(self.table_)
-        return mapped.fillna(self.prior_).to_numpy(float)
-
-    @staticmethod
-    def oof_encode(keys, y, folds, smoothing: float = 20.0) -> np.ndarray:
-        keys, y, folds = np.asarray(keys), np.asarray(y, float), np.asarray(folds)
-        out = np.full(len(keys), np.nan)
-        for fold in np.unique(folds):
-            held = folds == fold
-            encoder = FoldSafeTargetEncoder(smoothing).fit(keys[~held], y[~held])
-            out[held] = encoder.transform(keys[held])
-        return out

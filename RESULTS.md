@@ -202,3 +202,133 @@ player-adversarial 頭（gradient reversal）或「每批次每位玩家只取�
 - NeurIPS 正式版 Table 2，去前 15 手的主要 unseen 設定 P@1=0.860，reference/query 各 100 盤。L-001 中 0.39 與 ArcFace 不收斂的確切條件／版本本次未定位，暫不作設計依據。來源：https://papers.nips.cc/paper_files/paper/2021/file/ccf8111910291ba472b385e9c5f59099-Paper.pdf
 - 不再把手級監督宣稱為獨立樣本增加 200 倍，也不以合成題數推論本地驗證必然更可信。修正 11/04 前上傳及每日收尾的過時排程。
 - 各實驗數值 gate、抽樣規模與長訓練預算仍須先討論；此修訂不填造預期增益。
+
+### A-008 硬體支援範圍調整（2026-10-10）
+
+**性質：** 專案需求調整，不是實驗，不影響模型與分數。
+
+- 依使用者決定，必須支援的目標環境縮為 **RTX 3060 Ti 8GB 與國網中心「晶創 26」**，取消 AMD 單卡／ROCm 相容性要求；本紀錄取代 A-007 中的支援範圍，舊紀錄保留。
+- 本機以 CUDA 為基準，可使用 CUDA 專屬 kernel，無須為 ROCm 提供替代實作；保留 DDP／torchrun 與資料路徑、batch、precision、裝置的 config 要求。
+- 同步更新 `CLAUDE.md` §0、`AGENTS.md` 的指標說明及 `EXECUTION_PLAN.md` 算力預算待辦。晶創 26 的 GPU 型號、排程器、配額仍未知，算力預算仍待重估。
+- 全專案搜尋確認目前沒有 ROCm／AMD 專用程式分支或設定需要移除；`reference.md` 的外部工具後端資訊保留。
+
+### A-009 晶創 26 H200 環境查核（2026-10-10）
+
+**性質：** 官方文件調查與需求回填，未登入 HPC、未提交作業、未訓練模型，不影響分數。
+
+- 使用者確認帳號可使用 H200 `dev`、`8gpus`；官方規格、佇列限制與來源集中於 `CLAUDE.md` §0，文件引用登記於 `EXTERNAL_RESOURCES.md`。
+- 已回填 GPU／節點規格、Slurm job 時限、CPU／RAM 限制、登入／傳輸與 Modules 操作。
+- 同步更新 `EXECUTION_PLAN.md` 待辦與 README 入口；本紀錄補完 A-008 的 GPU 型號／排程器未知項，舊紀錄保留。帳號額度、軟體版本、實測吞吐量仍未知；算力預算仍待短測重估。
+
+### A-010 Strength V1 程式交付（2026-10-12，未驗證）
+
+**性質：** 依已確認的 `STRENGTH_V1_PLAN.md`／`STRENGTH_V1_IMPLEMENTATION.md` 撰寫程式。使用者指示「先寫程式不驗證」；本次沒有執行新程式、測試、正式轉檔或訓練。
+
+- ResNet：256 channels、20 residual blocks、18 層輸入、單一實數輸出；相加後無 ReLU。23,748,611 是設計參數數量，未於本次執行計數驗證。
+- 直接使用既有 `board_cache.py` 的 `uint8[total_ply,2,46]` 分片、實際 colors 與 game metadata；不變更快取格式、不另存全量 18 層。
+- 新增 V1 按棋局 80,000／20,000 每級切分與同玩家同色四桶題組；指定玩家 ply 索引、全域 uint32 排列、stateless D4、尾批有效 mask、FP32 跨卡 sum/count 與排序 loss。
+- 新增 DDP／SyncBN／BF16、AdamW、warmup／cosine、定時與 epoch checkpoint、各卡 RNG／資料指紋與續跑入口；預設先跑 1 epoch。未執行單／多卡梯度、SyncBN 尾批、續跑或顯存驗收。
+- 校準只用固定 training 題組的唯一棋局，以凍結模型推論；手→盤→題等權聚合，用四桶等權官方 score 擬合九個有序切點，validation 固定切點評估。切點綁定 checkpoint SHA-256。
+
+| 指標 | k=5 | k=10 | k=15 | k=20 |
+|---|---|---|---|---|
+| validation 官方 score／accuracy／MAE | 未知 | 未知 | 未知 | 未知 |
+| 預期效能增益 | 未知 | 未知 | 未知 | 未知 |
+
+本次訓練 updates=0、測試執行=0、新增模型權重=0；沒有提交檔、LB 預測或上傳。正式盤面數、玩家重疊率、GPU 記憶體與 GPU 小時仍未知。
+
+**程式／設定輸出：** `src/go_aicup/models/strength_resnet.py`；`src/go_aicup/tasks/strength/{dataset,prepare_rank_v1,losses,runtime,train_rank_v1,evaluate_rank_v1}.py`；`src/go_aicup/data/cv.py`；`configs/strength/rank_cnn_v1.json`。操作文件更新於 `README.md`，外部資源登記於 `EXTERNAL_RESOURCES.md`。
+
+**日後執行才產生：** `data/processed/cv/strength_v1_seed2026/`、`data/processed/strength_v1/seed2026/`、`outputs/rank_cnn_v1_seed2026/`；這些正式 V1 索引／權重／分數本次未產生。本機 run 輸出完整路徑為 `D:\college\go_aicup_2026\outputs\rank_cnn_v1_seed2026\`。
+
+### A-011 資料流程與重複防呆清理（2026-10-14）
+
+**性質：** 依使用者逐項清理指示整理程式與文件，不是模型實驗。訓練 updates=0，未執行正式全量轉檔、GPU 訓練或提交；k=5／10／15／20 分數與效能增益均未知。使用者其後指示「先不跑測試」，因此停止後續測試，最終整套驗證尚未完成。
+
+- 唯一 SGF parser 改為競賽的線性 `SZ[19]`／0～360 落點格式；取消 pass、setup 座標清單、coverage 與額外 SGF 格式相容支援，刪除重複 skeleton 檢查及未使用的 `move_tokens()`。稽核仍可讀取 property 名稱，異常資料入口報錯。
+- 一般盤面轉換只重播落子與提子；占點、自殺、立即劫改由 `validate_moves=True` 明確啟用，稽核只需兩個歷史盤面。EDA 刪除 pass 分支與第 362 個落點類別。
+- 移除逐盤完整打包／解包比對；`board_cache verify` 保留全檔 hash／shape／padding／colors，並固定 seed 2026 抽每個 shard 一盤做合法性稽核重播與快取對照。shape 檢查移到首次開啟 shard，取消每次讀取的 padding／顏色值掃描。
+- 保留 `shard_XXXXX_colors.npy`、實際 colors 取樣與 18 層黑／白編碼；指定玩家、歷史不跨局、索引範圍、尾批 mask、缺級處理、DDP loss、checkpoint／資料指紋與 training-only 校準檢查仍保留。
+- CV 刪除玩家唯一性已涵蓋的 fold 集合逐對比對；GameStore 移除未知顏色 `-1` 回退，入口要求合法 B/W。刪除沒有使用端的 `FoldSafeTargetEncoder`；共用 artifact hash／原子 JSON 與 `assemble_inputs()`。
+- 測試棋譜改為無 pass、黑先交替的資料，保留提子、歷史邊界、顏色、LRU／pickle、續跑與損壞檔案驗收。最後調整的多子／多群提子與自殺測試棋譜尚未重跑。
+
+**停止測試前已完成的分組結果（非最終整套驗證）：**
+
+| 部分 | 驗證 | 結果 |
+|---|---|---|
+| setup 清單 | `test_sgf_planes.py` | 39 passed |
+| SGF／pass 格式 | SGF、foundation、board_cache | 65 passed、1 skipped |
+| EDA／棋步稽核模式 | SGF、game_stats | 44 passed |
+| 快取檢查集中化 | board_cache | 12 passed、1 skipped |
+| CV／顏色入口 | foundation | 16 passed |
+| 未使用功能清理 | 現有特徵與增強規則 | 3 passed、12 deselected |
+| 共用工具／18 層組裝 | board_cache | 12 passed、1 skipped |
+
+官方各級前 20 盤，共 200 盤（連續前綴抽樣，非全量代表樣本）的一般／棋步稽核模式盤面逐元素一致。略過項均為目前 `D:\anaconda\python.exe` 缺少 torch 的實際 DataLoader 多程序測試；未執行 DDP 驗收。依停止測試指示，之後只進行 Python AST 靜態語法檢查與 `git diff --check`，不匯入專案模組或啟動測試。
+
+**檔案位置：** 新增共用工具 `D:\college\go_aicup_2026\src\go_aicup\artifacts.py`；修改位於 `src/go_aicup/{data,features,tasks/strength}/`、`scripts/{audit_train,eda_report}.py`、對應 `tests/`，並同步 `CLAUDE.md`、`README.md`、兩份 V1 計畫。本次沒有新增正式資料索引、模型權重、提交檔或 `outputs/` run 產物。
+
+
+### A-012 Nano4 Strength V1 8-GPU short run（2026-10-17）
+
+使用者要求執行短跑；基於 commit `8ed6d1f`，256 channels／20 blocks、BF16、SyncBN、global batch 65,536（每卡 8,192），限制 100 optimizer updates，跳過評估。只修改獨立短跑 config 的 output_dir、runtime 上限與 log 頻率，未修改模型或正式設定。
+
+- `561669`：快取 verify 通過（1,000,000 games、221,894,008 plies、20,414,248,736 packed payload bytes、250 sampled games），正式索引產生成功；其後在 25a-hgpn062 發生 CUDA unknown error，updates=0，根因未知。
+- `561693`：25a-hgpn145 CUDA 可用，但 NCCL socket 發生 No route to host，updates=0。
+- `561694`：設定 `NCCL_SOCKET_IFNAME=lo`、`NCCL_IB_DISABLE=1` 後完成，Slurm COMPLETED／exit 0，elapsed 10m47s；8×H200、driver 580.65.06、torch 2.6.0+cu124。完成 100 updates、6,553,600 samples；loss 1.678584 → 0.796883，前／後 10 steps 平均 1.676225／0.832316，所有已記錄 loss 與梯度 norm 有限，未出現 OOM。
+- 每步 p50 1.515966s、p95 1.517836s；排除前 10 steps 的吞吐量中位數 43,228 samples/s。rank 0 PyTorch peak allocated 120.677 GiB（不是全卡最高值，也不是 nvidia-smi reserved 顯存）。訓練程序 session 617.894s、1.373 GPU hours，未包含前兩次失敗等完整成本。
+- session 估算純 training epoch 2,257.901s（37.63min），不含 shuffle、validation/calibration、checkpoint、初始化與排隊；10 epochs 純 training 約 6.27h，完整端到端時間未知。首輪全量 memmap shuffle 有明顯初始化耗時，尚未單獨精確計時。
+- 唯一 checkpoint 約 286.46MB，last.json SHA-256 驗證通過；未執行 resume、完整 epoch、尾批或評估驗收。k=5／10／15／20 官方分數皆未知，loss 下降不代表驗證棋力分數提升。
+
+資料索引：train 800,000 games／88,763,475 samples；valid 200,000／22,183,737；calibration 109,500／12,145,674。V1 game-disjoint 設計下 valid players 7,855 人全在 train 出現，overlap fraction=1.0，不是 player-disjoint 驗證。
+
+產物：`outputs/rank_v1_short_100_20261017_135242/summary.json`、`socket.slurm`、`socket-561694.out`／`.err`、`run_socket/train.jsonl`、`run_socket/session_*.json`、`run_socket/last.json` 與 `run_socket/checkpoints/*.pt`；正式資料索引位於 `data/processed/strength_v1/seed2026/`，CV 題組位於 `data/processed/cv/strength_v1_seed2026/`。沒有提交完整 10-epoch 作業或競賽預測。
+
+### A-013 Strength V1 compact per-seed pipeline（2026-10-18）
+
+依使用者確認修改：seed2027／2028／2029 各自切分與訓練 1 epoch；每 100 optimizer steps 與最後一步，以 eval 模式／無 D4 完整推論 train、valid，使用全資料各 rank 平均 score 計 ranking loss。取消獨立 cv 目錄、calibration 子集與 training 校準題；processed 以 seed 為單位集中保存。切點使用全部 training 逐手 score 與標籤等權擬合。訓練成功後只留 model.pt、losses.npy、train_scores.npy、valid_scores.npy；原 seed2026 資料與 run 保留。新增 infer_rank_v1.py 與三份 seed config，預設 config 指向 seed2027。評估／繪圖讀保存分數，不重新推論；舊格式繪圖仍保留。
+
+在 go Conda 環境使用合成資料執行 `PYTHONPATH=src python -m pytest -q`：**81 passed（34.92 秒）**。新增驗證包含：切點對照窮舉最佳解、完整 loss／逐手索引對齊、BN 推論不變、不中斷與中斷續跑的權重／loss／score 逐元素一致、評估及最終切點中斷恢復、成功後四檔清理、score hash 損壞拒絕、三張實際圖檔，以及兩個 CPU/Gloo process 對照 serial（401 samples，最後一個 process 無有效尾批樣本）。另通過 syntax compile 與 git diff whitespace 檢查。
+
+此次未啟動官方資料準備或正式模型訓練，沒有新增正式 outputs run。新流程的 CUDA／SyncBN／8 卡與完整資料切點擬合成本尚未驗收；k=5／10／15／20 正式分數均未知。操作方式與預估成本見 README。
+
+
+### A-014 Three-seed CPU visualizations（2026-10-18）
+
+依使用者要求在登入節點 `25a-lgn05`，使用 go 環境、單執行緒 CPU，讀取 seed2027／2028／2029 已保存結果，各產生兩張 PNG：`outputs/rank_cnn_v1_seed{seed}/plots/loss_vs_step.png` 與 `score_distributions_cutpoints.png`，共六張。未執行模型推論或訓練。分布使用 validation 全部 200,000 盤、每級 20,000 盤，指定玩家逐手 scalar score 先取盤內平均，每盤等權；製圖程式已驗證 score／索引 hash、每盤覆蓋與手數一致。loss 圖為當步 training batch loss（train mode）與全 validation rank-mean loss（eval mode），不混接定義不同的 legacy_full_losses.json；2027／2028 各 12 個紀錄點（step 300–1355），2029 共 14 點（step 100–1355）。新增 `--skip-confusion` 選項並修正 loss 圖例，README 補重跑指令；三次製圖均 exit 0，六張 PNG 驗證通過，git diff --check 通過。本次未計算 k 桶分數。
+
+
+A-014 更正（2026-10-18）：上段將橘線 valid_loss 誤記為全 validation，實際依 train_rank_v1.validation_sample_indices 為每級固定不放回抽樣 10,000 手，共 100,000 手，由各 seed 決定；每個評估 step 使用同一組樣本。已修正繪圖圖例、README 並重畫三個 seed 的 loss_vs_step.png。完整 validation 分數仍用於每盤分布圖，與 loss 抽樣範圍不同。
+
+
+### A-015 Training game-mean cutpoint calibration（2026-10-18）
+
+依使用者要求，切點由全部 training 的指定玩家逐手 scalar score 先取每盤平均，再以每盤等權官方 score 擬合有序區間；每 seed 800,000 盤，不使用 validation 標籤。登入節點單執行緒 CPU 使用既有 score 重擬合 seed2027／2028／2029，原子更新 model.pt 的切點，並逐元素確認模型權重不變，保存的 losses／scores 未改寫。訓練收尾流程亦改用每盤擬合；新增 --refit-cutpoints 供既有 run 使用。
+
+| Seed | k=5 | k=10 | k=15 | k=20 | Equal-k |
+|---|---|---|---|---|---|
+| 2027 | 0.312799 | 0.330387 | 0.338884 | 0.350654 | 0.333181 |
+| 2028 | 0.300215 | 0.323040 | 0.352314 | 0.372288 | 0.336964 |
+| 2029 | 0.301448 | 0.319964 | 0.324084 | 0.345367 | 0.322716 |
+
+各 run 的 plots/ 保存 cutpoints_before_game_refit.json（舊逐手切點）、game_cutpoint_evaluation.json（新完整評估），並重畫 loss_vs_step.png 與 score_distributions_cutpoints.png。驗證：切點 DP 對照窮舉、完整收尾及續跑一致性共 2 passed、6 deselected（20.97s）；新增斷言確認 200 盤合成 training 的擬合筆數與官方每盤得分一致。語法解析與 git diff --check 通過。此變更不改 loss 定義、訓練權重或 split；本結果沿用 V1 game-disjoint split，非 player-disjoint 泛化分數。
+
+
+### A-016 Strength V2 config and whole-game monitoring indices（2026-10-19）
+
+依使用者要求完成 V2 實作第二步。新增 `configs/strength/rank_cnn_v2_seed2027.json`、`tasks/strength/v2/config.py` 與 `v2/prepare.py`；seed=2027、global batch=65,536、1 epoch，optimizer／scheduler／BN／SyncBN／precision／D4 沿用 V1。共用 prepare 沿用 `data.cv` 的同 seed 切分與固定 validation 題目產生器；V2 dataset 另存 `data/processed/strength_v2/seed2027/`，預定模型輸出 `outputs/v2_strength/`。
+
+監控從 validation 每級固定無放回抽取 5,000 整盤，共 50,000 盤；保存 `monitor_games.npy` 唯一棋局清單，以及 `monitor_game.npy`／`monitor_ply.npy` 的指定玩家全部落子。manifest 保存監控設定、整盤數、總手數、每級手數及索引指紋，沿用 split 玩家重疊揭露。完成後重跑讀保存索引，不重新抽樣；改設定不覆寫既有 dataset。單盤 argmax 與多盤 score_rank 規格記於 config，評分程式仍未實作。
+
+驗證：go Conda 環境以 `OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONPATH=src python -m pytest -q tests/test_strength_v2_prepare.py tests/test_rank_compact.py` 執行 **12 passed（26.44s）**，其中 4 項為新增測試。新增測試使用合成 metadata／顏色快取介面，涵蓋整盤平衡與固定抽樣、不同 seed、黑白全部指定玩家落子覆蓋、重跑不抽樣、設定變動及索引損壞拒絕，以及 V2／共用 V1 同 seed 切分、固定題目與完整 train／valid 索引逐位元組一致。既有 compact V1 訓練／評估／續跑回歸通過；V2 CLI help 與 git diff --check 通過。
+
+未執行官方全量資料準備、V2 模型 forward 或正式訓練，未產生正式 V2 模型、loss 或分類結果。正式監控總手數、資料準備耗時與 GPU 小時未知；k=5／10／15／20 的 V2 分數均未知。模型／CE loss／訓練／評估／繪圖仍待後續步驟實作。
+
+
+### A-017 Strength V2 ten-class model and global cross entropy（2026-10-19）
+
+依使用者要求完成 V2 實作第三步，新增 `tasks/strength/v2/model.py` 與 `v2/losses.py`。模型直接沿用 shared backbone，末層 `Linear(256,10)` 回傳原始 B×10 logits，類別順序 D、C、B、A、1D..6D；預設參數 23,750,924。softmax 留在推論端；不載入 V1 訓練權重。CE 無類別權重、label smoothing=0、逐有效樣本等權，FP32 loss 總和除以 int64 全域有效樣本數，不要求每批涵蓋十級。mask 在 CE 前排除補齊樣本；各卡可有不同有效數或零有效數，全域零有效則拒絕。可微全域 SUM 的梯度倍數由 DDP 參數梯度平均抵消，不另加 world_size 縮放。函式回傳 differentiable loss、detached loss_sum 與 valid_count，供後續訓練／監控接線。
+
+驗證：go Conda 環境執行 `OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONPATH=src python -m pytest -q tests/test_strength_v2_model_loss.py`：**6 passed（6.23s）**。涵蓋 B=1 輸出維度、softmax 列和、類別順序、meta device 正式模型參數計數、零 logits CE=log(10)、提高真實類別 logit 時 loss 降低、補齊樣本零梯度與非有限 padding 排除、BF16 logits 的 FP32 CE、非法標籤及全域零有效樣本拒絕；實際兩程序 CPU/Gloo DDP 線性模型驗證有效數 3:2、2:0（含實體空 batch）的全域 loss、sum、count、參數梯度與單程序對照一致，亦驗證已初始化 process group 內關閉同步的本地統計及跨卡非法資料／全空錯誤傳遞。
+
+未啟動正式訓練或官方資料推論；完整 CNN 的 CUDA／SyncBN／多 GPU 訓練尚未驗收。V2 k=5／10／15／20 分數與正式 GPU 小時未知。第四步推論聚合及後續訓練、評估、圖表仍待實作。

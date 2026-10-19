@@ -29,7 +29,9 @@ __pycache__/
 *.egg-info/
 build/
 .ipynb_checkpoints/
+.vscode/
 
 # OS
 ._*
 .DS_Store
+slurm/

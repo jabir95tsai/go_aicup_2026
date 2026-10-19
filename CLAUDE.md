@@ -60,11 +60,48 @@
   前 30 名且前 25% 且超過 baseline → 繳報告審查後發電子獎狀。報告評分 = 完整性 + 正確性 + **程式原創性**
 - 得獎隊伍須提交**可重現模型的原始程式碼**
 
-### 算力 ✅（2026-10-03 確認）
+### 算力 ✅（2026-10-10 更新支援範圍）
 
-- 本機 RTX 3060 Ti 8GB（CUDA 12.4）、**AMD ROCm 單卡、國網中心「晶創 26」都可用**
-- → 程式要同時能跑 CUDA 與 ROCm（CUDA 專屬 kernel 必須可關閉）；訓練入口預留 DDP／torchrun；資料路徑、batch、precision、裝置都走 config
-- → `EXECUTION_PLAN.md` 的算力預算是依 3060 Ti 估的，**需要重估**（尤其 P3 盤面 CNN、P4 KataGo 特徵的可行規模）；晶創 26 的 GPU 型號、排程器、配額 未知
+- 必須支援的目標環境只有 **本機 RTX 3060 Ti 8GB（CUDA 12.4）與國網中心「晶創 26」**；取消 AMD 單卡／ROCm 相容性要求
+- → 兩個目標都以 NVIDIA／CUDA 為基準，可使用 CUDA 專屬 kernel，無須為 ROCm 提供替代實作；訓練入口預留 DDP／torchrun（單節點多卡；無須支援跨節點訓練）；資料路徑、batch、precision、裝置都走 config
+- → `EXECUTION_PLAN.md` 的算力預算是依 3060 Ti 估的，**需要依 H200 實測重估**（尤其 P3 盤面 CNN、P4 KataGo 特徵的可行規模）；帳號剩餘 GPU 小時、儲存配額與實際軟體版本仍未知
+
+#### 晶創 26（Nano4）H200 環境（2026-10-10 查核）
+
+**使用範圍：** 本專案只使用 H200 的 `dev` 與 `8gpus` 佇列，每個作業限單節點、最多 8 GPU。
+
+- **硬體：** H200 節點共 220 台；每台 8 張 NVIDIA H200、2 顆 Intel Xeon Platinum 8480+（共 112 CPU 核心）、2TB 主記憶體、8 個 InfiniBand 400Gb/s 網路埠。H200 節點與登入節點為 x86_64，作業系統為 Red Hat Enterprise Linux。[官方系統規格](https://man.twcc.ai/@nano4-manual/SJuKzVlwbx)
+- **顯存與互連：** Nano4 的 GPU 型號為 H200 SXM5 141GB；H200 每卡為 141GB HBM3e、4.8TB/s 顯存頻寬。節點內 8 卡透過 NVLink 互連，跨節點走 InfiniBand。[TOP500 系統登錄](https://www.top500.org/system/180421/)、[NVIDIA H200 規格](https://www.nvidia.com/en-us/data-center/h200/)、[官方系統規格](https://man.twcc.ai/@nano4-manual/SJuKzVlwbx)
+- **節點與 GPU 數：** 8 GPU 完整配置 = 1 個 H200 節點，本專案只規劃單節點作業。顯存仍分屬各 GPU，不能當成單卡共享顯存。`8gpus` 是佇列名稱，實際配置以作業申請與 Slurm 分配為準。
+
+**排程器：Slurm Workload Manager。** 以下只列本專案使用的 H200 佇列；查核時官方政策如下。[官方 Slurm 佇列表](https://man.twcc.ai/@nano4-manual/SJM_FuxDWe)
+
+| 佇列 | 單一 account 可用 GPU 總數 | 每 job 最少 GPU | 每 job 最長時間 | 每 user 同時 running jobs | 每 user pending jobs |
+|---|---:|---:|---:|---:|---:|
+| `dev` | 32 | 1 | 4 小時 | 10 | 10 |
+| `8gpus` | 32 | 1 | 48 小時 | 8 | 10 |
+
+H200 佇列限制**每張 GPU 最多 12 CPU 核心、200GB 主記憶體**；200GB 是主機 RAM 配額，與 141GB GPU 顯存不同。佇列名稱不等於每 job 的最少 GPU 數；提交前以 `sinfo`／`scontrol show partition` 查當下政策與實際 job 上限。
+
+**本專案使用方式：** 本機 3060 Ti 8GB 做開發與小規模驗證；H200 `dev` 做環境、單卡與單節點 DDP 短測；通過後以 `8gpus` 做單節點最多 8 卡訓練或分片推論。這是工作分配規劃，尚未實測吞吐量或多卡加速比。長作業須定期 checkpoint 並可續跑；NRQ 工作可能被中斷、重新排程。預算以 GPU 小時記帳（GPU 數 × 執行小時），不能由卡數直接假定線性加速。[官方 NRQ 說明](https://iservice.nchc.org.tw/nchc_service/nchc_service_qa.php?target=54)
+
+**連線與環境：** 登入 `nano4.nchc.org.tw:22`；SFTP 資料傳輸使用同主機的 `2222` 埠，掛載 `/home`、`/work`。計算工作交給 Slurm，不在登入節點執行。本專案已使用 Conda 建置名為 **`go`** 的環境，執行前以 `conda activate go` 啟用。Job 如需系統模組，先 `module purge`，再按 `module avail`／`module spider` 查核並載入所需模組，接著啟用 `go`；Conda 初始化方式以現場為準；CUDA、driver、PyTorch／NCCL 的實際版本須在計算節點記錄，不能直接沿用本機 CUDA 12.4 的假設。[官方登入與傳輸說明](https://man.twcc.ai/@nano4-manual/BydP-_lvZg)、[官方 Modules 說明](https://man.twcc.ai/@nano4-manual/BJyI6dgw-g)
+
+**仍未知：** 專案 account／QoS、剩餘 GPU 小時、RQ／NRQ 身分、儲存配額、實際 driver／CUDA／PyTorch／NCCL 版本與排隊時間。晶創 26 另有 GB200／Arm 資源；本專案目前的 HPC 支援範圍限定上述 H200 佇列。
+
+**依賴安裝基準（2026-10-11）：** 本機 Windows 與 Nano4 Linux x86_64 共用 `requirements.txt` 的直接依賴 pins，使用標準 CPython 3.11–3.13、`torch==2.6.0+cu124` 與官方 CUDA 12.4 額外索引。Linux CUDA wheel 的 NCCL 依賴由 pip 安裝；系統 module 不必恰好是 CUDA 12.4，但 driver 必須相容。Nano4 的 Conda **`go`** 環境已建置（2026-10-11 使用者確認）；上述依賴 pins 是否已完整安裝、實際套件版本與多卡測試結果仍待驗證。安裝、driver／glibc 檢查與 `scripts/check_torch_ddp.py` 的 1／2／8 卡驗證方式見 [README 的 Nano4 段落](README.md#nano4-linux單節點多卡)；環境紀錄放 `outputs/rank_env_nano4/`。2026-10-12 已依確認的 V1 計畫撰寫 DDP 模型訓練入口；使用者要求先寫程式不驗證，因此單／多卡 loss 與梯度、SyncBN、尾批及續跑皆尚未驗收，環境通過不代表訓練程式通過。
+
+**棋力 V1 已確認例外與程式狀態（2026-10-12）：** 第一版依 [STRENGTH_V1_PLAN.md](STRENGTH_V1_PLAN.md) 與 [STRENGTH_V1_IMPLEMENTATION.md](STRENGTH_V1_IMPLEMENTATION.md) 使用固定黑／白 18 層歷史輸入、256-channel／20-block scalar ResNet、全域級別平均排序 loss、每級按棋局 80,000／20,000 切分與 training-only 切點校準；本檔以下我方／對方、softmax 與 player-disjoint 設定保留為其他路線規範，不取代本版已確認設定。V1 模型、DataLoader、索引、loss、DDP／checkpoint 及評估程式已撰寫；本次未執行驗證、全量資料處理或訓練，未產生權重、索引或分數。操作與路徑見 [README.md](README.md#棋力-v1資料準備訓練與評估)，後續驗收仍依兩份 V1 計畫執行。
+
+**棋力 V1 資料要求更新（2026-10-14）：** 依使用者決定，取消保留 pass 時間位置與禁止按奇偶判色的要求；訓練資料仍依 `board_cache.py` 保存 `shard_XXXXX_colors.npy`（`int8[T]`，黑=0、白=1），維持現有快取格式。訓練集已確認黑先、黑白交替且 pass=0（`RESULTS.md` A-002），可依零起算 `ply % 2` 推得當手顏色、選取指定玩家樣本及組合顏色層；固定黑／白 18 層輸入仍依 V1 計畫。已完成相關程式精簡與部分測試（`RESULTS.md` A-011），其後依使用者要求停止測試；未啟動全量轉檔或訓練。
+
+**棋力 V1 校準時機更新（2026-10-17）：** 依使用者決定，只在全部設定 epochs 完成後，以最終模型建立一次 training-only 的 9 個切點並評估 validation，不再每 epoch 校準／評估。訓練期間仍定時與每 epoch 保存最新 checkpoint；中途達到更新／時間上限不建立切點，最終評估中斷則續跑重試。
+
+**棋力 V1 精簡流程更新（2026-10-18）：** 依使用者確認，各 seed 自行切分、訓練 1 epoch；每 100 steps 與最後一步完整推論 training／validation，以全資料各 rank 平均 score 計 loss。processed 統一放每 seed 的 strength_v1 目錄，取消獨立 cv／calibration 子集；切點改由全部 training 逐手分數擬合。成功後 run 僅留 model.pt、losses.npy、train_scores.npy、valid_scores.npy；評估直接讀保存的分數。此更新取代上方 10/17 校準流程，詳見 README；未啟動正式訓練。
+
+**棋力 V1 切點更新（2026-10-18）：** 依使用者要求，切點改用全部 training 每盤的指定玩家逐手 score 平均值擬合，每盤等權，最佳化官方得分；不使用 validation 標籤。此更新取代先前逐手等權切點設定，排序 loss 與 loss 抽樣不變。
+
+**棋力 V2 計畫（2026-10-19 更新）：** 依使用者要求，沿用 V1 ResNet，最後線性 head 由 `361→256→1` 改為 `361→256→10`，以 softmax 輸出十級機率、逐樣本 cross entropy 訓練（訓練 loss 直接接收 logits）。此方案取代原錨點 MSE＋間隔懲罰；單盤分類取指定玩家所有手的 softmax confidence 總和最大類別；多盤題目已確認先算每盤十類平均機率，再按每盤等權平均；多盤題目的正式解碼已確認使用相鄰級加權的 `metrics.score_rank`，不擬合 scalar 切點。每 100 steps 記錄最近 training batch loss；validation 改為從既有 split 每級固定抽取 5,000 盤、共 50,000 盤，推論指定玩家全部落子（手數不固定）計算逐手平均 loss 與 validation 官方分數；每 100 steps 與最後一步的 validation 官方分數已確認採單盤：每盤指定玩家全部落子的 confidence 總和 argmax 分類，再按盤等權平均官方公式得分，作為單盤診斷成績，中途不另建立多盤題目；最終全量評估維持原 200,000 盤 validation，全部訓練結束保存完整 validation 每盤分類結果，輸出目錄固定為 `outputs/v2_strength/`，正式檔案為 `model.pt`、`losses.npy`、`validation_category.npy`；`model.pt` 不保存題目雜湊、聚合規則或驗證報告，不額外計算或保存最終全量逐手 CE；分類報表於評估時在 CPU 重算，loss 使用 `losses.npy`；保存每盤 confidence 總和與手數，不要求保存全量逐手機率或最終 training 推論。最終評估規劃由 CPU 直接讀取已存每盤 confidence、重用固定 validation 題目，依使用者要求不另做棋局、手數、confidence 或資料雜湊的完整性檢查，報告單盤與 k=5／10／15／20 成績；題目 argmax／score_rank 分開列報，`score_rank` 為已確認的正式解碼，argmax 僅作診斷，不依 validation 自動挑選解碼。V2 依使用者要求不計算或呈現 MAE。視覺化規劃包含 loss／score 曲線、單盤與各 k 混淆矩陣、各級成績、平均 confidence 熱圖，圖表由保存產物重建，評估後僅以 `.png` 格式直接保存至 `output-dir/plot/`（預設 `outputs/v2_strength/plot/`），不使用 `plt.show()`，不另設顯示或匯出目錄選項。詳見 [STRENGTH_V2_PLAN.md](STRENGTH_V2_PLAN.md)；依使用者要求不進行 V1／V2 比較，不安排 V1 對照訓練、比較圖或相對增益 gate；已實作 V2 第二步 config／資料準備入口與整盤監控索引，以及第三步十類 logits 模型與 FP32 全域樣本平均 CE loss（含尾批 mask）；CPU／兩程序 Gloo loss 與梯度驗證通過，CUDA／SyncBN 尚未驗收，操作見 `src/go_aicup/tasks/strength/README.md`；推論聚合、訓練與評估待實作，未啟動官方全量資料準備或訓練。
 
 ### 仍待確認 ⏳
 
@@ -102,18 +139,22 @@
 
 ### 稽核已確認的事實（2026-09-24，見 `RESULTS.md` A-001）
 
-- **SGF 只有 `SZ[19]` + 落手。** 沒有 `HA`/`KM`/`DT`/`AP`/`TM`，沒有 AB/AW。沒有任何 metadata 捷徑
+- **訓練集 SGF 僅有 `SZ[19]` 與落子。** 無讓子（`HA`）、貼目（`KM`）、日期（`DT`）、時間（`TM`/`OT`）、結果（`RE`）、軟體（`AP`）等 metadata，也沒有 AB/AW setup 石 → 棋力與風格訊號必須從落子序列與盤面推導；候選庫／測試集發布後仍須另行稽核
 - **唯一鍵是 `(rank, game_id)`**，不是 `game_id`——1M 列只有 100,000 個 distinct `game_id`。只用 `game_id` join/去重會 10:1 靜默塌縮
-- **rank 是玩家級屬性**：8,007 位玩家，每位只屬於一個 rank → 競賽二的有效樣本數是 8,007，不是 1M
+- **100 萬盤來自 8,007 位玩家，每人只屬於一個 rank**（跨 rank 玩家數為 0）→ 棋力標籤是玩家級屬性，評估跨玩家泛化時的獨立單位是玩家，不能把 100 萬盤當成獨立樣本；須留意模型記住玩家習慣而非學會棋力的風險
 - **各 rank 玩家數差 3.6 倍**（1D 僅 433 位、A 有 1,582 位）→ 少數 rank 極易被「記住玩家」而非「學會棋力」
 - **只有 1,281 位玩家有 ≥120 盤黑棋** → 競賽一的忠實合成驗證人數上限
 - 棋局長度 **100–445** 手（中位數 228、p99 323），全為 19 路，無損毀，**全量零重複棋譜**
 - → 序列位置上限 **448**；因 p99 僅 323，用 length bucketing 而非固定 padding
 - 黑方第一手集中：`pd` 54.9% + `qd` 19.9%
 
+### 棋力訊號 EDA（2026-09-25，見 `RESULTS.md` A-005 E3）
+
+**對手走法也有棋力訊號，強度約與本人相當。** 距離／應手類特徵的玩家成分較低，例如 `d_opp` 的玩家成分為對手 **0.063**、本人 **0.151**（約一半）→ 棋力模型值得納入雙方落子，利用對手訊號並降低對本人習慣的依賴。提子類特徵須另行解讀：「對手提子」等同「本人被提」，仍反映本人表現。這是描述性分析，實際模型增益仍須驗證。
+
 ### 規模現實
 1M 盤 × 約 200–250 手 ≈ 2 億手。**絕對不要每個 epoch 重新 parse CSV/SGF。**
-第一週就要做一次性轉檔：SGF → 緊湊二進位（每手一個 `int16` = `row*19+col`，pass/特殊另編），存成 `npy`/`memmap` + 一份 metadata parquet。之後所有訓練吃這份。
+第一週就要做一次性轉檔：SGF → 緊湊二進位（每手一個 `int16` = `row*19+col`，範圍 0～360），存成 `npy`/`memmap` + 一份 metadata parquet。之後所有訓練吃這份。
 
 ---
 
@@ -297,9 +338,8 @@ project/
 │   │   ├── feature_policy.py  # 禁用欄位清單（game_id / player_id / 檔名衍生…）
 │   │   ├── game_stats.py      # 盤面重播統計（numba）
 │   │   └── features_vN.py     # 手工特徵，一版一檔
-│   ├── models/                # 共用 game encoder、aggregate（題內多盤聚合）
 │   └── tasks/
-│       ├── strength/          # 競賽二：train_rank_vN、推論、提交檔
+│       ├── strength/          # 競賽二：shared/ 共用基礎、v1/ 專用模型與訓練評估
 │       └── identity/          # 競賽一：train_pid_vN、推論、提交檔
 ├── scripts/                   # 一次性報告／命令列入口（audit_train、eda_report…），不放可重用邏輯
 ├── tests/

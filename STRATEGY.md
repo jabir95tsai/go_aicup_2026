@@ -2,6 +2,8 @@
 
 > 2026-10-05 修訂：先建立文獻對照，再決定主力模型。規則、資料事實與工作紀律以 [CLAUDE.md](CLAUDE.md) 為準；執行順序見 [EXECUTION_PLAN.md](EXECUTION_PLAN.md)。本次只更新計畫，沒有新訓練結果。
 
+> **2026-10-11 更新：** 棋力辨識第一版的實作規格見 [STRENGTH_V1_PLAN.md](STRENGTH_V1_PLAN.md)。已選定兩層盤面動態組合 18 層、20-block ResNet 與 batch 級別平均排序 loss，於 Nano4 訓練；每級 80,000 盤 training／20,000 盤 validation，只取指定玩家的手。以下分類頭、對手落子監督與其他模型路線是後續候選，不是第一版規格。
+
 ## 1. 已知結果與未知部分
 
 - 已完成資料轉檔、玩家隔離切分與合成題組；歷史證據見 RESULTS.md A-001～A-007。

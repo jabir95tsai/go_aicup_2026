@@ -29,14 +29,10 @@ class GameStore:
         self.meta = pd.read_parquet(directory / f"{name}_meta.parquet")
         self._offset = self.meta["offset"].to_numpy(np.int64)
         self._length = self.meta["length"].to_numpy(np.int64)
-        # colour held by the labelled player: 0 black, 1 white, -1 unknown
-        if "color" in self.meta:
-            self.player_color = (
-                self.meta["color"].astype(str).map({"B": 0, "W": 1}).fillna(-1)
-                .to_numpy(np.int8)
-            )
-        else:
-            self.player_color = np.full(len(self.meta), -1, np.int8)
+        # Colour held by the labelled player: 0 black, 1 white.
+        if "color" not in self.meta or not self.meta["color"].isin(["B", "W"]).all():
+            raise ValueError("store requires a B/W player color for every game")
+        self.player_color = self.meta["color"].map({"B": 0, "W": 1}).to_numpy(np.int8)
 
     def __len__(self) -> int:
         return len(self.meta)

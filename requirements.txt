@@ -1,4 +1,8 @@
-# python 3.13.12; GPU: RTX 3060 Ti 8GB (CUDA 12.4)
+# Supported: standard CPython 3.11-3.13; reference Python: 3.13.12.
+# Targets: Windows RTX 3060 Ti and Nano4 Linux x86_64 H200 (single-node DDP).
+# Keep PyPI for other packages and Linux CUDA/NCCL dependencies.
+--extra-index-url https://download.pytorch.org/whl/cu124
+
 numpy==2.3.5
 pandas==2.3.3
 pyarrow==20.0.0
@@ -10,4 +14,5 @@ matplotlib==3.10.8
 torch==2.6.0+cu124
 tqdm==4.67.3
 pytest==9.0.3
-# after installing the pins: pip install -e .   (makes `go_aicup` importable)
+# Linux NCCL and torchrun are provided by the PyTorch installation.
+# After installing the pins: python -m pip install -e .

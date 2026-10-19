@@ -10,6 +10,7 @@ import pytest
 from go_aicup import metrics
 from go_aicup.data import cv, preprocess
 from go_aicup.data import sgf as sgflib
+from go_aicup.data.store import GameStore
 from go_aicup.features import feature_policy as fp
 
 
@@ -55,16 +56,6 @@ def test_augment_policy():
     fp.check_augment("pid", d4=False)
     with pytest.raises(fp.FeaturePolicyError):
         fp.check_augment("pid", d4=True)
-
-
-def test_target_encoder_is_out_of_fold():
-    keys = np.array(["a"] * 10 + ["b"] * 10)
-    y = np.array([1.0] * 5 + [0.0] * 5 + [0.0] * 10)
-    folds = np.array([0] * 5 + [1] * 5 + [0] * 5 + [1] * 5)
-    enc = fp.FoldSafeTargetEncoder.oof_encode(keys, y, folds, smoothing=0.0)
-    # rows of key "a" in fold 0 (y=1) must be encoded from fold 1 (y=0) only
-    assert np.allclose(enc[:5], 0.0)
-    assert np.allclose(enc[5:10], 1.0)
 
 
 # ---------------------------------------------------------------- cv
@@ -162,3 +153,16 @@ def test_melt_questions_and_parse():
     assert meta["length"].tolist() == [3, 3, 3]
     assert moves[:3].tolist() == [sgflib.point_to_index(p) for p in ("pd", "dp", "qp")]
     assert meta["alternating"].all()
+
+
+@pytest.mark.parametrize("color", ["B", "W", "X", None])
+def test_store_player_perspective_requires_color(tmp_path, color):
+    frame = pd.DataFrame({"color": [color]}) if color is not None else pd.DataFrame(index=[0])
+    moves, colors, meta = preprocess._to_store(frame, ["(;SZ[19];B[pd];W[dp];B[qp])"], workers=1)
+    preprocess._write_store("sample", moves, colors, meta, tmp_path)
+    if color not in ("B", "W"):
+        with pytest.raises(ValueError, match="B/W player color"):
+            GameStore("sample", tmp_path)
+    else:
+        store = GameStore("sample", tmp_path)
+        np.testing.assert_array_equal(store.perspective(0)[1], [0, 1, 0] if color == "B" else [1, 0, 1])
