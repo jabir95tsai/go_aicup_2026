@@ -14,7 +14,7 @@ Every shard also retains int16 moves, int8 actual colors and game metadata.
 
 DataLoader code uses BoardCache.game(), history() or training_batch(). The
 reader never parses SGF and never decompresses the complete dataset. See
-go_aicup.tasks.strength.dataset.PackedBoardDataset for a map-style adapter.
+go_aicup.tasks.strength.shared.dataset.PackedBoardDataset for a map-style adapter.
 No split, training, augmentation or full uncompressed copy is created here.
 """
 

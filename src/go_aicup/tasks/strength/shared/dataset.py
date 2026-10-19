@@ -1,4 +1,4 @@
-"""DataLoader adapter for on-demand packed Strength V1 board decompression.
+"""DataLoader adapter for on-demand packed strength board decompression.
 
 Pass sample game/ply indices selected by the caller (only the labelled
 player's moves). CV splits are made only by data.cv.

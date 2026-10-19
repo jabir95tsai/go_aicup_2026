@@ -5,8 +5,8 @@ import json
 import pytest
 import torch
 
-from go_aicup.tasks.strength.runtime import model_state_hash
-from go_aicup.tasks.strength.train_rank_v1 import resolve_checkpoint, save_checkpoint
+from go_aicup.tasks.strength.shared.runtime import model_state_hash
+from go_aicup.tasks.strength.v1.train import resolve_checkpoint, save_checkpoint
 
 
 def checkpoint_writer(directory):

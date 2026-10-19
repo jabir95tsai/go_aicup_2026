@@ -13,7 +13,7 @@ import torch
 
 from go_aicup.data.board_cache import _close_mmap
 from go_aicup.metrics import K_BUCKETS, NEAR, rank_report
-from go_aicup.tasks.strength.runtime import file_hash, load_dataset_manifest, check_index_hashes
+from go_aicup.tasks.strength.shared.runtime import file_hash, load_dataset_manifest, check_index_hashes
 
 CHUNK = 1_000_000
 

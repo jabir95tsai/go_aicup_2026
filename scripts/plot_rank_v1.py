@@ -211,7 +211,7 @@ def plot_distributions(table: pd.DataFrame, boundaries, output: Path, label: str
 
 
 def plot_compact(args):
-    from go_aicup.tasks.strength.infer_rank_v1 import LOSS_DTYPE
+    from go_aicup.tasks.strength.v1.infer import LOSS_DTYPE
     losses = np.load(args.run_dir / "losses.npy", allow_pickle=False)
     if (losses.dtype != LOSS_DTYPE or losses.ndim != 1 or not len(losses)
             or (losses["step"] < 0).any() or (np.diff(losses["step"]) <= 0).any()
@@ -222,7 +222,7 @@ def plot_compact(args):
         raise ValueError("--evaluation-dir applies only to legacy runs")
     payload = config = manifest = None
     if not args.loss_only:
-        from go_aicup.tasks.strength.evaluate_rank_v1 import load_saved_run
+        from go_aicup.tasks.strength.v1.evaluate import load_saved_run
         payload, config, manifest = load_saved_run(args.run_dir, args.dataset_dir, args.cache_dir)
     output = args.output_dir or args.run_dir / "plots"
     output.mkdir(parents=True, exist_ok=True)
@@ -237,7 +237,7 @@ def plot_compact(args):
     if args.loss_only:
         return
     from go_aicup.data.board_cache import _close_mmap
-    from go_aicup.tasks.strength.evaluate_rank_v1 import aggregate_games, question_scores, decode_scores
+    from go_aicup.tasks.strength.v1.evaluate import aggregate_games, question_scores, decode_scores
     directory = Path(config["paths"]["dataset_dir"])
     meta = pd.read_parquet(directory / "strength_v1_games.parquet")
     scores = np.load(args.run_dir / "valid_scores.npy", mmap_mode="r", allow_pickle=False)

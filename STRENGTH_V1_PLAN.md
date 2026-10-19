@@ -186,11 +186,11 @@ Validation 固定樣本順序，使用 eval 模式、凍結 BN 統計，不更�
 |---|---|
 | `src/go_aicup/data/board_cache.py` | 兩層盤面位元打包／解包、分片快取、offset／length |
 | `src/go_aicup/data/cv.py` | 新增本版按級別 80,000／20,000 盤切分，保留既有切分功能 |
-| `src/go_aicup/models/strength_resnet.py` | 20-block／256-channel ResNet |
-| `src/go_aicup/tasks/strength/dataset.py` | 指定玩家樣本索引、全域 shuffle、動態 18 層與 D4 |
-| `src/go_aicup/tasks/strength/losses.py` | 全域級別平均與排序 loss |
-| `src/go_aicup/tasks/strength/train_rank_v1.py` | Nano4 DDP 訓練、validation、checkpoint／續跑 |
-| `src/go_aicup/tasks/strength/evaluate_rank_v1.py` | 手／盤／題聚合與有序切點校準 |
+| `src/go_aicup/tasks/strength/shared/model.py`、`v1/model.py` | 共用 20-block／256-channel ResNet 主幹與 V1 scalar head |
+| `src/go_aicup/tasks/strength/shared/dataset.py` | 指定玩家樣本索引、全域 shuffle、動態 18 層與 D4 |
+| `src/go_aicup/tasks/strength/v1/losses.py` | 全域級別平均與排序 loss |
+| `src/go_aicup/tasks/strength/v1/train.py` | Nano4 DDP 訓練、validation、checkpoint／續跑 |
+| `src/go_aicup/tasks/strength/v1/evaluate.py` | 手／盤／題聚合與有序切點校準 |
 | `configs/strength/rank_cnn_v1.json` | 可重現設定 |
 | `tests/test_strength_v1.py` | 動態輸入、loss 與分散式正確性 |
 

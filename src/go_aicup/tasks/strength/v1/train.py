@@ -9,16 +9,12 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
-import importlib.metadata
 import json
 import math
 import os
 from pathlib import Path
-import platform
-import random
 import signal
 import shutil
-import subprocess
 import time
 
 import numpy as np
@@ -27,88 +23,30 @@ import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 
-from go_aicup.models.strength_resnet import StrengthResNet
+from go_aicup.tasks.strength.v1.model import StrengthResNet
 from go_aicup.paths import ROOT
-from go_aicup.tasks.strength.dataset import (GlobalBatchSampler, PackedBoardDataset,
+from go_aicup.tasks.strength.v1.config import DEFAULT_CONFIG, read_config
+from go_aicup.tasks.strength.shared.training import (seed_process, configure_torch,
+    environment, rng_state, restore_rng, scheduler_for, log_event)
+from go_aicup.tasks.strength.shared.dataset import (GlobalBatchSampler, PackedBoardDataset,
                                             create_permutation, make_loader)
-from go_aicup.tasks.strength.losses import distributed, global_rank_loss
-from go_aicup.tasks.strength.infer_rank_v1 import infer_split, on_rank_zero, write_losses
-from go_aicup.tasks.strength.runtime import (DEFAULT_CONFIG, autocast_context, barrier,
-    check_index_hashes, file_hash, load_dataset_manifest, model_state_hash, object_hash, read_config,
+from go_aicup.tasks.strength.v1.losses import global_rank_loss
+from go_aicup.tasks.strength.v1.infer import infer_split, write_losses
+from go_aicup.tasks.strength.shared.runtime import (autocast_context, barrier, distributed, on_rank_zero,
+    check_index_hashes, file_hash, load_dataset_manifest, model_state_hash, object_hash,
     setup_distributed, write_json)
 
 
-def seed_process(seed: int) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
-
-def configure_torch(config: dict) -> None:
-    options = config["training"]
-    torch.use_deterministic_algorithms(options["deterministic"])
-    torch.backends.cudnn.benchmark = options["cudnn_benchmark"]
-    torch.backends.cudnn.deterministic = options["deterministic"]
-    torch.backends.cuda.matmul.allow_tf32 = options["allow_tf32"]
-    torch.backends.cudnn.allow_tf32 = options["allow_tf32"]
-    if options["deterministic"]:
-        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
-
-
 def code_fingerprints() -> dict:
-    names = ("artifacts.py", "models/strength_resnet.py", "tasks/strength/dataset.py",
-             "tasks/strength/losses.py", "tasks/strength/train_rank_v1.py",
-             "tasks/strength/evaluate_rank_v1.py", "tasks/strength/infer_rank_v1.py",
-             "tasks/strength/prepare_rank_v1.py", "tasks/strength/runtime.py",
-             "data/board_cache.py", "data/cv.py")
+    names = ("artifacts.py", "tasks/strength/shared/model.py",
+             "tasks/strength/shared/dataset.py", "tasks/strength/shared/runtime.py",
+             "tasks/strength/shared/training.py", "tasks/strength/shared/prepare.py",
+             "tasks/strength/v1/model.py", "tasks/strength/v1/config.py",
+             "tasks/strength/v1/losses.py", "tasks/strength/v1/train.py",
+             "tasks/strength/v1/evaluate.py", "tasks/strength/v1/infer.py",
+             "tasks/strength/v1/prepare.py", "data/board_cache.py", "data/cv.py")
     package = ROOT / "src" / "go_aicup"
     return {name: file_hash(package / name) for name in names}
-
-
-def environment(device, world: int) -> dict:
-    def git(*args):
-        result = subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True,
-                                encoding="utf-8", errors="replace", check=False)
-        return result.stdout.strip() if result.returncode == 0 else "unknown"
-
-    versions = {}
-    for name in ("numpy", "pandas", "pyarrow", "scikit-learn", "torch"):
-        try:
-            versions[name] = importlib.metadata.version(name)
-        except importlib.metadata.PackageNotFoundError:
-            versions[name] = "unknown"
-    result = {"python": platform.python_version(), "platform": platform.platform(),
-              "packages": versions, "git_commit": git("rev-parse", "HEAD"),
-              "git_status": git("status", "--short"), "git_diff": git("diff", "--", "src", "configs"),
-              "world_size": world, "torch_cuda": torch.version.cuda,
-              "cudnn": torch.backends.cudnn.version(),
-              "slurm": {key: os.environ.get(key) for key in
-                        ("SLURM_JOB_ID", "SLURM_JOB_PARTITION", "SLURM_CPUS_PER_TASK")}}
-    if device.type == "cuda":
-        result["gpu"] = [torch.cuda.get_device_name(i) for i in range(world)]
-        result["gpu_memory_bytes"] = [torch.cuda.get_device_properties(i).total_memory for i in range(world)]
-        result["nccl"] = list(torch.cuda.nccl.version()) if dist.is_nccl_available() else None
-    return result
-
-
-def rng_state(device, model) -> dict:
-    return {"python": random.getstate(), "numpy": np.random.get_state(),
-            "torch": torch.get_rng_state(),
-            "cuda": torch.cuda.get_rng_state(device).cpu() if device.type == "cuda" else None,
-            # Also preserve local buffers in explicit non-SyncBN development runs.
-            "buffers": {name: value.detach().cpu() for name, value in model.named_buffers()}}
-
-
-def restore_rng(state: dict, device, model) -> None:
-    random.setstate(state["python"])
-    np.random.set_state(state["numpy"])
-    torch.set_rng_state(state["torch"].cpu())
-    if device.type == "cuda":
-        torch.cuda.set_rng_state(state["cuda"].cpu(), device)
-    for name, value in model.named_buffers():
-        value.copy_(state["buffers"][name].to(value.device))
 
 
 def save_checkpoint(directory: Path, model, optimizer, scheduler, scaler,
@@ -179,32 +117,9 @@ def resolve_checkpoint(path: Path) -> Path:
     return path
 
 
-def scheduler_for(optimizer, total_steps: int, warmup_fraction: float, minimum: float):
-    if not 0 <= warmup_fraction < 1 or not 0 <= minimum <= 1:
-        raise ValueError("invalid warmup or minimum learning-rate ratio")
-    warmup = max(1, math.ceil(total_steps * warmup_fraction)) if warmup_fraction else 0
-
-    def multiplier(step):
-        if step < warmup:
-            return (step + 1) / warmup
-        progress = min(1.0, max(0.0, (step - warmup) / max(1, total_steps - warmup)))
-        return minimum + (1.0 - minimum) * 0.5 * (1.0 + math.cos(math.pi * progress))
-
-    return torch.optim.lr_scheduler.LambdaLR(optimizer, multiplier)
-
-
-def log_event(directory: Path, rank: int, event: dict) -> None:
-    if rank == 0:
-        event = dict(event, utc=datetime.now(timezone.utc).isoformat())
-        message = json.dumps(event, allow_nan=False)
-        with (directory / "train.jsonl").open("a", encoding="utf-8") as handle:
-            handle.write(message + "\n")
-        print(message, flush=True)
-
-
 def finalize_run(directory, model, config, manifest, state, device, world, started, stop_check):
     """Rank zero only: verify artifacts and publish compact model before cleanup."""
-    from go_aicup.tasks.strength.evaluate_rank_v1 import evaluate_saved
+    from go_aicup.tasks.strength.v1.evaluate import evaluate_saved
     payload = {"artifact_format": "strength_v1_compact_1", "seed": config["seed"],
                "model": {name: value.detach().cpu() for name, value in model.state_dict().items()},
                "config": config, "dataset_id": manifest["dataset_id"],
@@ -240,8 +155,6 @@ def cleanup_run(directory):
     for name in ("config.json", "environment.json", "last.json", "train.jsonl",
                  "train_scores.npy.tmp", "valid_scores.npy.tmp", "losses.npy.tmp", "model.pt.tmp"):
         (directory / name).unlink(missing_ok=True)
-
-
 
 VALIDATION_SAMPLES_PER_RANK = 10000
 

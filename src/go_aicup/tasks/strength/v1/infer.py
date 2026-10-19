@@ -9,34 +9,11 @@ import torch
 import torch.distributed as dist
 
 from go_aicup.data.board_cache import _close_mmap
-from go_aicup.tasks.strength.dataset import GlobalBatchSampler, PackedBoardDataset, make_loader
-from go_aicup.tasks.strength.losses import distributed, ranking_loss_from_means
-from go_aicup.tasks.strength.runtime import autocast_context, barrier
+from go_aicup.tasks.strength.shared.dataset import GlobalBatchSampler, PackedBoardDataset, make_loader
+from go_aicup.tasks.strength.v1.losses import ranking_loss_from_means
+from go_aicup.tasks.strength.shared.runtime import autocast_context, barrier, distributed, on_rank_zero
 
 LOSS_DTYPE = np.dtype([("step", "<i8"), ("train_loss", "<f8"), ("valid_loss", "<f8")])
-
-
-def on_rank_zero(function, rank):
-    """Propagate rank-zero publication failures instead of stranding peers."""
-    if not distributed():
-        return function() if rank == 0 else None
-    message = [None]
-    result = None
-    if rank == 0:
-        try:
-            result = function()
-        except InterruptedError as exc:
-            message[0] = ("interrupted", str(exc))
-        except Exception as exc:
-            message[0] = ("error", f"{type(exc).__name__}: {exc}")
-    if distributed():
-        dist.broadcast_object_list(message, src=0)
-    if message[0]:
-        kind, detail = message[0]
-        if kind == "interrupted":
-            raise InterruptedError(detail)
-        raise RuntimeError(detail)
-    return result
 
 
 def write_losses(path, rows):

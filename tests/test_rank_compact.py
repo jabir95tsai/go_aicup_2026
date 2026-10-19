@@ -10,13 +10,14 @@ import pytest
 import torch
 
 from go_aicup.data.board_cache import convert_training
-from go_aicup.tasks.strength.evaluate_rank_v1 import (
+from go_aicup.tasks.strength.v1.evaluate import (
     decode_scores, evaluate_saved, fit_cutpoints, load_saved_run, score_report)
-from go_aicup.tasks.strength.infer_rank_v1 import LOSS_DTYPE, infer_split
-from go_aicup.tasks.strength.losses import ranking_loss_from_means
-from go_aicup.tasks.strength.prepare_rank_v1 import prepare
-from go_aicup.tasks.strength.runtime import load_dataset_manifest, read_config
-from go_aicup.tasks.strength.train_rank_v1 import train
+from go_aicup.tasks.strength.v1.infer import LOSS_DTYPE, infer_split
+from go_aicup.tasks.strength.v1.losses import ranking_loss_from_means
+from go_aicup.tasks.strength.v1.prepare import prepare
+from go_aicup.tasks.strength.shared.runtime import load_dataset_manifest
+from go_aicup.tasks.strength.v1.config import read_config
+from go_aicup.tasks.strength.v1.train import train
 
 
 @pytest.fixture(scope="module")
@@ -52,11 +53,11 @@ def compact_data(tmp_path_factory):
 @pytest.fixture(autouse=True)
 def small_validation_sample(monkeypatch):
     # Synthetic splits have only 40 boards per rank.
-    monkeypatch.setattr("go_aicup.tasks.strength.train_rank_v1.VALIDATION_SAMPLES_PER_RANK", 20)
+    monkeypatch.setattr("go_aicup.tasks.strength.v1.train.VALIDATION_SAMPLES_PER_RANK", 20)
 
 
 def test_validation_sampling_is_balanced_fixed_and_without_replacement(tmp_path, monkeypatch):
-    import go_aicup.tasks.strength.train_rank_v1 as training
+    import go_aicup.tasks.strength.v1.train as training
     monkeypatch.setattr(training, "VALIDATION_SAMPLES_PER_RANK", 10000)
     labels = np.repeat(np.arange(10, dtype=np.uint8), 12000)
     pd.DataFrame({"rank_id": labels}).to_parquet(tmp_path / "strength_v1_games.parquet")
@@ -96,7 +97,7 @@ def test_cutpoints_match_exhaustive_ordered_partitions(tmp_path):
 
 
 def test_full_loss_frozen_bn_and_index_aligned_scores(compact_data, tmp_path):
-    from go_aicup.models.strength_resnet import StrengthResNet
+    from go_aicup.tasks.strength.v1.model import StrengthResNet
     config = clone_config(compact_data)
     manifest = load_dataset_manifest(config)
     model = StrengthResNet(**config["model"]).train()
@@ -113,7 +114,7 @@ def test_full_loss_frozen_bn_and_index_aligned_scores(compact_data, tmp_path):
     labels = meta.rank_id.to_numpy()[indices]
     means = torch.tensor([scores[labels == rank].mean(dtype=np.float64) for rank in range(10)])
     assert loss == pytest.approx(ranking_loss_from_means(means).item(), abs=1e-6)
-    from go_aicup.tasks.strength.train_rank_v1 import validation_sample_indices
+    from go_aicup.tasks.strength.v1.train import validation_sample_indices
     selected = validation_sample_indices(config)
     sampled_loss = infer_split(model, config, manifest, "valid", torch.device("cpu"),
                                sample_indices=selected)
@@ -122,7 +123,7 @@ def test_full_loss_frozen_bn_and_index_aligned_scores(compact_data, tmp_path):
                                   for rank in range(10)])
     assert sampled_loss == pytest.approx(ranking_loss_from_means(sampled_means).item(), abs=1e-6)
     # Verify individual values rather than just aggregate coverage.
-    from go_aicup.tasks.strength.dataset import PackedBoardDataset
+    from go_aicup.tasks.strength.shared.dataset import PackedBoardDataset
     dataset = PackedBoardDataset(directory / "valid_game.npy", directory / "valid_ply.npy", Path(config["paths"]["cache_dir"]))
     model.eval()
     with torch.no_grad():
@@ -181,7 +182,7 @@ def test_resume_matches_uninterrupted_and_only_four_final_files(compact_data, tm
 
 
 def test_interrupted_evaluation_can_resume(compact_data, tmp_path, monkeypatch):
-    import go_aicup.tasks.strength.train_rank_v1 as training
+    import go_aicup.tasks.strength.v1.train as training
     config = clone_config(compact_data)
     config["paths"]["output_dir"] = str(tmp_path / "interrupted")
     real_infer = training.infer_split
@@ -204,7 +205,7 @@ def test_interrupted_evaluation_can_resume(compact_data, tmp_path, monkeypatch):
 
 def _distributed_inference_worker(rank, config, manifest, model_state, rendezvous, output):
     import torch.distributed as dist
-    from go_aicup.models.strength_resnet import StrengthResNet
+    from go_aicup.tasks.strength.v1.model import StrengthResNet
     torch.set_num_threads(1)
     dist.init_process_group("gloo", init_method=rendezvous, rank=rank, world_size=2)
     try:
@@ -218,7 +219,7 @@ def _distributed_inference_worker(rank, config, manifest, model_state, rendezvou
 
 
 def test_two_process_inference_matches_serial_with_empty_tail_rank(compact_data, tmp_path):
-    from go_aicup.models.strength_resnet import StrengthResNet
+    from go_aicup.tasks.strength.v1.model import StrengthResNet
     config = clone_config(compact_data)
     manifest = load_dataset_manifest(config)
     source = Path(config["paths"]["dataset_dir"])
@@ -244,7 +245,7 @@ def test_two_process_inference_matches_serial_with_empty_tail_rank(compact_data,
 
 
 def test_final_calibration_interruption_keeps_recoverable_outputs(compact_data, tmp_path, monkeypatch):
-    import go_aicup.tasks.strength.evaluate_rank_v1 as evaluation
+    import go_aicup.tasks.strength.v1.evaluate as evaluation
     config = clone_config(compact_data)
     config["paths"]["output_dir"] = str(tmp_path / "final_interrupted")
     real_fit = evaluation.fit_cutpoints
@@ -263,7 +264,7 @@ def test_final_calibration_interruption_keeps_recoverable_outputs(compact_data, 
 
 
 def test_resume_legacy_checkpoint_with_changed_code_preserves_updates(compact_data, tmp_path):
-    from go_aicup.tasks.strength.runtime import file_hash
+    from go_aicup.tasks.strength.shared.runtime import file_hash
     full = clone_config(compact_data)
     full["paths"]["output_dir"] = str(tmp_path / "reference")
     resumed = clone_config(compact_data)

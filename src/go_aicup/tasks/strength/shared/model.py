@@ -1,10 +1,4 @@
-"""Strength V1 scalar ResNet, as specified in STRENGTH_V1_PLAN.md.
-
-No pretrained weights, pooling, sigmoid or post-addition activation. The
-default network has 23,748,611 trainable parameters. Smaller configurations
-are explicit development settings, not the production V1 architecture.
-"""
-
+"""Shared 18-plane ResNet backbone and hidden layer; no version output head."""
 from __future__ import annotations
 
 import torch
@@ -24,7 +18,8 @@ class ResidualBlock(nn.Module):
         return x + self.bn2(self.conv2(self.relu(self.bn1(self.conv1(x)))))
 
 
-class StrengthResNet(nn.Module):
+class StrengthResNetBackbone(nn.Module):
+    """Shared layers; version heads append their output before initialization."""
     def __init__(self, channels: int = 256, blocks: int = 20,
                  hidden_size: int = 256, bn_eps: float = 1e-5,
                  bn_momentum: float = 0.1):
@@ -49,9 +44,7 @@ class StrengthResNet(nn.Module):
             nn.Flatten(start_dim=1),
             nn.Linear(361, hidden_size),
             nn.ReLU(inplace=False),
-            nn.Linear(hidden_size, 1),
         )
-        self.reset_parameters()
 
     def reset_parameters(self) -> None:
         for module in self.modules():
@@ -65,7 +58,7 @@ class StrengthResNet(nn.Module):
                 bound = module.in_features ** -0.5
                 nn.init.uniform_(module.bias, -bound, bound)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward_features(self, x: torch.Tensor) -> torch.Tensor:
         if x.ndim != 4 or x.shape[1:] != (18, 19, 19):
             raise ValueError("expected input [B,18,19,19]")
-        return self.head(self.blocks(self.stem(x))).squeeze(-1)
+        return self.head(self.blocks(self.stem(x)))

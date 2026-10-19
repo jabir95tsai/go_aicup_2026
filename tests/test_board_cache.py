@@ -11,7 +11,7 @@ import pytest
 from go_aicup.data.board_cache import (BoardCache, convert_training, pack_planes,
                                       unpack_planes, verify_cache)
 from go_aicup.features.sgf_planes import sgf_to_planes
-from go_aicup.tasks.strength.dataset import PackedBoardDataset
+from go_aicup.tasks.strength.shared.dataset import PackedBoardDataset
 
 
 GAMES = [

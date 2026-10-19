@@ -78,9 +78,11 @@ python -m go_aicup.features.game_stats           # EDA 用的盤面統計，約 
 python scripts/eda_report.py                     # 重產 notebooks/02_eda.md，約 2 分鐘
 ```
 
+棋力程式依用途分為 `src/go_aicup/tasks/strength/shared/`（共用基礎）與 `v1/`（V1 專用）。V2 目前只有計畫，尚無實作；分類與檔案對照見 [程式分層說明](src/go_aicup/tasks/strength/README.md)。命令與 import 統一使用 `shared`／`v1` 路徑，舊轉接檔已移除。
+
 ## 棋力 V1：盤面快取與 DataLoader
 
-程式位置：[board_cache.py](src/go_aicup/data/board_cache.py) 負責轉檔、打包與解包；[dataset.py](src/go_aicup/tasks/strength/dataset.py) 提供 PyTorch DataLoader 使用的介面。下列命令在專案根目錄執行，環境先依「上手」安裝依賴與 `pip install -e .`。Windows 根目錄為 `D:\college\go_aicup_2026`；Nano4 使用自己的 checkout 路徑與 Conda `go` 環境。
+程式位置：[board_cache.py](src/go_aicup/data/board_cache.py) 負責轉檔、打包與解包；[dataset.py](src/go_aicup/tasks/strength/shared/dataset.py) 提供 PyTorch DataLoader 使用的介面。下列命令在專案根目錄執行，環境先依「上手」安裝依賴與 `pip install -e .`。Windows 根目錄為 `D:\college\go_aicup_2026`；Nano4 使用自己的 checkout 路徑與 Conda `go` 環境。
 
 ### 1. 轉檔與壓縮
 
@@ -174,7 +176,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from go_aicup.data.board_cache import BoardCache
-from go_aicup.tasks.strength.dataset import PackedBoardDataset
+from go_aicup.tasks.strength.shared.dataset import PackedBoardDataset
 
 
 def main():
@@ -237,19 +239,19 @@ python -m pytest tests/test_board_cache.py tests/test_sgf_planes.py -q
 ```bash
 # 每個 seed 的 split、validation 題目與逐手索引全部放在自己的 dataset_dir。
 for seed in 2027 2028 2029; do
-  python -m go_aicup.tasks.strength.prepare_rank_v1 --config configs/strength/rank_cnn_v1_seed${seed}.json
+  python -m go_aicup.tasks.strength.v1.prepare --config configs/strength/rank_cnn_v1_seed${seed}.json
 done
 
 # 下例為單節點 8 卡，三個 seed 依序訓練。正式啟動前先量測耗時與顯存。
 for seed in 2027 2028 2029; do
-  python -m torch.distributed.run --standalone --nnodes=1 --nproc-per-node=8 -m go_aicup.tasks.strength.train_rank_v1 --config configs/strength/rank_cnn_v1_seed${seed}.json
+  python -m torch.distributed.run --standalone --nnodes=1 --nproc-per-node=8 -m go_aicup.tasks.strength.v1.train --config configs/strength/rank_cnn_v1_seed${seed}.json
 done
 
 # 中斷續跑需要相同 config、程式、dataset、world_size。
-python -m torch.distributed.run --standalone --nnodes=1 --nproc-per-node=8 -m go_aicup.tasks.strength.train_rank_v1 --config configs/strength/rank_cnn_v1_seed2027.json --resume outputs/rank_cnn_v1_seed2027/last.json
+python -m torch.distributed.run --standalone --nnodes=1 --nproc-per-node=8 -m go_aicup.tasks.strength.v1.train --config configs/strength/rank_cnn_v1_seed2027.json --resume outputs/rank_cnn_v1_seed2027/last.json
 
 # 完成後 CPU 直接讀保存的 scores，不重新推論或擬合切點，不額外寫檔。
-python -m go_aicup.tasks.strength.evaluate_rank_v1 --run-dir outputs/rank_cnn_v1_seed2027
+python -m go_aicup.tasks.strength.v1.evaluate --run-dir outputs/rank_cnn_v1_seed2027
 ```
 
 使用同一份 Slurm 腳本分別提交三個獨立的單節點作業（每份獨占 1 節點／8 GPU；不會由腳本替你提交其他作業）：
@@ -302,7 +304,7 @@ python scripts/plot_rank_v1.py --run-dir outputs/rank_cnn_v1_seed2027 --skip-con
 詳見 CLAUDE.md 第 10 節。重點：
 
 - `src/go_aicup/` 放可重用程式（用 `python -m go_aicup....` 執行）；`scripts/` 放一次性報告與命令列入口
-- 兩賽共用 `data/`、`features/`、`models/`、`metrics.py`；各自的訓練、推論、提交檔放 `tasks/strength/`、`tasks/identity/`
+- 兩賽共用 `data/`、`features/`、`metrics.py`；各自的訓練、推論、提交檔放 `tasks/strength/`、`tasks/identity/`。棋力版本共用模型主幹放在 `tasks/strength/shared/model.py`，V1 head 放在 `tasks/strength/v1/model.py`
 - 切分只能由 `go_aicup/data/cv.py` 產生；特徵要過 `go_aicup/features/feature_policy.py`
 - 新的實驗 run 一律寫到 `outputs/<run-id>/`（run-id 以 `rank_`／`pid_` 開頭），存 config、seed、git commit、log、OOF、權重、分k桶分數
 - 提交檔只由推論程式寫入 `submissions/`，不手動改答案
@@ -320,5 +322,5 @@ python scripts/plot_rank_v1.py --run-dir outputs/rank_cnn_v1_seed2027 --skip-con
 既有 run 改以 training 每盤平均分數重新擬合切點（只更新 model.pt 的切點，保留模型權重與保存的 score）：
 
 ```bash
-python -m go_aicup.tasks.strength.evaluate_rank_v1 --run-dir outputs/rank_cnn_v1_seed2027 --refit-cutpoints
+python -m go_aicup.tasks.strength.v1.evaluate --run-dir outputs/rank_cnn_v1_seed2027 --refit-cutpoints
 ```

@@ -10,13 +10,11 @@ import torch
 import torch.distributed as dist
 from torch.distributed.nn.functional import all_reduce
 
+from go_aicup.tasks.strength.shared.runtime import distributed
+
 
 class MissingRanksError(ValueError):
     pass
-
-
-def distributed() -> bool:
-    return dist.is_available() and dist.is_initialized()
 
 
 def rank_statistics(scores, rank_ids, valid=None, *, synchronize: bool = True,

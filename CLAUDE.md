@@ -335,9 +335,8 @@ project/
 │   │   ├── feature_policy.py  # 禁用欄位清單（game_id / player_id / 檔名衍生…）
 │   │   ├── game_stats.py      # 盤面重播統計（numba）
 │   │   └── features_vN.py     # 手工特徵，一版一檔
-│   ├── models/                # 共用 game encoder、aggregate（題內多盤聚合）
 │   └── tasks/
-│       ├── strength/          # 競賽二：train_rank_vN、推論、提交檔
+│       ├── strength/          # 競賽二：shared/ 共用基礎、v1/ 專用模型與訓練評估
 │       └── identity/          # 競賽一：train_pid_vN、推論、提交檔
 ├── scripts/                   # 一次性報告／命令列入口（audit_train、eda_report…），不放可重用邏輯
 ├── tests/

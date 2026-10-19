@@ -6,7 +6,6 @@ parsing, board decompression, GPU allocation or training occurs here.
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 from pathlib import Path
@@ -17,8 +16,8 @@ import pandas as pd
 from go_aicup.data.board_cache import BoardCache, _close_mmap
 from go_aicup.data.cv import (make_strength_v1_questions, make_strength_v1_split,
                               strength_v1_overlap)
-from go_aicup.tasks.strength.runtime import (DEFAULT_CONFIG, check_index_hashes,
-    file_hash, load_dataset_manifest, object_hash, read_config, write_json)
+from go_aicup.tasks.strength.shared.runtime import (check_index_hashes,
+    file_hash, load_dataset_manifest, object_hash, write_json)
 
 
 def write_sample_indices(cache: BoardCache, meta: pd.DataFrame, selected_games,
@@ -72,8 +71,8 @@ def prepare(config: dict) -> Path:
                     "split_config": config["split"], "questions_config": config["questions"],
                     "seed": config["seed"],
                     "generator_sha256": {name: file_hash(path) for name, path in {
-                        "cv.py": Path(__file__).resolve().parents[2] / "data" / "cv.py",
-                        "prepare_rank_v1.py": Path(__file__),
+                        "cv.py": Path(__file__).resolve().parents[3] / "data" / "cv.py",
+                        "shared/prepare.py": Path(__file__),
                     }.items()}}
         build_path = directory / "build.json"
         if build_path.exists():
@@ -115,7 +114,7 @@ def prepare(config: dict) -> Path:
                            "bytes": (directory / name).stat().st_size} for name in tables}
         record = dict(identity, complete=True, sets=sets, files=files, table_files=table_files,
                       player_overlap=strength_v1_overlap(table),
-                      note="Game-disjoint split; players may overlap. Cutpoints use all training positions.")
+                      note="Game-disjoint split; players may overlap.")
         record["dataset_id"] = object_hash(record)
         write_json(directory / "manifest.json", record)
         print(json.dumps({"sets": sets, "player_overlap": record["player_overlap"]}, indent=2), flush=True)
@@ -124,13 +123,3 @@ def prepare(config: dict) -> Path:
         cache.close()
 
 
-def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-    args = parser.parse_args(argv)
-    print(f"Dataset manifest: {prepare(read_config(args.config))}")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
