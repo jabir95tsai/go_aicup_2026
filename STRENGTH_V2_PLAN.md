@@ -89,9 +89,17 @@ $$
 - 同分時固定選較小 rank_id。單盤分類直接使用上述 argmax，不加入相鄰級官方得分加權。
 - 同一盤每個類別都除以相同手數，因此總和與平均的 argmax 完全相同。
 
-### 多盤題目（每盤等權聚合已確認）
+### 多盤題目（2026-10-20 使用者確認改用 C2，取代下方機率平均規則）
 
-每盤保留完整的十類 confidence 總和，除以該盤指定玩家手數，得到每盤機率。將同一玩家、同色的 k 盤機率等權平均，得到題目機率 p，避免長局取得較高題內權重；不先把單盤類別轉成硬投票。
+**正式規則 C2（`RESULTS.md` A-025）：** 每盤取指定玩家逐手 log-prob 平均 $\ell_{g,r}=L_{g,r}/|T_g|$（$L$＝`log_probability_sum`），題內每盤 1/k 等權平均，再依該題 k 的溫度做 softmax：
+
+$$
+p_r=\operatorname{softmax}_r\Bigl(T_k\cdot\frac{1}{k}\sum_{g=1}^{k}\ell_{g,r}\Bigr),
+$$
+
+最後以 `metrics.score_rank` 解碼。$T_5／T_{10}／T_{15}／T_{20}$＝4.42／6.24／7.67／8.13，由 `scripts/v2_aggregation_calibration.py` 只用 Valid-S 一半玩家（S-fit）的題目 NLL 擬合，存於 `outputs/v2_agg_calibration/result.json`；Valid-U 不參與擬合或選擇。每次重訓都要用新模型的 Valid-S 重新擬合溫度。測試推論只需每盤 `log_probability_sum`、手數與這 4 個溫度。下方原機率平均規則保留為診斷 C0；C1（log-prob 平均、T=1）與 argmax 亦為診斷。
+
+以下為原規則（C0，診斷）：每盤保留完整的十類 confidence 總和，除以該盤指定玩家手數，得到每盤機率。將同一玩家、同色的 k 盤機率等權平均，得到題目機率 p，避免長局取得較高題內權重；不先把單盤類別轉成硬投票。
 
 使用者已確認「先算出每盤再算等權」：先算每盤的十類機率向量，再以每盤 1/k 的權重合併：
 
@@ -106,7 +114,7 @@ $$
 
 題目級仍依官方指標，對候選級別 r 計算 `p[r] + (p[r-1] + p[r+1]) / e`，邊界外機率視為零，取最大者（`metrics.score_rank` 解碼；同分時固定選較小 rank_id）。每盤等權聚合與題目級 `score_rank` 正式解碼皆已由使用者確認；單盤分類仍使用上方已確認的 confidence 總和 argmax。
 
-V2 不使用 scalar 平均、固定錨點或九個切點，也不以 validation 標籤擬合任何解碼參數。單盤報告使用 confidence 總和 argmax；多盤正式解碼固定使用 `score_rank`，argmax 僅作診斷報表。
+V2 不使用 scalar 平均、固定錨點或九個切點；唯一用 validation 標籤擬合的解碼參數是 C2 的 4 個溫度，只用 Valid-S 擬合。單盤報告使用 confidence 總和 argmax；多盤正式解碼固定使用 `score_rank`，argmax 僅作診斷報表。
 
 ## 6. V2 評估指標
 
@@ -163,9 +171,9 @@ python -m go_aicup.tasks.strength.evaluate_rank_v2 --run-dir outputs/v2_strength
 
 ### 8.3 多盤題目評估
 
-直接重用已保存的固定 validation 題目，不重新抽題。由 `confidence_sum / num_moves` 重建每盤十類機率，再依第 5 節每盤等權平均成題目機率。
+直接重用已保存的固定 validation 題目，不重新抽題。正式規則為第 5 節的 C2：由 `log_probability_sum / num_moves` 重建每盤逐手平均 log-prob，題內等權平均後乘以 `--temperatures`（預設 `outputs/v2_agg_calibration/result.json`）的 $T_k$ 做 softmax。C0（`confidence_sum / num_moves` 機率平均）與 C1（log-prob 平均、T=1）一併列報為診斷。Valid-S 的 C2 分數有一半題目屬於擬合溫度的 S-fit，屬部分樣本內，G 須留意此偏差。
 
-使用者已確認多盤題目的正式解碼為 `score_rank`。評估程式同時提供兩份明確命名的報告，不依 validation 分數自動選較高者：
+使用者已確認多盤題目的正式解碼為 `score_rank`。評估程式對每個規則同時提供兩份明確命名的報告，不依 validation 分數自動選較高者：
 
 - `argmax`（診斷）：直接取題目機率最大的類別。
 - `score_rank`（正式）：使用 `metrics.score_rank` 的相鄰級加權解碼。

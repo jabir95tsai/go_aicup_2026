@@ -87,7 +87,9 @@ python -m go_aicup.tasks.strength.v2.prepare --config configs/strength/rank_cnn_
 python -m torch.distributed.run --standalone --nnodes=1 --nproc-per-node=8 \
     -m go_aicup.tasks.strength.v2.train --config configs/strength/rank_cnn_v2_seed2027.json \
     [--resume outputs/v2_strength/last.json]
-python -m go_aicup.tasks.strength.v2.evaluate --run-dir outputs/v2_strength
+python scripts/v2_aggregation_calibration.py --run-dir outputs/v2_strength   # fits C2 T_k on Valid-S
+python -m go_aicup.tasks.strength.v2.evaluate --run-dir outputs/v2_strength \
+    [--temperatures outputs/v2_agg_calibration/result.json]
 ```
 
-切分：`data.cv.make_strength_v2_split` 的 fold 0＝Valid-U（未見玩家），fold 1–4＝train 並每玩家顏色組留出 10%＝Valid-S，fold −1 不使用。每 200 steps 與最後一步監控 `monitor_unseen`／`monitor_seen`（每級各 2,500 整盤）。成功的 run 目錄只留 `model.pt`、`losses.npy`、`validation_unseen_category.npy`、`validation_seen_category.npy`，評估圖在 `plot/`。正式題目規則：每盤平均機率、題內 1/k、`metrics.score_rank`。CUDA 驗收測試 `tests/test_strength_v2_cuda.py` 需在配置 2 張 GPU 的計算節點執行。
+切分：`data.cv.make_strength_v2_split` 的 fold 0＝Valid-U（未見玩家），fold 1–4＝train 並每玩家顏色組留出 10%＝Valid-S，fold −1 不使用。每 200 steps 與最後一步監控 `monitor_unseen`／`monitor_seen`（每級各 2,500 整盤）。成功的 run 目錄只留 `model.pt`、`losses.npy`、`validation_unseen_category.npy`、`validation_seen_category.npy`，評估圖在 `plot/`。正式題目規則 C2（A-025，2026-10-20 確認）：每盤逐手平均 log-prob、題內 1/k、乘 T_k 後 softmax、`metrics.score_rank`；機率平均（C0）與 T=1 的 log-prob 平均（C1）為診斷。CUDA 驗收測試 `tests/test_strength_v2_cuda.py` 需在配置 2 張 GPU 的計算節點執行。

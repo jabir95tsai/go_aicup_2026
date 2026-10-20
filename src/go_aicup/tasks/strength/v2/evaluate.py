@@ -5,11 +5,15 @@ plus the run's dataset tables and fixed questions. Prints single-game and
 k=5/10/15/20 question reports for Valid-U and Valid-S, the memorisation gap
 G = Equal-k(S) - Equal-k(U), and saves PNG figures to <run-dir>/plot/.
 
-Official question rule: mean per-game probability (each game 1/k), decoded
-with metrics.score_rank. argmax and mean log-probability pooling are reported
-as clearly labelled diagnostics; nothing is selected on validation scores.
+Official question rule C2 (A-025, user-approved 2026-10-20): mean per-game
+log-probability (each game 1/k), softmax(T_k * that) with the per-k
+temperatures fitted on Valid-S by scripts/v2_aggregation_calibration.py,
+decoded with metrics.score_rank. C0 (probability mean, T=1), C1 (log-prob
+mean, T=1) and argmax are clearly labelled diagnostics; nothing is selected
+on validation scores here. Valid-S C2 scores are half in-sample (S-fit).
 
-    python -m go_aicup.tasks.strength.v2.evaluate --run-dir outputs/v2_strength
+    python -m go_aicup.tasks.strength.v2.evaluate --run-dir outputs/v2_strength \
+        [--temperatures outputs/v2_agg_calibration/result.json]
 """
 from __future__ import annotations
 
@@ -23,13 +27,18 @@ import pandas as pd
 from go_aicup.data.board_cache import RANKS
 from go_aicup.metrics import K_BUCKETS, rank_report
 from go_aicup.tasks.strength.v2.aggregate import (decode_questions, game_probabilities,
-                                                  official_scores, question_probabilities)
+                                                  official_scores, question_logits, tempered_by_k)
 
 SETS = {"unseen": "validation_unseen_category.npy", "seen": "validation_seen_category.npy"}
 LABELS = {"unseen": "Valid-U (unseen players)", "seen": "Valid-S (seen players)"}
-OFFICIAL = ("mean_probability", "score_rank")
-AGGREGATIONS = ("mean_probability", "mean_log_probability")
+# rule -> (aggregation, uses fitted per-k temperatures)
+RULES = {"C2": ("mean_log_probability", True), "C0": ("mean_probability", False),
+         "C1": ("mean_log_probability", False)}
+RULE_NAMES = {"C2": "log-prob mean, fitted T_k", "C0": "probability mean, T=1",
+              "C1": "log-prob mean, T=1"}
+OFFICIAL = ("C2", "score_rank")
 DECODERS = ("score_rank", "argmax")
+TEMPERATURES = Path("outputs/v2_agg_calibration/result.json")
 BASELINE, CANDIDATE = 0.4631, 0.47
 GAP_LIMITS = (0.03, 0.08)
 COLORS = {"unseen": "#2a78d6", "seen": "#eb6834", "train": "#1baf7a"}
@@ -73,21 +82,31 @@ def game_report(category: np.ndarray, games: pd.DataFrame) -> dict:
             "per_rank": per_rank, "by_color": by_color, "confusion": confusion}
 
 
-def question_report(category: np.ndarray, questions: pd.DataFrame) -> dict:
-    """Per (aggregation, decoder): k-bucket table and Equal-k score."""
+def load_temperatures(path: Path) -> dict:
+    """C2 per-k temperatures from the calibration result; str(k) -> T_k."""
+    temperatures = json.loads(Path(path).read_text())["candidates"]["C2"]["temperatures"]
+    if sorted(temperatures) != sorted(map(str, K_BUCKETS)) or not all(t > 0 for t in temperatures.values()):
+        raise ValueError(f"{path}: C2 needs a positive temperature for every k bucket")
+    return {k: float(t) for k, t in temperatures.items()}
+
+
+def question_report(category: np.ndarray, questions: pd.DataFrame, temperatures: dict) -> dict:
+    """Per (rule, decoder): k-bucket table and Equal-k score."""
     true, k = questions["rank_id"].to_numpy(), questions["k"].to_numpy()
     if sorted(set(k)) != list(K_BUCKETS):
         raise ValueError("every k bucket needs questions for an Equal-k score")
+    unit = {str(b): 1.0 for b in K_BUCKETS}
     reports = {}
-    for aggregation in AGGREGATIONS:
-        probabilities = question_probabilities(category, questions["games"], aggregation)
+    for rule, (aggregation, fitted) in RULES.items():
+        probabilities = tempered_by_k(question_logits(category, questions["games"], aggregation), k,
+                                      temperatures if fitted else unit)
         for decoder in DECODERS:
             pred = decode_questions(probabilities, decoder)
             table = rank_report(pred, true, k)[["n", "score", "acc", "within1"]]
             confusion = {bucket: np.zeros((10, 10), dtype=np.int64) for bucket in K_BUCKETS}
             for bucket in K_BUCKETS:
                 np.add.at(confusion[bucket], (true[k == bucket], pred[k == bucket]), 1)
-            reports[aggregation, decoder] = {
+            reports[rule, decoder] = {
                 "table": table, "confusion": confusion,
                 "equal_k": float(table.loc[[str(b) for b in K_BUCKETS], "score"].mean())}
     return reports
@@ -102,12 +121,15 @@ def verdict(unseen: float, seen: float) -> dict:
             "passes_baseline": unseen >= BASELINE, "submission_candidate": unseen >= CANDIDATE}
 
 
-def evaluate(run_dir: Path, dataset_dir: Path | None = None, *, plots: bool = True) -> dict:
+def evaluate(run_dir: Path, dataset_dir: Path | None = None, *, temperatures: Path = TEMPERATURES,
+             plots: bool = True) -> dict:
     run = load_run(run_dir, dataset_dir)
+    run["temperatures"] = load_temperatures(temperatures)
     result = {}
     for name in SETS:
         result[name] = {"game": game_report(run[name], run["games"]),
-                        "questions": question_report(run[name], run[f"{name}_questions"])}
+                        "questions": question_report(run[name], run[f"{name}_questions"],
+                                                     run["temperatures"])}
     official = [result[name]["questions"][OFFICIAL]["equal_k"] for name in ("unseen", "seen")]
     result["verdict"] = verdict(*official)
     print_report(run, result)
@@ -120,6 +142,8 @@ def print_report(run: dict, result: dict) -> None:
     payload = run["payload"]
     print(f"Strength V2 seed={payload['seed']} steps={payload['optimizer_steps']} "
           f"overlap={json.dumps(payload['player_overlap'])}")
+    print(f"C2 temperatures (fitted on Valid-S half; S scores partly in-sample): "
+          f"{json.dumps(run['temperatures'])}")
     for name in SETS:
         game = result[name]["game"]
         print(f"\n== {LABELS[name]}: single game (confidence-sum argmax; diagnostic) ==")
@@ -127,9 +151,9 @@ def print_report(run: dict, result: dict) -> None:
               f"off1={game['off_by_one']:.4f} off2+={game['off_by_two_plus']:.4f}")
         print(game["per_rank"].to_string(index=False, float_format="%.4f"))
         print(game["by_color"].to_string(index=False, float_format="%.4f"))
-        for (aggregation, decoder), report in result[name]["questions"].items():
-            tag = "OFFICIAL" if (aggregation, decoder) == OFFICIAL else "diagnostic"
-            print(f"\n-- {LABELS[name]} questions: {aggregation} + {decoder} [{tag}] "
+        for (rule, decoder), report in result[name]["questions"].items():
+            tag = "OFFICIAL" if (rule, decoder) == OFFICIAL else "diagnostic"
+            print(f"\n-- {LABELS[name]} questions: {rule} {RULE_NAMES[rule]} + {decoder} [{tag}] "
                   f"Equal-k={report['equal_k']:.4f}")
             print(report["table"].to_string(float_format="%.4f"))
     print("\n== verdict (official rule) ==")
@@ -253,7 +277,7 @@ def save_plots(run: dict, result: dict, directory: Path) -> list[Path]:
     width, x = 0.2, np.arange(len(groups))
     series = [(name, decoder) for name in ("unseen", "seen") for decoder in DECODERS]
     for number, (name, decoder) in enumerate(series):
-        report = result[name]["questions"]["mean_probability", decoder]
+        report = result[name]["questions"][OFFICIAL[0], decoder]
         table = report["table"]
         scores = [*table.loc[[str(b) for b in K_BUCKETS], "score"], report["equal_k"]]
         accuracy = [*table.loc[[str(b) for b in K_BUCKETS], "acc"], np.nan]
@@ -275,11 +299,12 @@ def save_plots(run: dict, result: dict, directory: Path) -> list[Path]:
         axis.set_ylim(0, 1)
         _style(axis)
     axes[0].legend(fontsize=7, frameon=False, ncol=2)
-    axes[0].set_title(f"V2 seed {seed}: questions (mean per-game probability, each game 1/k)", fontsize=10)
+    axes[0].set_title(f"V2 seed {seed}: questions ({OFFICIAL[0]} {RULE_NAMES[OFFICIAL[0]]}, each game 1/k)",
+                      fontsize=10)
     publish(figure, "question_by_k")
 
     for decoder in DECODERS:
-        report = result["unseen"]["questions"]["mean_probability", decoder]
+        report = result["unseen"]["questions"][OFFICIAL[0], decoder]
         figure, axes = plt.subplots(2, 2, figsize=(11, 10))
         for axis, bucket in zip(axes.ravel(), K_BUCKETS):
             _heatmap(axis, _row_normalised(report["confusion"][bucket]), f"k={bucket}", "f")
@@ -289,19 +314,20 @@ def save_plots(run: dict, result: dict, directory: Path) -> list[Path]:
         publish(figure, f"question_confusion_{decoder}")
 
     figure, axis = plt.subplots(figsize=(9, 4.2))
-    series = [(name, aggregation) for name in ("unseen", "seen") for aggregation in AGGREGATIONS]
-    for number, (name, aggregation) in enumerate(series):
-        report = result[name]["questions"][aggregation, "score_rank"]
+    series = [(name, rule) for name in ("unseen", "seen") for rule in RULES]
+    width = 0.8 / len(series)
+    for number, (name, rule) in enumerate(series):
+        report = result[name]["questions"][rule, "score_rank"]
         scores = [*report["table"].loc[[str(b) for b in K_BUCKETS], "score"], report["equal_k"]]
-        official = aggregation == "mean_probability"
-        axis.bar(np.arange(len(groups)) + (number - 1.5) * 0.2, scores, 0.18, color=COLORS[name],
-                 hatch=None if official else "\\\\\\\\", edgecolor="#fcfcfb", alpha=1.0 if official else 0.55,
-                 label=f"{LABELS[name]}, {aggregation}" + (" (official)" if official else " (diagnostic)"))
+        official = rule == OFFICIAL[0]
+        axis.bar(np.arange(len(groups)) + (number - (len(series) - 1) / 2) * width, scores, width - 0.02,
+                 color=COLORS[name], hatch=None if official else "\\\\\\\\", edgecolor="#fcfcfb",
+                 alpha=1.0 if official else 0.55,
+                 label=f"{LABELS[name]}, {rule} {RULE_NAMES[rule]}" + (" (official)" if official else " (diagnostic)"))
     axis.set_xticks(np.arange(len(groups)), groups)
     axis.set_ylim(0, 1)
     axis.set_ylabel("question official score (score_rank)")
-    axis.set_title(f"V2 seed {seed}: aggregation comparison, probability mean vs log-probability mean",
-                   fontsize=10)
+    axis.set_title(f"V2 seed {seed}: aggregation rules C2 (official) vs C0 / C1 (diagnostic)", fontsize=10)
     _style(axis)
     axis.legend(fontsize=7, frameon=False, ncol=2)
     publish(figure, "question_aggregation")
@@ -312,9 +338,11 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--dataset-dir", type=Path, help="override the dataset directory saved in model.pt")
+    parser.add_argument("--temperatures", type=Path, default=TEMPERATURES,
+                        help="calibration result.json holding the C2 per-k temperatures")
     parser.add_argument("--no-plots", action="store_true")
     args = parser.parse_args(argv)
-    evaluate(args.run_dir, args.dataset_dir, plots=not args.no_plots)
+    evaluate(args.run_dir, args.dataset_dir, temperatures=args.temperatures, plots=not args.no_plots)
     return 0
 
 

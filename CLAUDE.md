@@ -105,6 +105,8 @@ H200 佇列限制**每張 GPU 最多 12 CPU 核心、200GB 主記憶體**；200G
 
 **棋力 V2 首輪切分與 gate（2026-10-19 使用者確認）：** 改 player-disjoint：fold 0＝Valid-U、fold 1–4 每玩家顏色組留出 10%＝Valid-S、fold −1 不使用；監控每級 U／S 各 2,500 盤，S8b 實測單次監控占 100 steps 訓練 32.4%，依規則改每 200 steps（A-023）。模型選擇與 baseline 一律看 Valid-U 四桶等權 `score_rank`（≥0.4631 過 baseline、≥0.47 列提交候選）；G＝Equal-k(S)−Equal-k(U)：≤0.03 維持、≤0.08 注意、>0.08 須加反記憶對策。每盤另存 log-prob 總和，機率平均與 log-prob 聚合的 CPU 比較不論分數都要做。S4 推論聚合與 S4b 切分已完成（`RESULTS.md` A-018、A-019）；正式 1 epoch run 提交前須先回報實測估時並經使用者確認。
 
+**棋力 V2 題目規則改為 C2（2026-10-20 使用者確認，`RESULTS.md` A-025）：** 取代上方「每盤十類平均機率、每盤等權平均」的多盤題目規則。正式規則：每盤指定玩家逐手 log-prob 平均（`log_probability_sum / num_moves`），題內每盤 1/k 等權平均，乘以每個 k 的溫度 T_k 後 softmax，再以 `metrics.score_rank` 解碼。T_5／T_10／T_15／T_20＝4.42／6.24／7.67／8.13，只用 Valid-S 一半玩家擬合，存於 `outputs/v2_agg_calibration/result.json`；每次重訓須以新模型的 Valid-S 重新擬合。`v2.evaluate` 以 C2＋`score_rank` 為 OFFICIAL，C0（機率平均）、C1（log-prob 平均、T=1）與 argmax 列為診斷。Valid-U Equal-k：C0 0.4910 → C2 0.5553（本地合成題，不是 LB）。
+
 ### 仍待確認 ⏳
 
 | 項目 | 為什麼重要 | 何時／去哪查 |

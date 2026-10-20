@@ -2,9 +2,10 @@
 
 Per game g with labelled-player moves T_g: confidence_sum[g] = sum_t p_t and
 log_probability_sum[g] = sum_t log p_t. Single games decode by argmax of the
-confidence sum (ties -> smaller rank_id). Questions average per-game mean
-probabilities with weight 1/k; the official question decoder is
-metrics.score_rank, argmax is a diagnostic only.
+confidence sum (ties -> smaller rank_id). Official question rule (C2, A-025,
+user-approved 2026-10-20): average per-game mean log-probabilities with weight
+1/k, softmax(T_k * that) with the per-k temperature fitted on Valid-S, then
+metrics.score_rank. Probability pooling and argmax are diagnostics only.
 """
 from __future__ import annotations
 
@@ -79,9 +80,9 @@ def question_logits(category: np.ndarray, questions, method: str = "mean_probabi
     """[Q,10] log-scale question scores; softmax(T * logits) gives probabilities.
 
     Each game weighs 1/k regardless of its length.
-    mean_probability: log of the average per-game mean softmax (official V2
-    rule at T=1). mean_log_probability: average per-game mean log-prob
-    (normalised geometric mean at T=1; diagnostic, approved 2026-10-19).
+    mean_probability: log of the average per-game mean softmax (C0/C3,
+    diagnostic). mean_log_probability: average per-game mean log-prob
+    (normalised geometric mean at T=1; with fitted T_k it is the official C2).
     """
     if method == "mean_probability":
         per_game = game_probabilities(category)
@@ -102,6 +103,16 @@ def tempered_probabilities(logits, temperature: float = 1.0) -> np.ndarray:
     scaled = temperature * np.asarray(logits, dtype=np.float64)
     scaled = np.exp(scaled - scaled.max(axis=1, keepdims=True))
     return scaled / scaled.sum(axis=1, keepdims=True)
+
+
+def tempered_by_k(logits, k, temperatures) -> np.ndarray:
+    """Temper each question with its bucket's temperature; temperatures maps str(k) -> T_k."""
+    logits, k = np.asarray(logits, dtype=np.float64), np.asarray(k)
+    result = np.empty_like(logits)
+    for bucket in np.unique(k):
+        mask = k == bucket
+        result[mask] = tempered_probabilities(logits[mask], temperatures[str(int(bucket))])
+    return result
 
 
 def question_probabilities(category: np.ndarray, questions, method: str = "mean_probability",

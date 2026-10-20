@@ -25,7 +25,7 @@ import numpy as np
 
 from go_aicup.metrics import K_BUCKETS, rank_report
 from go_aicup.tasks.strength.v2.aggregate import (decode_questions, fit_temperature,
-                                                  question_logits, tempered_probabilities)
+                                                  question_logits, tempered_by_k)
 from go_aicup.tasks.strength.v2.evaluate import load_run
 
 CANDIDATES = {"C0": ("mean_probability", False), "C1": ("mean_log_probability", False),
@@ -38,14 +38,6 @@ def bucket_scores(probabilities, questions) -> dict:
                          questions["rank_id"].to_numpy(), questions["k"].to_numpy())
     scores = {str(k): float(report.loc[str(k), "score"]) for k in K_BUCKETS}
     return scores | {"equal_k": float(np.mean(list(scores.values())))}
-
-
-def tempered_by_k(logits, questions, temperatures) -> np.ndarray:
-    result = np.empty_like(logits)
-    for k in K_BUCKETS:
-        mask = questions["k"].to_numpy() == k
-        result[mask] = tempered_probabilities(logits[mask], temperatures[str(k)])
-    return result
 
 
 def main(argv=None) -> int:
@@ -78,7 +70,7 @@ def main(argv=None) -> int:
                     logits["S-fit"][mask], parts["S-fit"]["rank_id"].to_numpy()[mask])
         result["candidates"][candidate] = {
             "method": method, "temperatures": temperatures, "grid_edge": edges,
-            **{name: bucket_scores(tempered_by_k(logits[name], parts[name], temperatures), parts[name])
+            **{name: bucket_scores(tempered_by_k(logits[name], parts[name]["k"], temperatures), parts[name])
                for name in ("S-select", "U")}}
     select = {name: value["S-select"]["equal_k"] for name, value in result["candidates"].items()}
     best = max(select, key=select.get)

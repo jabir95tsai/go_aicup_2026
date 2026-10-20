@@ -111,13 +111,19 @@ def test_two_process_gloo_training_completes(v2_train_data, tmp_path):
     np.testing.assert_allclose(saved["confidence_sum"], recomputed["confidence_sum"], rtol=1e-6, atol=1e-6)
 
 
-def _independent_equal_k(category, questions):
-    """Plain-loop re-implementation of the official question rule."""
+def _independent_equal_k(category, questions, temperatures=None):
+    """Plain-loop re-implementation of a question rule: C2 with temperatures, else C0."""
     rows = {int(game): row for row, game in enumerate(category["game_index"])}
     scores = {k: [] for k in (5, 10, 15, 20)}
     for question in questions.itertuples():
-        p = np.mean([category["confidence_sum"][rows[g]] / category["num_moves"][rows[g]]
-                     for g in question.games], axis=0)
+        if temperatures is None:
+            p = np.mean([category["confidence_sum"][rows[g]] / category["num_moves"][rows[g]]
+                         for g in question.games], axis=0)
+        else:
+            z = temperatures[str(question.k)] * np.mean(
+                [category["log_probability_sum"][rows[g]] / category["num_moves"][rows[g]]
+                 for g in question.games], axis=0)
+            p = np.exp(z - z.max()) / np.exp(z - z.max()).sum()
         gain = [p[r] + ((p[r - 1] if r > 0 else 0) + (p[r + 1] if r < 9 else 0)) / np.e for r in range(10)]
         guess = int(np.argmax(gain))
         error = abs(guess - question.rank_id)
@@ -130,16 +136,21 @@ def test_evaluation_reports_and_figures(v2_train_data, tmp_path, capsys):
     config = clone(v2_train_data, tmp_path / "eval")
     train(config)
     run = Path(config["paths"]["output_dir"])
+    temperatures = {"5": 4.4, "10": 6.2, "15": 7.7, "20": 8.1}
+    calibration = tmp_path / "calibration.json"
+    calibration.write_text(json.dumps({"candidates": {"C2": {"temperatures": temperatures}}}))
     before = {p.name: p.read_bytes() for p in run.iterdir() if p.is_file()}
-    result = evaluate(run)
-    assert "OFFICIAL" in capsys.readouterr().out
+    result = evaluate(run, temperatures=calibration)
+    assert OFFICIAL == ("C2", "score_rank") and "OFFICIAL" in capsys.readouterr().out
     dataset = Path(config["paths"]["dataset_dir"])
     official = {}
     for name in ("unseen", "seen"):
         category = np.load(run / f"validation_{name}_category.npy", allow_pickle=False)
         questions = pd.read_parquet(dataset / f"strength_v2_valid_{name}_questions.parquet")
-        official[name] = _independent_equal_k(category, questions)
+        official[name] = _independent_equal_k(category, questions, temperatures)
         assert result[name]["questions"][OFFICIAL]["equal_k"] == pytest.approx(official[name], abs=1e-12)
+        assert result[name]["questions"]["C0", "score_rank"]["equal_k"] == pytest.approx(
+            _independent_equal_k(category, questions), abs=1e-12)
         game = result[name]["game"]
         assert game["games"] == len(category) == game["confusion"].sum()
         expected = np.where(category["predicted_rank_id"] == category["rank_id"], 1.0,
@@ -155,5 +166,5 @@ def test_evaluation_reports_and_figures(v2_train_data, tmp_path, capsys):
                                    "question_by_k", "question_confusion_score_rank",
                                    "question_confusion_argmax", "question_aggregation"))
     assert before == {p.name: p.read_bytes() for p in run.iterdir() if p.is_file()}
-    again = evaluate(run, plots=False)
+    again = evaluate(run, temperatures=calibration, plots=False)
     assert again["verdict"] == result["verdict"]
