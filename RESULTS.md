@@ -478,3 +478,41 @@ Valid-S 同順序：0.5173／0.4969／0.5528／0.5941。log-prob 平均（每盤
 - **限制：** 溫度擬合在 Valid-S（見過的玩家），U 證實可轉移（G 小，A-024）。但測試題的 k 分佈、級別分佈與玩家是否在訓練集內都未知；本地合成題目分數不是 LB。
 
 程式：`aggregate.question_logits`／`tempered_probabilities`／`fit_temperature`（T=1 時與原本的機率平均相同）；`scripts/v2_aggregation_calibration.py`。新增測試涵蓋 T=1 恆等與已知溫度回收（真值 3.0，誤差 <8%）、網格邊界旗標。全套 **106 passed、3 skipped（CUDA）**；git diff --check 通過。
+
+
+### A-026 V2 3-epoch run 中斷與續跑；重排進度（2026-10-20）
+
+- **事故：** 使用者提交的 `slurm/v2_train.slurm`（seed2026、3 epochs、8×H200）作業 589164 於 step 400 存 checkpoint 時失敗：`FileNotFoundError: src/go_aicup/tasks/strength/shared/checkpoint.py`。原因是作業執行中，共用工作目錄由 `strength-v2-player-disjoint` 切回 `main`（`main` 尚無該檔）。Slurm 作業直接 import 該目錄的程式碼。損失約 0.15 h × 8 GPU。
+- **處置：** 本地 `main` 快轉（`--ff-only`）到 `strength-v2-player-disjoint`（96342f8），未 push。由 step 200 的 checkpoint 續跑，作業 **590334**（25a-hgpn083）。續跑後 step 210–290 的 batch loss 與失敗作業逐位元相同（例：step 270 皆為 2.163703441619873）。此節點每步約 2.14 s（A-023 為 1.506 s，原因未知）；預估剩餘約 2h10m，接近腳本 2h30m 時限。若超時，可由每 900 s 的 checkpoint 再續跑。step 400 的監控在這個節點耗時 152.8 s（A-024 為 49 s），重估後會超過時限；`scontrol` 無法延長時限，因此另排 **590565**（`--dependency=afternotok:590334`，同一腳本自動續跑），只在 590334 失敗或超時時才啟動。
+- step 400 監控（單盤 argmax 診斷）：U CE 2.2331／分數 0.2416，S 2.2175／0.2518。A-024 1-epoch run 同一步為 U 2.0908／0.3276；本次 seed（2026 vs 2027）與學習率設定（固定 0.001 vs warmup-cosine）都不同，兩者不可直接比較。
+- **流程規則（寫入 EXECUTION_PLAN）：** 作業執行中不得在 `/work/jason1122/go_aicup_2026` 切換分支；需要其他分支時用 `git worktree`。
+- `EXECUTION_PLAN.md` 頂端新增「2026-10-20 重排進度」（R1–R6），取代原 W5–W8 時間軸。砍掉：競賽二 GBDT、Transformer 預訓／scaling、KataGo、家族 B。
+
+
+### A-027 競賽一開局模型與 L6 後處理（2026-10-20，CPU，合成候選庫）
+
+**預先登記：** 所有超參（黑棋手數 D、α、β、溫度 τ）只依 split 0 的全體官方分數選擇；split 1、2（與 0 互斥）只用於報分。人口先驗只用該候選庫以外玩家的黑棋。合成候選庫由 `cv.make_pid_splits(seed 2026)` 依 board cache 的 `games.parquet` 重新產生（演算法同 A-003，但 meta 列順序不同，所以玩家組與 A-003 不同）。登入節點 CPU（4 執行緒），全程約 4 分鐘。
+
+**模型**（`tasks/identity/opening.py`）：
+- `slot`：逐手獨立 NB，即 E5 的方法。
+- `pp`：前綴序列模型 P_c(m_t | m_<t) = (N_c(m_≤t) + β·P_pop(m_t | m_<t)) / (N_c(m_<t) + β)。N_c 是候選人 gallery 中前綴完全相同的盤數（uint64 前綴雜湊計數）；P_pop 是庫外人口的同前綴條件分布，再退回人口逐手分布。歷史包含白棋，只對黑棋計分。
+- 第一版以「候選人逐手分布」作退回（split 0，D=16、β=1）只得 0.851，低於 slot。原因：離開候選人走過的路線後，深層手的雜訊被等權加總，與 E5「手數越多越差」同一機制。改成人口條件退回後，沒走過該路線的候選人在每一手的分數都相同，排序時互相抵消。
+- `assign.py`（L6）：逐題 softmax(score/τ) → Sinkhorn（列、行交替正規化 50 次）→ top-5；或在 Sinkhorn 後做 Hungarian 一對一指派，指派結果放第 1 名，第 2–5 名依 Sinkhorn 排序。
+
+**split 0 選出：** slot D=4、α=5（0.9255）；pp D=12、β=1（0.9441；D=8 同分，D≥8 後已無資訊）；pp+slot：pp D=8、β=0.3，加上 slot D=4（0.9684）；Sinkhorn τ=2；Hungarian τ=0.25（**位於網格邊界**，但 τ=0.25–2 的分數完全相同，對 τ 不敏感）。
+
+**官方分數，split 1–2 平均（各 400 題，k 各 100）：**
+
+| 方法 | k=5 | k=10 | k=15 | k=20 | 全體 | split 1／2 |
+|---|---:|---:|---:|---:|---:|---|
+| slot D=4（E5 重現） | 0.8096 | 0.9450 | 0.9793 | 0.9874 | 0.9303 | 0.9216／0.9390 |
+| pp | 0.8603 | 0.9513 | 0.9855 | 0.9887 | 0.9465 | 0.9452／0.9478 |
+| **pp+slot** | **0.8981** | 0.9740 | 0.9968 | 1.0000 | **0.9672** | 0.9624／0.9720 |
+| pp+slot＋Sinkhorn | 0.9918 | 0.9937 | 1.0000 | 1.0000 | 0.9964 | 0.9968／0.9959 |
+| pp+slot＋Hungarian | 0.9907 | 1.0000 | 1.0000 | 1.0000 | 0.9977 | 1.0000／0.9953 |
+
+- pp+slot 相對 E5：兩個 split 分別 +0.041／+0.033，k=5 +0.089。增益主要在 k=5 桶。
+- L6 再 +0.03。**前提是題目與候選人一對一**：合成庫依建構必然一對一，真實測試未確認（RESULTS 待辦）。若不是一對一，Hungarian 可能有害。11/04 後須以一次 LB 受控探針驗證。
+- **合成驗證已飽和（≥0.99），之後無法再用它區分開局方法。** 官方 baseline 0.2845 與合成分數的落差仍無解釋。線索（未驗證）：E5 表中「只用第 1 手」的 top-5 為 0.30–0.43，與官方 baseline 同一量級，所以官方 baseline 可能只是很弱的方法，也可能真實測試確實比較難。R2 的非開局風格模型就是為後者準備的保險。
+
+程式：`tasks/identity/{data,opening,assign}.py`、`scripts/identity_opening_eval.py`；產物 `outputs/pid_opening_v1/{results.csv,summary.json}`、`data/processed/identity/{train_prefix_60.npy,pid_gallery.parquet,pid_questions.parquet}`。測試 `tests/test_identity_opening.py` 4 passed（逐手 NB 對照直接計數、前綴雜湊順序／長度、人口退回在未匹配候選人上抵消、Sinkhorn 雙隨機與 Hungarian 拆解 hub）。尚未有測試集推論入口；短局（<D 手）與 pass 的處理留待 R3 提交管線。
