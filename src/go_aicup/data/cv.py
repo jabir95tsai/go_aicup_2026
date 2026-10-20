@@ -3,6 +3,8 @@
 The original generators use player-disjoint splits. Strength V1 explicitly
 uses the approved per-rank game split; its separate API records player
 overlap and preserves game disjointness instead (STRENGTH_V1_PLAN.md).
+Strength V2 returns to player folds and adds a seen-player game holdout
+(`make_strength_v2_split`), approved 2026-10-19.
 
 Competition 2 (rank)
     `make_rank_folds`: players -> fold 0..4, or -1 for a fixed holdout
@@ -121,8 +123,8 @@ def make_strength_v1_questions(table: pd.DataFrame, split: str,
     Each k/rank cell has the same number of questions. No repeated games
     within a question; missing eligibility is an explicit error.
     """
-    if split not in ("train", "valid") or n_questions < 40 or n_questions % 40:
-        raise ValueError("split must be train/valid and n_questions a positive multiple of 40")
+    if split not in set(table["split"]) or n_questions < 40 or n_questions % 40:
+        raise ValueError("split must exist in the table and n_questions be a positive multiple of 40")
     subset = table.loc[table["split"] == split].set_index("game_index", drop=False)
     eligibility = []
     for rank in range(10):
@@ -146,6 +148,52 @@ def make_strength_v1_questions(table: pd.DataFrame, split: str,
         assert chosen["player_id"].nunique() == chosen["color"].nunique() == 1
         assert (chosen["rank_id"] == row.rank_id).all()
     return questions, pd.DataFrame(eligibility)
+
+
+V2_SPLITS = ("train", "valid_seen", "valid_unseen", "excluded")
+
+
+def make_strength_v2_split(meta: pd.DataFrame, seed: int, *,
+                           seen_holdout_fraction: float = 0.1) -> pd.DataFrame:
+    """Player-disjoint V2 split built on make_rank_folds(seed).
+
+    fold 0 -> valid_unseen (players never trained on); fold -1 -> excluded
+    (fixed second-opinion holdout, never touched); folds 1..4 -> train, except
+    floor(n * fraction) random games of every (player, colour) group, which
+    become valid_seen (players also present in train). Groups with fewer than
+    1 / fraction games contribute no seen games, so valid_seen leans towards
+    heavier players.
+    """
+    if not 0 < seen_holdout_fraction < 1:
+        raise ValueError("seen_holdout_fraction must be between zero and one")
+    if not meta["game_index"].is_unique:
+        raise ValueError("duplicate game_index")
+    table = meta.copy().sort_values("game_index").reset_index(drop=True)
+    folds = make_rank_folds(table, seed)
+    table["fold"] = game_folds(table, folds)
+    split = np.where(table["fold"] == HOLDOUT, "excluded",
+                     np.where(table["fold"] == 0, "valid_unseen", "train")).astype("U12")
+    order = np.random.default_rng(seed).random(len(table))
+    training = table.loc[split == "train"].assign(order=order[split == "train"])
+    groups = training.groupby([training["player_id"].astype(str), training["color"].astype(str)],
+                              observed=True)
+    position = groups["order"].rank(method="first").to_numpy() - 1
+    held = position < np.floor(groups["order"].transform("size").to_numpy() * seen_holdout_fraction)
+    split[training.index[held]] = "valid_seen"
+    table["split"] = split
+    players = {name: set(table.loc[table["split"] == name, "player_id"].astype(str)) for name in V2_SPLITS}
+    assert not players["train"] & players["valid_unseen"], "unseen players leaked into train"
+    assert not players["excluded"] & (players["train"] | players["valid_unseen"]), "holdout leaked"
+    assert players["valid_seen"] <= players["train"], "seen players must also be trained on"
+    return table
+
+
+def strength_v2_overlap(table: pd.DataFrame) -> dict:
+    players = {name: set(table.loc[table["split"] == name, "player_id"].astype(str)) for name in V2_SPLITS}
+    return {f"{name}_players": len(players[name]) for name in V2_SPLITS} | {
+        "valid_unseen_overlap_fraction": len(players["train"] & players["valid_unseen"]) / len(players["valid_unseen"]),
+        "valid_seen_overlap_fraction": len(players["train"] & players["valid_seen"]) / len(players["valid_seen"])}
+
 
 def make_rank_folds(meta: pd.DataFrame, seed: int = SEED) -> pd.DataFrame:
     players = player_table(meta)

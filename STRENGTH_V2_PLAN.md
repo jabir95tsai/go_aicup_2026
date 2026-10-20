@@ -49,6 +49,8 @@ $$
 
 沿用目前 V1 的盤面快取、指定玩家逐手索引、歷史組合、D4、每級 80,000／20,000 盤切分與每 seed 獨立切分流程。模型不接收 ID。按盤切分仍可能有玩家重疊，須揭露重疊率，不能據此宣稱未見玩家泛化。
 
+**切分更新（2026-10-19，使用者確認，取代本段與下文的每級 80,000／20,000 盤切分及單一 validation／50,000 盤監控）：** 首輪改為 player-disjoint：`make_rank_folds(seed)` 的 fold 0 為 Valid-U（未見玩家），fold −1 完全不使用，fold 1–4 為 train 並每個玩家顏色組留出 10% 為 Valid-S（見過玩家）。監控每級 Valid-U 2,500＋Valid-S 2,500 盤；最終完整推論 Valid-U 與 Valid-S，兩組各有 10,000 題固定題目。模型選擇與是否過 baseline 一律看 Valid-U；G = Equal-k(S) − Equal-k(U) 用於判斷玩家記憶。實際規模見 `RESULTS.md` A-019。
+
 首輪固定 seed 2027、global batch size=65,536、1 epoch，optimizer、scheduler、BN／SyncBN、精度、資料排列及增強設定沿用目前 V1 設定。完整設定以對應 run 的 config 保存。
 
 多卡沿用尾批有效樣本 mask，補齊樣本不計入 loss。以 FP32 計算 cross entropy 與累積統計；全域 loss 為各卡有效 loss 總和除以全域有效樣本數。各卡有效數量不一致時，須按數量加權並核對 DDP 梯度平均尺度，不直接平均局部平均 loss。此 loss 不要求每批包含全部十級。

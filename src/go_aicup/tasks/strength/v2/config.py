@@ -28,11 +28,14 @@ def read_config(path: Path = DEFAULT_CONFIG) -> dict:
             raise ValueError("global batch sizes must be positive integers")
     if config["training"]["evaluate_every_steps"] < 1:
         raise ValueError("evaluate_every_steps must be positive")
+    split = config["split"]
+    if (split.get("policy") != "player_disjoint" or set(split) != {"policy", "seen_holdout_fraction"}
+            or not 0 < split["seen_holdout_fraction"] < 1):
+        raise ValueError("V2 requires the player-disjoint split with a seen-player holdout fraction")
     monitoring = config["monitoring"]
     count = monitoring["games_per_rank"]
-    available = config["split"]["expected_games_per_rank"] - config["split"]["train_games_per_rank"]
-    if type(count) is not int or not 0 < count <= available:
-        raise ValueError("monitoring games_per_rank must fit the validation split")
+    if type(count) is not int or count < 1:
+        raise ValueError("monitoring games_per_rank must be a positive integer")
     if monitoring["score_unit"] != "game" or monitoring["decoder"] != "argmax":
         raise ValueError("V2 monitoring requires game-level argmax scoring")
     if config["evaluation"]["question_decoder"] != "score_rank":

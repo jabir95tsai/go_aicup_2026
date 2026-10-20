@@ -1,6 +1,6 @@
 # 棋力程式分層
 
-V2 的 config、資料準備、十類模型與 CE loss 已實作，規格見 [設計計畫](../../../../STRENGTH_V2_PLAN.md)。V2 推論聚合、訓練與評估仍待實作。
+V2 的 config、資料準備、十類模型、CE loss、每盤推論聚合、訓練與評估已實作，規格見 [設計計畫](../../../../STRENGTH_V2_PLAN.md)；首輪結果見 `RESULTS.md` A-024。
 
 ```text
 strength/
@@ -9,12 +9,17 @@ strength/
 │   ├── dataset.py     # packed board loader、D4、排列、全域 batch 與尾批 mask
 │   ├── prepare.py     # split／固定題目／指定玩家逐手索引的產製
 │   ├── runtime.py     # manifest、hash、DDP、autocast、rank-zero 執行
-│   └── training.py    # seed、RNG、環境紀錄、scheduler、logging
+│   ├── training.py    # seed、RNG、環境紀錄、scheduler、logging
+│   └── checkpoint.py  # checkpoint 存取、latest-only 修剪與解析
 ├── v2/
 │   ├── model.py       # 十類 logits head，輸出 B×10
 │   ├── losses.py      # FP32 CE、有效 mask 與 DDP 全域樣本平均
 │   ├── config.py      # V2 設定與監控／正式解碼規格檢查
-│   └── prepare.py     # 共用資料準備的 V2 CLI
+│   ├── prepare.py     # 共用資料準備的 V2 CLI（player-disjoint）
+│   ├── aggregate.py   # 每盤／題目聚合、官方分數、CATEGORY_DTYPE（numpy）
+│   ├── infer.py       # 凍結模型整盤推論，DDP all_reduce
+│   ├── train.py       # V2 訓練、U／S 監控、最終分類檔與 model.pt
+│   └── evaluate.py    # CPU 報表與 plot/ 圖表
 └── v1/
     ├── model.py       # scalar head，輸出 B
     ├── config.py      # V1 config 預設與專用檢查
@@ -73,3 +78,16 @@ probabilities = logits.detach().softmax(dim=-1)  # 推論端使用
 ```
 
 `valid` 是與樣本等長、位於同一裝置的 bool mask，可省略。loss 對全部有效指定玩家盤面等權，不要求 batch 包含十級；CE 與總和以 FP32 計算，計數為 int64。回傳的 loss_sum／valid_count 不帶梯度，可作為統計；loss 保留梯度。DDP 預設同步各卡總和與數量，所有程序均須呼叫 loss 及 backward，包含零有效樣本的程序。可微 SUM 與 DDP 的梯度平均相抵，不再手動乘除 world_size。`synchronize=False` 可明確選擇本地計算；全域零有效樣本則拒絕。CUDA／SyncBN 的實際驗收留待後續短測。
+
+
+V2 訓練與評估（player-disjoint，`RESULTS.md` A-019～A-024）：
+
+```bash
+python -m go_aicup.tasks.strength.v2.prepare --config configs/strength/rank_cnn_v2_seed2027.json
+python -m torch.distributed.run --standalone --nnodes=1 --nproc-per-node=8 \
+    -m go_aicup.tasks.strength.v2.train --config configs/strength/rank_cnn_v2_seed2027.json \
+    [--resume outputs/v2_strength/last.json]
+python -m go_aicup.tasks.strength.v2.evaluate --run-dir outputs/v2_strength
+```
+
+切分：`data.cv.make_strength_v2_split` 的 fold 0＝Valid-U（未見玩家），fold 1–4＝train 並每玩家顏色組留出 10%＝Valid-S，fold −1 不使用。每 200 steps 與最後一步監控 `monitor_unseen`／`monitor_seen`（每級各 2,500 整盤）。成功的 run 目錄只留 `model.pt`、`losses.npy`、`validation_unseen_category.npy`、`validation_seen_category.npy`，評估圖在 `plot/`。正式題目規則：每盤平均機率、題內 1/k、`metrics.score_rank`。CUDA 驗收測試 `tests/test_strength_v2_cuda.py` 需在配置 2 張 GPU 的計算節點執行。

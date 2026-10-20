@@ -164,16 +164,15 @@ def create_permutation(directory: Path, length: int, seed: int, epoch: int) -> P
             raise ValueError("permutation identity/hash mismatch")
         return path
     temporary = path.with_name(path.name + ".tmp")
-    array = np.lib.format.open_memmap(temporary, mode="w+", dtype=np.uint32, shape=(length,))
-    try:
-        for start in range(0, length, 1_000_000):
-            end = min(start + 1_000_000, length)
-            array[start:end] = np.arange(start, end, dtype=np.uint32)
-        rng = np.random.Generator(np.random.PCG64(np.random.SeedSequence([seed, epoch])))
-        rng.shuffle(array)
-        array.flush()
-    finally:
-        _close_mmap(array)
+    # Shuffle in RAM (4 bytes per sample), then write once: an in-place
+    # memmap shuffle on network storage exceeded the 30-minute NCCL timeout
+    # (RESULTS A-022). Same generator and input give the identical order.
+    array = np.arange(length, dtype=np.uint32)
+    rng = np.random.Generator(np.random.PCG64(np.random.SeedSequence([seed, epoch])))
+    rng.shuffle(array)
+    with temporary.open("wb") as handle:
+        np.save(handle, array, allow_pickle=False)
+    del array
     os.replace(temporary, path)
     write_json(record_path, dict(identity, sha256=file_hash(path)))
     return path

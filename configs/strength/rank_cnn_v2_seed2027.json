@@ -10,8 +10,8 @@
     "output_dir": "outputs/v2_strength"
   },
   "split": {
-    "expected_games_per_rank": 100000,
-    "train_games_per_rank": 80000
+    "policy": "player_disjoint",
+    "seen_holdout_fraction": 0.1
   },
   "questions": {
     "validation": 10000
@@ -55,7 +55,7 @@
     "cudnn_benchmark": false,
     "deterministic": true,
     "allow_tf32": false,
-    "evaluate_every_steps": 100
+    "evaluate_every_steps": 200
   },
   "evaluation": {
     "global_batch_size": 65536,
@@ -63,7 +63,7 @@
   },
   "strength_version": 2,
   "monitoring": {
-    "games_per_rank": 5000,
+    "games_per_rank": 2500,
     "score_unit": "game",
     "decoder": "argmax"
   }

@@ -322,3 +322,139 @@ A-014 更正（2026-10-18）：上段將橘線 valid_loss 誤記為全 validatio
 驗證：go Conda 環境執行 `OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONPATH=src python -m pytest -q tests/test_strength_v2_model_loss.py`：**6 passed（6.23s）**。涵蓋 B=1 輸出維度、softmax 列和、類別順序、meta device 正式模型參數計數、零 logits CE=log(10)、提高真實類別 logit 時 loss 降低、補齊樣本零梯度與非有限 padding 排除、BF16 logits 的 FP32 CE、非法標籤及全域零有效樣本拒絕；實際兩程序 CPU/Gloo DDP 線性模型驗證有效數 3:2、2:0（含實體空 batch）的全域 loss、sum、count、參數梯度與單程序對照一致，亦驗證已初始化 process group 內關閉同步的本地統計及跨卡非法資料／全空錯誤傳遞。
 
 未啟動正式訓練或官方資料推論；完整 CNN 的 CUDA／SyncBN／多 GPU 訓練尚未驗收。V2 k=5／10／15／20 分數與正式 GPU 小時未知。第四步推論聚合及後續訓練、評估、圖表仍待實作。
+
+
+### A-018 Strength V2 S4 per-game inference aggregation（2026-10-19）
+
+依使用者 10/19 確認的 V2 下一步計畫（S4→S8；首輪改 player-disjoint，Valid-S／Valid-U，G 門檻 0.03／0.08，模型選擇與 baseline 一律看 Valid-U）完成 S4。新增 `tasks/strength/v2/aggregate.py`（純 numpy）與 `v2/infer.py`。
+
+- `infer_games`：eval 模式、關閉 D4，每個指定玩家盤面在全部程序中恰好推論一次；softmax 與 log-softmax 以 FP32 由 logits 計算，CPU FP64 `np.add.at` 依 game_index 累加（一盤可跨 batch／跨程序），最後 all_reduce SUM，所有程序回傳相同結果；每盤手數須與索引檔一致。
+- 每盤結果 `CATEGORY_DTYPE`：`game_index`、`rank_id`、`num_moves`、`confidence_sum[10]`、`log_probability_sum[10]`、`predicted_rank_id`（confidence 總和 argmax，同分取小）。相對 PLAN §7 新增 `log_probability_sum` 欄，供已授權的「log-prob 聚合」CPU 比較使用，且 validation CE 直接由它還原（逐手等權），不另做推論；confidence 改存 FP64。
+- 題目聚合：`mean_probability`（正式：每盤平均機率、題內 1/k）與 `mean_log_probability`（診斷：每盤平均 log-prob 題內等權後 softmax，即正規化幾何平均）；解碼 `score_rank`（正式）／`argmax`（診斷）。
+
+驗證：go 環境 `OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONPATH=src python -m pytest -q tests/test_strength_v2_infer.py tests/test_strength_v2_model_loss.py tests/test_strength_v2_prepare.py`：**16 passed（18.16s）**，其中新增 6 項：同分取小、總和與平均 argmax 相同、官方計分；CE 由 log 總和逐手等權還原；長短局題內等權、`score_rank` 中段與 D／6D 邊界；log 聚合等於正規化幾何平均；合成棋局（每盤 2–4 手、eval batch 7 使盤跨 batch）逐盤 confidence／log 總和與逐手直接 forward 一致、BN／權重不變、手數與標籤正確；兩程序 Gloo（batch 4，第二程序空尾批）與單程序逐欄一致。git diff --check 通過。
+
+未執行 GPU、官方資料推論或訓練；k=5／10／15／20 分數未知。S5 依賴的 player-disjoint 切分（Valid-S／Valid-U）尚未實作。
+
+
+### A-019 Strength V2 S4b player-disjoint split with seen/unseen validation（2026-10-19）
+
+依使用者 10/19 決定，V2 首輪不跑 game-disjoint 主 run，直接改 player-disjoint（CLAUDE.md §5），並以同一模型量「玩家記憶」落差 G = Equal-k(Valid-S) − Equal-k(Valid-U)。使用者確認：Valid-S 留出 10%；監控每級 Valid-U 2,500＋Valid-S 2,500 盤（共 50,000，成本同原設計）；G 門檻 ≤0.03／≤0.08／>0.08；模型選擇與 baseline 一律看 Valid-U，Valid-U 四桶等權 score_rank ≥0.4631 算過 baseline、≥0.47 才列提交候選。
+
+- `data.cv.make_strength_v2_split(meta, seed, seen_holdout_fraction)`：以 `make_rank_folds(seed)` 分玩家；fold 0 → valid_unseen，fold −1 → excluded（完全不產生索引），fold 1–4 → train，但每個 (player, color) 隨機留出 floor(n×0.1) 盤為 valid_seen。assert：train∩unseen 玩家為空、excluded 不與其他重疊、seen 玩家 ⊂ train 玩家。不足 10 盤的玩家顏色組不貢獻 seen 盤，故 Valid-S 偏向重度玩家（記憶成分可能偏高估）。
+- `make_strength_v1_questions` 改接受表中任何 split 名稱（V1 行為不變）。shared prepare 依 `split.policy` 分派；V1 game-disjoint 路徑輸出不變。V2 輸出 `strength_v2_games.parquet`、`strength_v2_valid_{unseen,seen}_questions.parquet`（各 10,000 題，seed+2／+3）、索引 `train`、`valid_unseen`、`valid_seen`、`monitor_unseen`、`monitor_seen`（seed／seed+1 抽樣）及 `monitor_*_games.npy`。V2 config：`split={"policy":"player_disjoint","seen_holdout_fraction":0.1}`、`monitoring.games_per_rank=2500`（每組每級）。
+
+正式 metadata 記憶體內試算（seed 2027，未寫檔，9.3s）：
+
+| 集合 | 玩家 | 盤數 | 指定玩家手數 | 每級盤數 min/max |
+|---|---:|---:|---:|---|
+| train | 5,767 | 650,823 | 72,298,918 | 63,590／67,072 |
+| valid_unseen | 1,442 | 181,851 | 20,120,209 | 17,179／19,461 |
+| valid_seen | 5,000 | 66,560 | 7,397,410 | 6,199／6,891 |
+| monitor_unseen／seen | — | 25,000／25,000 | 2,762,965／2,783,567 | 2,500 |
+| excluded（不使用） | 798 | — | — | — |
+
+Valid-U 重疊率 0.0、Valid-S 1.0。題目各 10,000（每 k×級 250 題）；每 (k, 級) 至少涉及 66（U）／17（S）位不同玩家，Valid-S 的 k=20 題重複抽到少數重度玩家，噪音較大。train 由 88.76M（V1 game split）降為 72.30M 手 → global batch 65,536 下 1,104 steps，依 A-012 吞吐量純訓練約 27.9 min（推估）。
+
+驗證：go 環境 `OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONPATH=src python -m pytest -q`：**100 passed（57.12s）**（含 V1 回歸）。V2 prepare 測試改為合成 metadata（每級 10 重度＋15 輕度玩家）：切分玩家互斥／holdout 不碰／seen 留出數＝floor、與列順序無關、seed 敏感；五組索引來源與逐手覆蓋、monitor 每級平衡、題目只取自對應 split、完成後重跑不重抽、改設定拒絕；game policy 仍輸出 V1 佈局。git diff --check 通過。
+
+未執行官方資料準備寫檔、GPU 或訓練；k=5／10／15／20 分數未知。
+
+
+### A-020 Strength V2 S5/S6 trainer with seen/unseen monitors and final categories（2026-10-19）
+
+完成 S5 訓練迴圈，原 S6（最終全量推論與 `model.pt` 收尾）併入同一入口 `python -m go_aicup.tasks.strength.v2.train --config configs/strength/rank_cnn_v2_seed2027.json`（torchrun 單節點 1–8 卡）。
+
+- 把 V1 中與目標無關的 checkpoint 存取／latest-only 修剪／解析移到 `shared/checkpoint.py`（`code_sha256` 改由呼叫端傳入）；V1 以薄包裝沿用，行為與檔案格式不變，V1 fingerprint 清單加入新檔。V2 不從 `v1/` 匯入。
+- `v2/train.py`：AdamW／warmup-cosine／BF16／SyncBN／尾批 mask／D4／定時 checkpoint／續跑沿用 V1；loss 改 `global_cross_entropy`，不再略過缺級 batch。每 100 steps（非末步）與最後一步，以凍結 BN、無 D4 完整推論 `monitor_unseen` 與 `monitor_seen` 全部指定玩家落子；`losses.npy` 每列 `[step, train_loss(最近 batch), unseen_loss, unseen_game_score, seen_loss, seen_game_score]`（CE 逐手等權、官方分單盤 argmax 按盤等權）。每次監控耗時、純訓練秒數、最終推論秒數記入 `model.pt["timings"]`，每 10 steps 的平均 step 秒數寫入 `train.jsonl`（供 S8b 判斷 15% 規則）。
+- 訓練完成後完整推論 Valid-U／Valid-S 每盤 → `validation_unseen_category.npy`、`validation_seen_category.npy`（`CATEGORY_DTYPE`），再寫 `model.pt`（權重、config、類別順序、dataset／索引指紋、監控集合資訊、loss 欄名、玩家重疊、timings、環境、產物 SHA-256），reload 驗證雜湊後才清除 checkpoints／permutations／log。成功目錄只留 4 檔。
+
+驗證：go 環境 `OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONPATH=src python -m pytest -q`：**103 passed（55.72s）**，新增 `tests/test_strength_v2_train.py` 3 項（合成 4,000 盤、每級 10 位玩家、player-disjoint、留出 0.5）：端到端只留 4 檔、監控列為 4,8,…＋末步、`samples_seen` 等於 train 樣本數、`model.pt` reload 雜湊一致，由 `model.pt` 重推論的每盤分類與末列監控 loss／分數一致；第 5 步中斷（第 4 步監控後）續跑與不中斷的權重雜湊、`losses.npy` 與兩個分類檔逐位元組一致；兩程序 CPU/Gloo 訓練完整結束且分類檔可由 `model.pt` 重現。git diff --check 通過。
+
+CPU 開發測試不含 SyncBN（需 CUDA）；CUDA／BF16／SyncBN／8 卡、實際吞吐與監控耗時留待 S8。未執行官方資料或 GPU；k=5／10／15／20 分數未知。
+
+
+### A-021 Strength V2 S7 CPU evaluation and figures（2026-10-19）
+
+新增 `python -m go_aicup.tasks.strength.v2.evaluate --run-dir outputs/v2_strength [--dataset-dir …] [--no-plots]`（實作位於 `tasks/strength/v2/evaluate.py`，取代 PLAN §8.1 預定的 `evaluate_rank_v2.py` 路徑）。只讀 `model.pt`、`losses.npy`、兩個分類檔與該 run 的 dataset 表／固定題目；不 forward、不改產物，報表印在終端，圖存 `<run-dir>/plot/`。
+
+- 每個驗證集（Valid-U、Valid-S）：單盤（confidence 總和 argmax；診斷）整體 score／accuracy／差一級／差兩級以上、各級、黑白分組、10×10 混淆；題目 k=5／10／15／20 的 n、score、acc、within1 與四桶等權 Equal-k（不顯示 MAE），組合為 {mean_probability（正式）, mean_log_probability（診斷）} × {score_rank（正式）, argmax（診斷）}。任何 k 桶缺題即拒絕產出 Equal-k。
+- 判定：G = Equal-k(S) − Equal-k(U)（正式規則），≤0.03／≤0.08／>0.08 三段文字；Valid-U ≥0.4631 標 passes_baseline，≥0.47 標 submission_candidate。不依 validation 選解碼或聚合。
+- 10 張 PNG（200 dpi、Agg、不 show）：training_curves、game_confusion_{unseen,seen}、game_confidence_{unseen,seen}、game_by_rank、question_by_k（含 baseline 參考線）、question_confusion_{score_rank,argmax}（Valid-U，2×2 k）、question_aggregation（機率平均 vs log-prob）。配色 Valid-U 藍、Valid-S 橘、training 綠；診斷系列加斜線紋理，不只靠顏色區分。
+
+驗證：go 環境全套 `pytest -q`：**104 passed（71.49s）**。新增測試以獨立迴圈重算正式規則（每盤平均機率 → 題內 1/k → `p[r]+(p[r−1]+p[r+1])/e` argmax → 官方分 → 四桶平均），與報表 Equal-k 差 ≤1e-12；單盤分數、混淆總數、G 與 baseline 判定一致；產生 10 張圖、評估不改 run 內任何檔案、重跑結果相同。已目視檢查合成資料的 3 張圖版面。git diff --check 通過。
+
+未使用官方資料或 GPU；k=5／10／15／20 分數未知。
+
+
+### A-022 Strength V2 S8 GPU short runs on Nano4 dev（2026-10-19，S8b 未完成）
+
+使用者授權 S8 以 `dev` 佇列約 3 GPU-h。腳本 `slurm/v2_s8a_prepare.slurm`、`slurm/v2_s8_cuda_tests.slurm`、`slurm/v2_s8b.slurm`；設定 `configs/strength/rank_cnn_v2_seed2027_s8{a,b}.json`（只改 output_dir、batch、監控間隔）。原提案 8 卡做中斷／續跑比對（3 次啟動）估 4.3 GPU-h 超出授權，改為 2 卡合成 CUDA 測試驗續跑、8 卡只跑一次。
+
+- 576385／576386：分配到 25a-hgpn001，0 秒以 signal 53 結束、無 stdout；探針作業 576392 在 25a-hgpn014 正常 → 腳本排除 25a-hgpn001（與既有 25a-hgpn069）。
+- **S8c 576394（2×H200，driver 580.65.06，1m01s）通過：** `tests/test_strength_v2_cuda.py` 3 passed：FP32 SyncBN 1 卡 vs 2 卡（含非整除尾批）每列 loss／監控與兩個分類檔在 rtol 2e-3 內一致；BF16 2 卡分類檔可由 `model.pt` 單卡重推論重現；BF16 2 卡第 5 步中斷續跑與不中斷 **權重逐位元相同**。
+- **S8a 576393（1×H200，16m47s）通過：** torch 2.6.0+cu124、CUDA 12.4、NCCL 2.21.5。V2 正式資料準備 26 s，`data/processed/strength_v2/seed2027/` 各集合筆數與 A-019 試算完全一致。1 卡 BF16、global batch 2,048、20 steps：loss 2.308→2.304、grad 有限；step 10／20 兩次完整監控（U 25,000 盤 2,762,965 手＋S 25,000 盤 2,783,567 手）各 **324 s**，約 17.1k moves/s／GPU。
+- **S8b 576395（8×H200，25a-hgpn039）失敗，32m50s，updates=0：** rank 1–7 在第 9 個 NCCL broadcast 等 rank 0 達 30 分鐘逾時（SIGABRT）。rank 0 正在 `create_permutation` 以 memmap 原地 shuffle 72,298,918 筆 uint32；`/work` 為 WEKA 網路檔案系統，隨機寫入在被終止時仍未完成（.tmp 最後寫入 23:31）。S8a 同一步驟在 hgpn014 僅數分鐘，耗時受 I/O 狀況影響大。浪費約 4.4 GPU-h。
+- **修正：** `shared.dataset.create_permutation` 改為記憶體內 `np.arange`＋同一 PCG64 shuffle 後一次寫出（約 289 MB RAM）；新增測試確認與舊 memmap 版逐元素相同（V1 排列不變）。全套 **105 passed、3 skipped（CUDA）**。
+
+S8 GPU 用量約：S8a 0.28＋S8c 0.03＋S8b 4.38 ≈ **4.7 GPU-h**，已超過授權。8 卡吞吐、8 卡單次監控耗時與 15% 規則判定仍未知；V2 正式分數未知。`outputs/v2_s8b/` 為失敗殘留（無 checkpoint）。
+
+
+### A-023 Strength V2 S8b 8-GPU timing; monitor interval 100 → 200（2026-10-20）
+
+A-022 修正後重跑 **S8b 584688（8×H200，25a-hgpn030，driver 580.65.06）通過，5m02s（≈0.67 GPU-h）**：正式設定（global batch 65,536、每卡 8,192、BF16、SyncBN、D4），`--max-steps 100`，step 50／100 監控。排列建立已不再卡住（整次啟動 298 s）。
+
+| 量測 | 數值 |
+|---|---|
+| 每步（第 11–100 步，每 10 步平均） | 1.505–1.506 s（第 1–10 步 3.21 s）→ 約 43.5k samples/s |
+| 100 steps 純訓練（`timings.train_seconds`） | 151.05 s |
+| 單次監控（U 2,762,965＋S 2,783,567 手） | 48.80 s／48.79 s → 約 113.7k moves/s |
+| 監控／100 steps 訓練 | **32.4% > 15%** |
+
+依使用者規則（>15% 改每 200 steps）把 `configs/strength/rank_cnn_v2_seed2027.json` 的 `evaluate_every_steps` 改為 200；此時約 48.8／301 = **16.2%，仍略高於 15%**，已回報。
+
+**觀察（原因未知）：** step 50 → 100 的 training batch CE 2.269 → 2.193 下降，但 eval 模式監控 CE 由 2.299 升至 2.849／2.853（高於均勻 log 10 = 2.303），單盤分數 0.1368＝十級平衡下全部預測同一端點級（D 或 6D）的值，即 eval 預測塌縮。step 100 剛過 warmup 峰值（56 步）；可能是 BN running statistics 尚未穩定，也可能是真實問題，正式 run 的後續監控點會顯示。此為 100 步短跑，不代表最終分數。
+
+**正式 1 epoch run 實測估時（8×H200，每 200 steps 監控）：** 1,104 steps × 1.506 s ≈ 27.7 min；監控 6 次（200…1000＋末步 1104）× 48.8 s ≈ 4.9 min；最終完整推論 Valid-U 20,120,209＋Valid-S 7,397,410 手 ÷ 113.7k/s ≈ 4.0 min；初始化／checkpoint／收尾約 2–3 min（推估）→ **約 39–40 min wall、約 5.3 GPU-h**。資料已準備完成，不需再跑 prepare。腳本 `slurm/v2_train.slurm`（`8gpus`、1h30m 時限、可續跑、完成後自動 CPU 評估與作圖），**尚未提交，等待使用者確認**。
+
+S8 累計 GPU：A-022 約 4.7＋本次 0.67 ≈ **5.4 GPU-h**。V2 正式分數未知。
+
+
+### A-024 Strength V2 first full run, player-disjoint seed2027（2026-10-20）
+
+使用者確認後提交 **584751（8gpus，8×H200，25a-hgpn084）COMPLETED，37m22s**；1,104 steps、72,298,918 樣本、1 epoch；`model.pt` 記錄 gpu_seconds 17,571（≈4.9 GPU-h；含評估的作業總計 ≈5.0 GPU-h）。純訓練 1,649.5 s；6 次監控各 48.9–49.9 s；最終推論 Valid-U 150.5 s、Valid-S 58.0 s。程式基於 commit 534a06a 加未提交修改（git diff 存於 `model.pt["environment"]`）。產物：`outputs/v2_strength/{model.pt, losses.npy, validation_unseen_category.npy, validation_seen_category.npy, plot/}`。
+
+**監控（每 200 steps；單盤 argmax 診斷分數）：**
+
+| step | train batch CE | U CE | U 單盤分 | S CE | S 單盤分 |
+|---:|---:|---:|---:|---:|---:|
+| 200 | 2.1329 | 2.5388 | 0.1519 | 2.5277 | 0.1538 |
+| 400 | 2.0674 | 2.0908 | 0.3276 | 2.0797 | 0.3411 |
+| 600 | 2.0248 | 2.1559 | 0.2921 | 2.1373 | 0.3074 |
+| 800 | 1.9969 | 2.0750 | 0.3320 | 2.0510 | 0.3517 |
+| 1000 | 1.9832 | 2.0391 | 0.3557 | 2.0148 | 0.3741 |
+| 1104 | 1.9725 | 2.0383 | 0.3539 | 2.0137 | 0.3726 |
+
+A-023 step 100 的 eval 預測塌縮在 step 400 已消失；step 600 有一次回升，原因未知。
+
+**題目分數（正式：每盤平均機率、題內 1/k、score_rank；各 2,500 題／桶）：**
+
+| 集合 | k=5 | k=10 | k=15 | k=20 | Equal-k |
+|---|---:|---:|---:|---:|---:|
+| **Valid-U（未見玩家）** | 0.4643 | 0.4918 | 0.4950 | 0.5129 | **0.4910** |
+| Valid-S（見過玩家） | 0.4737 | 0.5271 | 0.5322 | 0.5363 | 0.5173 |
+
+- **G = 0.5173 − 0.4910 = 0.0263 ≤ 0.03** → 玩家記憶成分小，維持此切分、以 U 報告（Valid-S 偏重度玩家，G 可能偏高估，見 A-019）。
+- **Valid-U 0.4910 ≥ 0.4631（過 baseline）且 ≥ 0.47 → 依使用者門檻列為提交候選。** 本地合成題目分數，不是 LB；測試玩家是否在訓練集（L10）、測試級別是否平衡仍未知。
+- 單盤（診斷）：U 0.3502／acc 0.2372，S 0.3754。各級 U 單盤分：D 0.651、6D 0.683 最高；1D 0.215、2D 0.168 最低；預測偏向兩端（D 29,000、6D 34,218 盤 vs 2D 10,694）。黑／白 0.3497／0.3507。逐盤平均機率很平（每列最大約 0.25，見 `plot/game_confidence_unseen.png`）。
+
+**已授權的 CPU 聚合比較（診斷，未依此改正式規則）：**
+
+| Valid-U Equal-k | score_rank | argmax |
+|---|---:|---:|
+| 機率平均（正式） | **0.4910** | 0.4698 |
+| log-prob 平均 | 0.5195 | 0.5502 |
+
+Valid-S 同順序：0.5173／0.4969／0.5528／0.5941。log-prob 平均（每盤平均 log p 題內等權後 softmax）在 U 各桶都較高（score_rank：+0.015／+0.020／+0.038／+0.040，k 越大差越多），且搭配 argmax 再高 +0.031。機制推測（未驗證）：每手機率偏平，機率平均讓證據難以隨盤數累積；log 平均相當於乘積，k 越大越尖銳。score_rank 假設機率已校準，log 聚合後的機率尺度未經校準，score_rank 與 argmax 的高低因此不可解讀成「score_rank 不好」。是否改用 log 聚合或做溫度校準，需另立單變數實驗且不能以 Valid-U 挑選後仍用 Valid-U 報分（可用 Valid-S 或 training 題擬合）。
+
+評估修正：混淆／機率熱圖的文字顏色門檻改依色階上限（比例圖 vmax=1），避免淺色格白字；只重畫圖，數值不變。`tests/test_strength_v2_train.py` 4 passed。

@@ -15,7 +15,7 @@ import pandas as pd
 
 from go_aicup.data.board_cache import BoardCache, _close_mmap
 from go_aicup.data.cv import (make_strength_v1_questions, make_strength_v1_split,
-                              strength_v1_overlap)
+                              make_strength_v2_split, strength_v1_overlap, strength_v2_overlap)
 from go_aicup.tasks.strength.shared.runtime import (check_index_hashes,
     file_hash, load_dataset_manifest, object_hash, write_json)
 
@@ -62,8 +62,9 @@ def write_sample_indices(cache: BoardCache, meta: pd.DataFrame, selected_games,
             "per_rank_samples": per_rank.tolist()}
 
 
-def select_monitoring_games(table: pd.DataFrame, seed: int, games_per_rank: int) -> np.ndarray:
-    """Sample whole validation games; independent of row order and game length."""
+def select_monitoring_games(table: pd.DataFrame, seed: int, games_per_rank: int,
+                            split: str = "valid") -> np.ndarray:
+    """Sample whole games of one split; independent of row order and game length."""
     if type(games_per_rank) is not int or games_per_rank < 1:
         raise ValueError("games_per_rank must be a positive integer")
     if not table["game_index"].is_unique:
@@ -71,12 +72,50 @@ def select_monitoring_games(table: pd.DataFrame, seed: int, games_per_rank: int)
     rng = np.random.default_rng(seed)
     selected = []
     for rank_id in range(10):
-        candidates = np.sort(table.loc[(table["split"] == "valid") &
+        candidates = np.sort(table.loc[(table["split"] == split) &
             (table["rank_id"] == rank_id), "game_index"].to_numpy(dtype=np.int64))
         if len(candidates) < games_per_rank:
-            raise ValueError(f"validation rank {rank_id} needs at least {games_per_rank} games")
+            raise ValueError(f"{split} rank {rank_id} needs at least {games_per_rank} games")
         selected.append(rng.choice(candidates, games_per_rank, replace=False))
     return np.sort(np.concatenate(selected)).astype(np.uint32)
+
+
+def game_disjoint_sets(meta: pd.DataFrame, config: dict):
+    """V1 per-rank game split; one validation set and optional monitor."""
+    table = make_strength_v1_split(meta, config["seed"], **config["split"])
+    valid_questions, _ = make_strength_v1_questions(
+        table, "valid", config["questions"]["validation"], config["seed"] + 2)
+    tables = {"strength_v1_games.parquet": table,
+              "strength_v1_validation_questions.parquet": valid_questions}
+    selections = {name: table.loc[table["split"] == name, "game_index"].to_numpy()
+                  for name in ("train", "valid")}
+    monitors = ({"monitor": select_monitoring_games(table, config["seed"],
+                                                    config["monitoring"]["games_per_rank"])}
+                if "monitoring" in config else {})
+    return (table, tables, selections, monitors, strength_v1_overlap(table),
+            "Game-disjoint split; players may overlap.")
+
+
+def player_disjoint_sets(meta: pd.DataFrame, config: dict):
+    """V2 player folds: train, valid_seen, valid_unseen; fold -1 untouched.
+
+    Each validation set gets its own fixed questions and whole-game monitor
+    (games_per_rank per rank and per set).
+    """
+    options = {key: value for key, value in config["split"].items() if key != "policy"}
+    table = make_strength_v2_split(meta, config["seed"], **options)
+    tables = {"strength_v2_games.parquet": table}
+    selections = {"train": table.loc[table["split"] == "train", "game_index"].to_numpy()}
+    monitors = {}
+    for offset, name in enumerate(("valid_unseen", "valid_seen")):
+        questions, _ = make_strength_v1_questions(
+            table, name, config["questions"]["validation"], config["seed"] + 2 + offset)
+        tables[f"strength_v2_{name}_questions.parquet"] = questions
+        selections[name] = table.loc[table["split"] == name, "game_index"].to_numpy()
+        monitors[f"monitor_{name.removeprefix('valid_')}"] = select_monitoring_games(
+            table, config["seed"] + offset, config["monitoring"]["games_per_rank"], name)
+    return (table, tables, selections, monitors, strength_v2_overlap(table),
+            "Player-disjoint folds; valid_seen players also appear in train.")
 
 
 def prepare(config: dict) -> Path:
@@ -110,41 +149,33 @@ def prepare(config: dict) -> Path:
         meta = pd.read_parquet(cache.directory / "games.parquet")
         if not np.array_equal(meta["game_index"], np.arange(len(meta))):
             raise ValueError("cache game_index must match metadata row order")
-        table = make_strength_v1_split(meta, config["seed"], **config["split"])
-        valid_questions, _ = make_strength_v1_questions(
-            table, "valid", config["questions"]["validation"], config["seed"] + 2)
-        tables = {"strength_v1_games.parquet": table,
-                     "strength_v1_validation_questions.parquet": valid_questions}
+        if config["split"].get("policy") == "player_disjoint":
+            table, tables, selections, monitors, overlap, note = player_disjoint_sets(meta, config)
+        else:
+            table, tables, selections, monitors, overlap, note = game_disjoint_sets(meta, config)
         for name, frame in tables.items():
             temporary = directory / (name + ".tmp")
             frame.to_parquet(temporary, index=False)
             os.replace(temporary, directory / name)
-        selections = {
-            "train": table.loc[table["split"] == "train", "game_index"].to_numpy(),
-            "valid": table.loc[table["split"] == "valid", "game_index"].to_numpy(),
-        }
-        if "monitoring" in config:
-            monitoring_games = select_monitoring_games(
-                table, config["seed"], config["monitoring"]["games_per_rank"])
-            selections["monitor"] = monitoring_games
-            temporary = directory / "monitor_games.npy.tmp"
+        for name, monitoring_games in monitors.items():
+            selections[name] = monitoring_games
+            temporary = directory / f"{name}_games.npy.tmp"
             with temporary.open("wb") as handle:
                 np.save(handle, monitoring_games, allow_pickle=False)
-            os.replace(temporary, directory / "monitor_games.npy")
+            os.replace(temporary, directory / f"{name}_games.npy")
         sets = {name: write_sample_indices(cache, meta, games, directory, name)
                 for name, games in selections.items()}
         files = {f"{prefix}_{kind}.npy": {
                     "sha256": file_hash(directory / f"{prefix}_{kind}.npy"),
                     "bytes": (directory / f"{prefix}_{kind}.npy").stat().st_size}
                  for prefix in sets for kind in ("game", "ply")}
-        if "monitoring" in config:
-            path = directory / "monitor_games.npy"
+        for name in monitors:
+            path = directory / f"{name}_games.npy"
             files[path.name] = {"sha256": file_hash(path), "bytes": path.stat().st_size}
         table_files = {name: {"sha256": file_hash(directory / name),
                            "bytes": (directory / name).stat().st_size} for name in tables}
         record = dict(identity, complete=True, sets=sets, files=files, table_files=table_files,
-                      player_overlap=strength_v1_overlap(table),
-                      note="Game-disjoint split; players may overlap.")
+                      player_overlap=overlap, note=note)
         record["dataset_id"] = object_hash(record)
         write_json(directory / "manifest.json", record)
         print(json.dumps({"sets": sets, "player_overlap": record["player_overlap"]}, indent=2), flush=True)
