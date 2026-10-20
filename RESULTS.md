@@ -516,3 +516,27 @@ Valid-S 同順序：0.5173／0.4969／0.5528／0.5941。log-prob 平均（每盤
 - **合成驗證已飽和（≥0.99），之後無法再用它區分開局方法。** 官方 baseline 0.2845 與合成分數的落差仍無解釋。線索（未驗證）：E5 表中「只用第 1 手」的 top-5 為 0.30–0.43，與官方 baseline 同一量級，所以官方 baseline 可能只是很弱的方法，也可能真實測試確實比較難。R2 的非開局風格模型就是為後者準備的保險。
 
 程式：`tasks/identity/{data,opening,assign}.py`、`scripts/identity_opening_eval.py`；產物 `outputs/pid_opening_v1/{results.csv,summary.json}`、`data/processed/identity/{train_prefix_60.npy,pid_gallery.parquet,pid_questions.parquet}`。測試 `tests/test_identity_opening.py` 4 passed（逐手 NB 對照直接計數、前綴雜湊順序／長度、人口退回在未匹配候選人上抵消、Sinkhorn 雙隨機與 Hungarian 拆解 hub）。尚未有測試集推論入口；短局（<D 手）與 pass 的處理留待 R3 提交管線。
+
+
+### A-028 V2 3-epoch run（seed2026）完成結果（2026-10-21 補記）
+
+- **作業：** 590334 於 2h30m 時限 TIMEOUT；預排的 590565（`afternotok`）自 checkpoint 續跑，14 分 27 秒後 COMPLETED（10/21 01:13）。產物在 `outputs/v2_strength_seed2026/`（`model.pt`、`losses.npy`、`validation_{seen,unseen}_category.npy`、`plot/`），報表在 `outputs/slurm-v2-train-590565.out`。
+- **與 A-024 不可直接歸因：** seed 不同（2026 vs 2027），學習率不同（固定 0.001 vs warmup-cosine），epoch 數也不同（3 vs 1）。三者同時改變，所以下面的差異不能只歸因於 epoch 數。
+
+**Valid-U 正式規則（機率平均 + `score_rank`）：**
+
+| run | k=5 | k=10 | k=15 | k=20 | Equal-k | Valid-S Equal-k | G |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| A-024（1 epoch，seed2027） | 0.4643 | 0.4918 | 0.4950 | 0.5129 | **0.4910** | 0.5173 | 0.026 |
+| A-028（3 epochs，seed2026） | 0.4717 | 0.4924 | 0.4980 | 0.4966 | **0.4897** | 0.5487 | **0.059** |
+
+**Valid-U 聚合診斷（Equal-k）：**
+
+| | 機率平均 score_rank | 機率平均 argmax | log-prob score_rank | log-prob argmax |
+|---|---:|---:|---:|---:|
+| A-024 | 0.4910 | 0.4698 | 0.5195 | 0.5502 |
+| A-028 | 0.4897 | 0.4913 | 0.4816 | 0.5058 |
+
+- 單盤診斷（Valid-U，178,907 盤）：score 0.3605、acc 0.2454。
+- **判讀：** U 的正式分數沒有提升（−0.0013）；S 的分數 +0.031，G 從 0.026 升到 0.059，進入「注意」區間（≤0.08 時仍以 U 判斷）。這符合「多訓練時記住見過的玩家，但沒有學到更多棋力」的機制，但因為有上述三個混淆變數，這只是推測，尚未驗證。log-prob 聚合在 A-024 的大幅增益（A-025）在這次 run 縮小很多：score_rank 甚至低於機率平均。原因未知。可能的解釋是多 epoch 後每手機率變得較尖、較不校準，但沒有驗證。
+- **處置：** 正式候選維持 A-024 的模型。A-028 不取代 A-024；它也過 baseline 與 0.47 門檻，可作為 ensemble 的元件候選。
