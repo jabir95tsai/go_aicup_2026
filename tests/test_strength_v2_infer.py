@@ -64,7 +64,7 @@ def test_questions_weight_games_equally_and_decode_edges():
     confidence[1, 9] = 1.0
     category = _category(confidence, [100, 1])
     proba = question_probabilities(category, [np.array([0, 3])])
-    np.testing.assert_allclose(proba, [[0.5] + [0] * 8 + [0.5]])
+    np.testing.assert_allclose(proba, [[0.5] + [0] * 8 + [0.5]], atol=1e-12)
     np.testing.assert_allclose(proba.sum(1), 1.0)
     # score_rank favours ranks with mass on both neighbours; argmax does not.
     middle = np.array([[0.0, 0.3, 0.25, 0.3, 0.15, 0, 0, 0, 0, 0]])
@@ -231,3 +231,20 @@ def test_permutation_matches_legacy_memmap_shuffle(tmp_path):
     path = create_permutation(tmp_path / "permutations", length, seed, epoch)
     np.testing.assert_array_equal(np.load(path, allow_pickle=False), expected)
     assert create_permutation(tmp_path / "permutations", length, seed, epoch) == path
+
+
+def test_temperature_identity_and_recovery():
+    from go_aicup.tasks.strength.v2.aggregate import fit_temperature, question_logits, tempered_probabilities
+    confidence = np.array([[0.5, 0.3] + [0.025] * 8, [0.1] * 10]) * [[4], [2]]
+    category = _category(confidence, [4, 2])
+    raw = np.mean(confidence / [[4], [2]], axis=0, keepdims=True)
+    np.testing.assert_allclose(tempered_probabilities(question_logits(category, [np.array([0, 3])])), raw)
+    rng = np.random.default_rng(2027)
+    logits = rng.normal(size=(20000, 10))
+    truth = tempered_probabilities(logits, 3.0)
+    labels = np.array([rng.choice(10, p=row) for row in truth])
+    temperature, at_edge = fit_temperature(logits, labels)
+    assert temperature == pytest.approx(3.0, rel=0.08) and not at_edge
+    assert fit_temperature(logits * 1e-4, labels)[1]  # Needs T beyond the grid.
+    with pytest.raises(ValueError, match="positive"):
+        tempered_probabilities(logits, 0.0)

@@ -75,12 +75,13 @@ def question_rows(category: np.ndarray, games) -> np.ndarray:
     return rows
 
 
-def question_probabilities(category: np.ndarray, questions, method: str = "mean_probability") -> np.ndarray:
-    """[Q,10] per question; each game weighs 1/k regardless of its length.
+def question_logits(category: np.ndarray, questions, method: str = "mean_probability") -> np.ndarray:
+    """[Q,10] log-scale question scores; softmax(T * logits) gives probabilities.
 
-    mean_probability: average of per-game mean softmax (official V2 rule).
-    mean_log_probability: softmax of the average per-game mean log-prob
-    (diagnostic comparison only, approved 2026-10-19).
+    Each game weighs 1/k regardless of its length.
+    mean_probability: log of the average per-game mean softmax (official V2
+    rule at T=1). mean_log_probability: average per-game mean log-prob
+    (normalised geometric mean at T=1; diagnostic, approved 2026-10-19).
     """
     if method == "mean_probability":
         per_game = game_probabilities(category)
@@ -91,10 +92,38 @@ def question_probabilities(category: np.ndarray, questions, method: str = "mean_
     result = np.empty((len(questions), N_RANKS))
     for number, games in enumerate(questions):
         result[number] = per_game[question_rows(category, games)].mean(axis=0)
-    if method == "mean_log_probability":
-        result = np.exp(result - result.max(axis=1, keepdims=True))
-        result /= result.sum(axis=1, keepdims=True)
-    return result
+    return np.log(np.maximum(result, 1e-300)) if method == "mean_probability" else result
+
+
+def tempered_probabilities(logits, temperature: float = 1.0) -> np.ndarray:
+    """softmax(temperature * logits) per row; temperature > 1 sharpens."""
+    if not temperature > 0:
+        raise ValueError("temperature must be positive")
+    scaled = temperature * np.asarray(logits, dtype=np.float64)
+    scaled = np.exp(scaled - scaled.max(axis=1, keepdims=True))
+    return scaled / scaled.sum(axis=1, keepdims=True)
+
+
+def question_probabilities(category: np.ndarray, questions, method: str = "mean_probability",
+                           temperature: float = 1.0) -> np.ndarray:
+    return tempered_probabilities(question_logits(category, questions, method), temperature)
+
+
+TEMPERATURE_GRID = np.exp(np.linspace(np.log(0.1), np.log(100.0), 601))
+
+
+def fit_temperature(logits, labels, grid=TEMPERATURE_GRID) -> tuple[float, bool]:
+    """Grid temperature minimising mean question NLL; also flags a grid-edge optimum."""
+    logits = np.asarray(logits, dtype=np.float64)
+    labels = np.asarray(labels, dtype=np.int64)
+    losses = []
+    for temperature in grid:
+        scaled = temperature * logits
+        scaled -= scaled.max(axis=1, keepdims=True)
+        log_norm = np.log(np.exp(scaled).sum(axis=1))
+        losses.append(float((log_norm - scaled[np.arange(len(labels)), labels]).mean()))
+    best = int(np.argmin(losses))
+    return float(grid[best]), best in (0, len(grid) - 1)
 
 
 def decode_questions(probabilities, decoder: str) -> np.ndarray:
