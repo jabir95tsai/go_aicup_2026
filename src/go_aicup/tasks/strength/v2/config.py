@@ -21,8 +21,8 @@ def read_config(path: Path = DEFAULT_CONFIG) -> dict:
         raise ValueError("device must be cuda or cpu")
     if config["device"] == "cpu" and config["precision"] != "fp32":
         raise ValueError("CPU development requires explicit fp32 precision")
-    if config["training"]["epochs"] != 1:
-        raise ValueError("V2 first run requires exactly one epoch")
+    if type(config["training"]["epochs"]) is not int or config["training"]["epochs"] < 1:
+        raise ValueError("training epochs must be a positive integer")
     for batch in (config["training"]["global_batch_size"], config["evaluation"]["global_batch_size"]):
         if type(batch) is not int or batch < 1:
             raise ValueError("global batch sizes must be positive integers")

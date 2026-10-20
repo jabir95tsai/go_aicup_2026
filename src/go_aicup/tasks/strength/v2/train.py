@@ -1,11 +1,11 @@
 """Strength V2 ten-class training: global CE, seen/unseen whole-game monitors.
 
 Production: torchrun, single-node 1-8 CUDA GPUs, SyncBN and BF16; one
-forward/backward/update per global batch. Every evaluate_every_steps updates
-and after the last update, the frozen model scores monitor_unseen and
-monitor_seen (whole games, all labelled-player moves, no D4). After the epoch
-it scores every valid_unseen and valid_seen game. Dataset preparation is a
-separate explicit command.
+forward/backward/update per global batch with a fixed learning rate. Every
+evaluate_every_steps updates and after training, the frozen model scores
+monitor_unseen and monitor_seen (whole games, all labelled-player moves, no
+D4). After the configured epochs it scores every valid_unseen and valid_seen
+game. Dataset preparation is a separate explicit command.
 
 Final run directory: model.pt, losses.npy, validation_unseen_category.npy,
 validation_seen_category.npy. Checkpoints, permutations and logs are removed
@@ -37,7 +37,7 @@ from go_aicup.tasks.strength.shared.runtime import (autocast_context, barrier, c
     distributed, file_hash, load_dataset_manifest, model_state_hash, object_hash, on_rank_zero,
     setup_distributed, write_json)
 from go_aicup.tasks.strength.shared.training import (configure_torch, environment, log_event,
-    restore_rng, rng_state, scheduler_for, seed_process)
+    restore_rng, rng_state, seed_process)
 from go_aicup.tasks.strength.v2.aggregate import monitor_metrics
 from go_aicup.tasks.strength.v2.config import DEFAULT_CONFIG, read_config
 from go_aicup.tasks.strength.v2.infer import infer_games
@@ -159,8 +159,8 @@ def train(config: dict, *, resume: Path | None = None,
         optimizer = torch.optim.AdamW(model.parameters(), **config["optimizer"])
         batches_per_epoch = math.ceil(manifest["sets"]["train"]["num_samples"] /
                                       config["training"]["global_batch_size"])
-        scheduler = scheduler_for(optimizer, batches_per_epoch, config["training"]["warmup_fraction"],
-                                  config["training"]["minimum_lr_ratio"])
+        # Retain a checkpointable scheduler object as a no-op for fixed LR.
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda _: 1.0)
         scaler = torch.amp.GradScaler("cuda", enabled=config["precision"] == "fp16")
         state = {"epoch": 0, "next_batch": 0, "optimizer_steps": 0, "samples_seen": 0,
                  "permutation": None, "permutation_sha256": None, "gpu_seconds": 0.0,
@@ -233,14 +233,19 @@ def train(config: dict, *, resume: Path | None = None,
             if state["pending_evaluation"] and state["next_batch"] < batches_per_epoch and not skip_evaluation:
                 record_evaluation()
                 save("evaluated")
-            if state["epoch"] == 0:
-                on_rank_zero(lambda: create_permutation(directory / "permutations", len(dataset), config["seed"], 0), rank)
-                permutation = directory / "permutations" / "epoch_0000.npy"
-                state["permutation"] = str(permutation)
-                state["permutation_sha256"] = file_hash(permutation)
+            while state["epoch"] < config["training"]["epochs"]:
+                epoch = state["epoch"]
+                if state["permutation"] is None:
+                    on_rank_zero(lambda: create_permutation(
+                        directory / "permutations", len(dataset), config["seed"], epoch), rank)
+                    permutation = directory / "permutations" / f"epoch_{epoch:04d}.npy"
+                    state["permutation"] = str(permutation)
+                    state["permutation_sha256"] = file_hash(permutation)
+                else:
+                    permutation = Path(state["permutation"])
                 sampler = GlobalBatchSampler(len(dataset), config["training"]["global_batch_size"],
                                              rank=rank, world_size=world, permutation=permutation,
-                                             start_batch=state["next_batch"])
+                                             epoch=epoch, start_batch=state["next_batch"])
                 options = {key: config["loader"][key] for key in
                            ("num_workers", "prefetch_factor", "pin_memory", "persistent_workers")}
                 loader = make_loader(dataset, sampler, **options)
@@ -283,7 +288,7 @@ def train(config: dict, *, resume: Path | None = None,
                         now = time.monotonic()
                         log_event(directory, rank, {"event": "train", "optimizer_steps": state["optimizer_steps"],
                                                     "loss": state["last_batch_loss"], "grad_norm": float(norm.item()),
-                                                    "lr": scheduler.get_last_lr()[0],
+                                                    "lr": optimizer.param_groups[0]["lr"],
                                                     "mean_step_seconds": (now - window) / STEP_LOG_INTERVAL})
                         window = now
                     interval = config["training"]["evaluate_every_steps"]
@@ -301,7 +306,10 @@ def train(config: dict, *, resume: Path | None = None,
                         save("periodic")
                         checkpoint_time = window = time.monotonic()
                 del loader
-                state["epoch"] = 1
+                state["epoch"] += 1
+                state["next_batch"] = 0
+                state["permutation"] = None
+                state["permutation_sha256"] = None
             state["pending_evaluation"] = not skip_evaluation
             last_path = save("training_complete")
             if skip_evaluation:

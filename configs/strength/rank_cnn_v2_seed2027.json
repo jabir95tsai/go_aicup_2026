@@ -43,8 +43,6 @@
   "training": {
     "epochs": 1,
     "global_batch_size": 65536,
-    "warmup_fraction": 0.05,
-    "minimum_lr_ratio": 0.0,
     "gradient_clip_norm": 1.0,
     "checkpoint_seconds": 900,
     "max_runtime_seconds": null,
