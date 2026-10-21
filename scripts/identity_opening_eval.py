@@ -5,10 +5,15 @@ temperature) is chosen on split 0 by the official score over all questions;
 splits 1 and 2 (player-disjoint from 0 and each other) are only reported.
 Population priors use black games of players outside the evaluated pool.
 
-    PYTHONPATH=src python scripts/identity_opening_eval.py
+`--orient d4` canonicalises every game's opening (gallery, queries and
+population alike; RESULTS E0-001 default) and first checks that randomly
+rotating the query games leaves their canonical form unchanged (A-029).
+
+    PYTHONPATH=src python scripts/identity_opening_eval.py [--orient raw|d4]
 """
 from __future__ import annotations
 
+import argparse
 import json
 import time
 
@@ -19,7 +24,7 @@ from go_aicup.metrics import pid_report
 from go_aicup.paths import ROOT
 from go_aicup.tasks.identity import assign, data, opening
 
-OUT = ROOT / "outputs" / "pid_opening_v1"
+OUT = {"raw": ROOT / "outputs" / "pid_opening_v1", "d4": ROOT / "outputs" / "pid_opening_v1_d4"}
 TUNE_SPLIT, REPORT_SPLITS = 0, (1, 2)
 PLIES = 60
 
@@ -33,10 +38,22 @@ def evaluate(ranked_pos, candidates, q) -> pd.DataFrame:
 
 
 def main() -> int:
-    OUT.mkdir(parents=True, exist_ok=True)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--orient", choices=("raw", "d4"), default="raw")
+    orient = parser.parse_args().orient
+    out = OUT[orient]
+    out.mkdir(parents=True, exist_ok=True)
     meta = data.load_meta()
-    prefix = data.opening_prefix(meta, PLIES)
     gallery, questions = data.pid_splits(meta)
+    if orient == "raw":
+        prefix = data.opening_prefix(meta, PLIES)
+    else:
+        prefix = data.opening_prefix_d4(meta, PLIES)
+        rows = np.concatenate(list(questions["games"]))
+        g = np.random.default_rng(2026).integers(0, 8, len(rows))
+        rotated = data.d4_tables()[g[:, None], data.opening_prefix(meta, PLIES)[rows]]
+        assert np.array_equal(data.canonical_d4(rotated), prefix[rows]), "D4 canonical form not invariant"
+        print(f"D4 invariance check passed on {len(rows)} randomly rotated query games")
     hashes = opening.prefix_hashes(prefix)
     black = meta["color"].to_numpy() == "B"
     pid = meta["player_id"].astype(str).to_numpy()
@@ -128,7 +145,7 @@ def main() -> int:
                assign.hungarian_top5(assign.sinkhorn(assign.row_posterior(s, tau_hung))), c, q)
 
     res = pd.DataFrame(rows)
-    res.to_csv(OUT / "results.csv", index=False)
+    res.to_csv(out / "results.csv", index=False)
     report = res[res["split"].isin(REPORT_SPLITS) & res["variant"].isin(
         ["slot D=4 a=5 (E5)", "slot (best)", "pp (best)", "pp+slot (best)", "pp+slot+sinkhorn",
          "pp+slot+hungarian"])]
@@ -136,11 +153,11 @@ def main() -> int:
     top1 = report.pivot_table(index="variant", columns="k", values="top1", aggfunc="mean")
     gap = report.pivot_table(index="variant", columns="split", values="score",
                              aggfunc=lambda v: v.iloc[-1])  # 'all' row is last per split
-    summary = {"best": {m: dict(zip(("score", "model", "moves", "alpha", "beta", "slot_moves"), b))
+    summary = {"orient": orient, "best": {m: dict(zip(("score", "model", "moves", "alpha", "beta", "slot_moves"), b))
                         for m, b in best.items()},
                "tau_sinkhorn": tau_sink, "tau_hungarian": tau_hung,
                "tau_scores_split0": {str(k): v for k, v in tau_scores.items()}}
-    (OUT / "summary.json").write_text(json.dumps(summary, indent=2))
+    (out / "summary.json").write_text(json.dumps(summary, indent=2))
     print("\nofficial score, mean of splits 1-2\n", table[["5", "10", "15", "20", "all"]].round(4))
     print("\ntop-1, mean of splits 1-2\n", top1[["5", "10", "15", "20", "all"]].round(4))
     print("\nper split (all)\n", gap.round(4))

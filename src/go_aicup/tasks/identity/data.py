@@ -56,6 +56,50 @@ def opening_prefix(meta: pd.DataFrame, plies: int, cache_dir: Path = CACHE_DIR,
     return prefix
 
 
+def d4_tables() -> np.ndarray:
+    """int16 [8, 361] point maps of the 8 board symmetries (row 0 = identity)."""
+    r, c = np.divmod(np.arange(361), 19)
+    s = 18
+    maps = [(r, c), (c, r), (s - r, c), (r, s - c), (s - r, s - c),
+            (c, s - r), (s - c, r), (s - c, s - r)]
+    return np.stack([rr * 19 + cc for rr, cc in maps]).astype(np.int16)
+
+
+def canonical_d4(prefix: np.ndarray, chunk: int = 100_000) -> np.ndarray:
+    """Map each row to its lexicographically smallest D4 image over the whole prefix.
+
+    Exactly invariant to any D4 transform of a row (all 8 images form the same
+    set). Rows sharing their first t plies keep identical first t plies, so
+    exact-prefix matching is preserved. E0 keyed on 6 plies only, which is not
+    invariant when those plies are symmetric.
+    """
+    tables = d4_tables()
+    out = np.empty_like(prefix)
+    for lo in range(0, len(prefix), chunk):
+        images = tables[:, prefix[lo:lo + chunk]]               # [8, n, plies]
+        alive = np.ones(images.shape[:2], bool)
+        for t in range(images.shape[2]):
+            vals = np.where(alive, images[:, :, t], np.int16(32767))
+            alive &= vals == vals.min(axis=0)
+        best = alive.argmax(axis=0)
+        out[lo:lo + chunk] = images[best, np.arange(images.shape[1])]
+    return out
+
+
+def opening_prefix_d4(meta: pd.DataFrame, plies: int, out_dir: Path = OUT_DIR) -> np.ndarray:
+    """`canonical_d4(opening_prefix(...))`, cached as `train_prefix_{plies}_d4.npy`."""
+    path = out_dir / f"train_prefix_{plies}_d4.npy"
+    if path.exists():
+        prefix = np.load(path)
+        if prefix.shape == (len(meta), plies):
+            return prefix
+    prefix = canonical_d4(opening_prefix(meta, plies, out_dir=out_dir))
+    tmp = path.with_suffix(".tmp.npy")
+    np.save(tmp, prefix)
+    tmp.replace(path)
+    return prefix
+
+
 def pid_splits(meta: pd.DataFrame, out_dir: Path = OUT_DIR) -> tuple[pd.DataFrame, pd.DataFrame]:
     """(gallery, questions) for all synthetic pools, cached as parquet."""
     gallery_path, question_path = out_dir / "pid_gallery.parquet", out_dir / "pid_questions.parquet"

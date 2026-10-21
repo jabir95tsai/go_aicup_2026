@@ -2,7 +2,7 @@
 import numpy as np
 from scipy.special import logsumexp
 
-from go_aicup.tasks.identity import assign, opening
+from go_aicup.tasks.identity import assign, data, opening
 
 
 def _games(lines):
@@ -57,3 +57,17 @@ def test_sinkhorn_is_doubly_stochastic_and_hungarian_first():
     ranked = assign.hungarian_top5(assign.row_posterior(np.pad(scores, ((0, 0), (0, 1)))))
     assert sorted(ranked[:, 0]) == [0, 1, 2, 3]
     assert all(len(set(r)) == 5 for r in ranked)
+
+
+def test_canonical_d4_is_invariant_and_keeps_shared_prefixes():
+    rng = np.random.default_rng(0)
+    tables = data.d4_tables()
+    diag = [0, 20, 40, 60, 80, 100]                     # on the main diagonal: symmetric under transpose
+    prefix = np.array([diag + [1, 2], diag + [19, 38], list(rng.integers(0, 361, 8))], np.int16)
+    canon = data.canonical_d4(prefix)
+    for g in range(8):
+        np.testing.assert_array_equal(data.canonical_d4(tables[g][prefix]), canon)
+    assert any((tables[g][prefix[0]] == canon[0]).all() for g in range(8))
+    # rows 0 and 1 are transposes after 6 shared plies: one canonical form, prefix kept
+    np.testing.assert_array_equal(canon[0], canon[1])
+    np.testing.assert_array_equal(data.canonical_d4(prefix[:, :6])[0], canon[0, :6])
