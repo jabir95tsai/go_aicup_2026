@@ -622,3 +622,18 @@ Valid-S 同順序：0.5173／0.4969／0.5528／0.5941。log-prob 平均（每盤
 - **處置：** 依 E0-001，pp+slot＋L6 的 D4 版成為競賽一的預設候選；raw 版保留，等 11/04 確認真實資料的方位分布後再比較。L6 依賴「題目與候選人一對一」的前提，這點仍未確認（同 A-027）。合成驗證仍接近飽和（≥0.98），無法再用來分辨更細的差異。
 
 程式：`data.{d4_tables,canonical_d4,opening_prefix_d4}`；`scripts/identity_opening_eval.py --orient d4`（預設 raw，與 A-027 相同）。產物：`outputs/pid_opening_v1_d4/{results.csv,summary.json}`、`outputs/pid_opening_v1_d4.log`、`data/processed/identity/train_prefix_60_d4.npy`。
+
+
+### D-002 計畫統整與決策（2026-10-22，使用者確認）
+
+**性質：** 計畫修訂，不是新實驗，沒有新的模型分數。EXECUTION_PLAN.md 改寫為統整版（T1–T6），取代 10/05 的 E0–E6（D-001）與 10/20 的 R1–R6（A-026）。同步更新 CLAUDE.md（§0 baseline 表、V2 正式解碼段落、§7 路線圖、§11 第 5–6 項）與 STRATEGY.md §1。
+
+**使用者確認的決策（全部採建議選項）：**
+- **D1：** 競賽二正式解碼改用 C2（log-prob 平均＋每 k 溫度＋`score_rank`），取代 10/19 的機率平均規則。A-024 模型的 Valid-U Equal-k：0.4910 → 0.5553。測試題的 k 分布未知，T4 用一次 LB 探針確認。
+- **D2：** 競賽一保險模型沿用 V2 盤面 ResNet 當逐手 encoder → 盤內平均 → GE2E。D-001 E2 的序列 Transformer 版留到 11/04 後再決定。
+- **D3：** HumanSL／KataGo 特徵延到管線完成後，只當 ensemble 元件。
+- **D4：** 之後的 V2 run 固定切分 seed 2027，只改初始化 seed。理由（本次新查到）：`make_strength_v2_split` → `make_rank_folds(seed)`，連 fold −1 的 holdout 也依 seed 重抽。所以 A-028（seed2026）的訓練集可能含 A-024 的 Valid-U 與 holdout 玩家，A-028 不能當 ensemble 元件；單獨評估 A-024 不受影響。
+- **D5：** 依子目錄分工：一人負責競賽一保險模型，一人負責兩賽提交管線與 Day-0 稽核。具體人選待與 jb 確認。
+- **T2 gate：** 競賽一保險模型在「去掉前 20 手」的合成題上，split 1–2 平均 ≥0.2845，且與開局模型合併後，不去開局的分數不下降。競賽二 ensemble 在共同 Valid-U 上比單模型高 ≥0.005，且以玩家為群組的 bootstrap 95% 區間下界 >0。
+
+**A-025 產物補建：** A-025 記載的 `outputs/v2_agg_calibration/result.json` 不在工作目錄中（原因未知）。用同一腳本 `scripts/v2_aggregation_calibration.py --run-dir outputs/v2_strength` 在登入節點 CPU 重跑，結果與 A-025 逐位一致：T_k＝4.4157／6.2373／7.6736／8.1283；C2 的 U＝0.5030／0.5501／0.5716／0.5965，Equal-k 0.5553。log 在 `outputs/v2_agg_calibration.log`。

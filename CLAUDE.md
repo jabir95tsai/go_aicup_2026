@@ -29,10 +29,10 @@
 
 ### Baseline 分數 ✅（= 報告／獎狀門檻，Private LB 須超過）
 
-| | 官方 baseline | 我們目前最接近的本地數字（A-006） |
+| | 官方 baseline | 我們目前的本地數字（2026-10-22 更新） |
 |---|---|---|
-| 競賽二（棋力） | **0.4631** | 26 維手工特徵線性探針 0.4117（k=5/10/15/20：0.350/0.398/0.440/0.459）→ **還沒過 baseline** |
-| 競賽一（玩家辨識） | **0.2845** | 黑前 4 手 naive Bayes（零訓練）0.929（0.809/0.939/0.977/0.989）→ **遠高於 baseline 3 倍** |
+| 競賽二（棋力） | **0.4631** | V2 ResNet（A-024）＋C2 正式解碼（A-025）：Valid-U Equal-k **0.5553**（k=5/10/15/20：0.503/0.550/0.572/0.597）→ **已過 baseline**（本地合成題目，不是 LB）。舊的手工特徵線性探針為 0.4117（A-006） |
+| 競賽一（玩家辨識） | **0.2845** | 開局 pp+slot、D4 正規化（A-029）：合成驗證 0.9494（0.838/0.971/0.989/1.000），加 L6 Hungarian 0.9829 → **遠高於 baseline，但合成驗證已飽和，且與 baseline 的落差未解（見下方警訊）**。零訓練的黑前 4 手 naive Bayes 為 0.929（A-006） |
 
 ⚠️ **競賽一的落差是警訊，不是好消息：** 零訓練計數模型在合成驗證拿 0.93，官方 baseline 卻只有 0.28。
 可能原因（**未知**，測試集發布後第一件事查）：(a) 官方 baseline 很弱；(b) 真實候選庫／查詢盤的切法（例如依時間切）讓開局習慣不穩定；
@@ -104,6 +104,8 @@ H200 佇列限制**每張 GPU 最多 12 CPU 核心、200GB 主記憶體**；200G
 **棋力 V2 計畫（2026-10-19 更新）：** 依使用者要求，沿用 V1 ResNet，最後線性 head 由 `361→256→1` 改為 `361→256→10`，以 softmax 輸出十級機率、逐樣本 cross entropy 訓練（訓練 loss 直接接收 logits）。此方案取代原錨點 MSE＋間隔懲罰；單盤分類取指定玩家所有手的 softmax confidence 總和最大類別；多盤題目已確認先算每盤十類平均機率，再按每盤等權平均；多盤題目的正式解碼已確認使用相鄰級加權的 `metrics.score_rank`，不擬合 scalar 切點。每 100 steps 記錄最近 training batch loss；validation 改為從既有 split 每級固定抽取 5,000 盤、共 50,000 盤，推論指定玩家全部落子（手數不固定）計算逐手平均 loss 與 validation 官方分數；每 100 steps 與最後一步的 validation 官方分數已確認採單盤：每盤指定玩家全部落子的 confidence 總和 argmax 分類，再按盤等權平均官方公式得分，作為單盤診斷成績，中途不另建立多盤題目；最終全量評估維持原 200,000 盤 validation，全部訓練結束保存完整 validation 每盤分類結果，輸出目錄固定為 `outputs/v2_strength/`，正式檔案為 `model.pt`、`losses.npy`、`validation_category.npy`；`model.pt` 不保存題目雜湊、聚合規則或驗證報告，不額外計算或保存最終全量逐手 CE；分類報表於評估時在 CPU 重算，loss 使用 `losses.npy`；保存每盤 confidence 總和與手數，不要求保存全量逐手機率或最終 training 推論。最終評估規劃由 CPU 直接讀取已存每盤 confidence、重用固定 validation 題目，依使用者要求不另做棋局、手數、confidence 或資料雜湊的完整性檢查，報告單盤與 k=5／10／15／20 成績；題目 argmax／score_rank 分開列報，`score_rank` 為已確認的正式解碼，argmax 僅作診斷，不依 validation 自動挑選解碼。V2 依使用者要求不計算或呈現 MAE。視覺化規劃包含 loss／score 曲線、單盤與各 k 混淆矩陣、各級成績、平均 confidence 熱圖，圖表由保存產物重建，評估後僅以 `.png` 格式直接保存至 `output-dir/plot/`（預設 `outputs/v2_strength/plot/`），不使用 `plt.show()`，不另設顯示或匯出目錄選項。詳見 [STRENGTH_V2_PLAN.md](STRENGTH_V2_PLAN.md)；依使用者要求不進行 V1／V2 比較，不安排 V1 對照訓練、比較圖或相對增益 gate；已實作 V2 第二步 config／資料準備入口與整盤監控索引，以及第三步十類 logits 模型與 FP32 全域樣本平均 CE loss（含尾批 mask）；CPU／兩程序 Gloo loss 與梯度驗證通過，CUDA／SyncBN 尚未驗收，操作見 `src/go_aicup/tasks/strength/README.md`；推論聚合、訓練與評估待實作，未啟動官方全量資料準備或訓練。
 
 **棋力 V2 首輪切分與 gate（2026-10-19 使用者確認）：** 改 player-disjoint：fold 0＝Valid-U、fold 1–4 每玩家顏色組留出 10%＝Valid-S、fold −1 不使用；監控每級 U／S 各 2,500 盤，S8b 實測單次監控占 100 steps 訓練 32.4%，依規則改每 200 steps（A-023）。模型選擇與 baseline 一律看 Valid-U 四桶等權 `score_rank`（≥0.4631 過 baseline、≥0.47 列提交候選）；G＝Equal-k(S)−Equal-k(U)：≤0.03 維持、≤0.08 注意、>0.08 須加反記憶對策。每盤另存 log-prob 總和，機率平均與 log-prob 聚合的 CPU 比較不論分數都要做。S4 推論聚合與 S4b 切分已完成（`RESULTS.md` A-018、A-019）；正式 1 epoch run 提交前須先回報實測估時並經使用者確認。
+
+**棋力 V2 正式解碼與切分 seed 更新（2026-10-22 使用者確認，`RESULTS.md` D-002）：** 題目聚合改用 A-025 的 C2：每盤指定玩家落子的 log-prob 平均，題內各盤等權平均後，乘上每個 k 各自的溫度 T_k（4.42／6.24／7.67／8.13，只在 Valid-S 的 S-fit 擬合，存於 `outputs/v2_agg_calibration/result.json`），softmax 後以 `score_rank` 解碼；取代上方 10/19 的「每盤十類平均機率」規則，舊規則只保留作對照。A-024 模型在 Valid-U 的 Equal-k 由 0.4910 升為 0.5553，四個 k 桶都提升。之後的 V2 run 固定切分 seed 2027（與 A-024 相同），只改初始化 seed；A-028（seed2026）的切分不同，不能當 ensemble 元件。
 
 ### 仍待確認 ⏳
 
@@ -275,19 +277,20 @@ H200 佇列限制**每張 GPU 最多 12 CPU 核心、200GB 主記憶體**；200G
 
 ---
 
-## 7. 模型路線圖（2026-10-05 修訂：先文獻對照，再選主力）
+## 7. 模型路線圖（2026-10-22 修訂，詳見 EXECUTION_PLAN.md）
 
-| 階段 | 方法 | 決策目的 |
+10/05 的 E0–E6 文獻對照路線（D-001）已由 EXECUTION_PLAN.md 的 T1–T6 時程取代（D-002）。E0、E1 已完成；E2 以下依下表改排或延後。
+
+| 階段 | 日期 | 內容 |
 |------|------|------|
-| E0 驗證 | 固定題組、方位擾動與開局集中度分層 | 釐清合成驗證限制；不能模擬未知時間切分 |
-| E1 基線 | 玩家黑前 4 手 Naive Bayes；棋力手工統計＋GBDT | 建立可重現比較基準 |
-| E2 文獻對照 | 棋力小樣本 HumanSL＋十類分類器；玩家盤面 CNN＋手序列聚合＋GE2E＋多盤平均 | 提前量盤面資訊的效益與成本，不稱完整论文重現 |
-| E3 表示比較 | 盤面與座標 Transformer 在固定資料、loss、聚合條件下比較 | 不預設 Transformer 勝出；任務分別選擇 |
-| E4 擴充 | SE 式排序、ArcFace、attention、gallery 微調、引擎 loss 分項消融 | 每次只改一項；未通過 gate 不擴大 |
-| E5 規模化 | 勝出路線先做資料量曲線，再考慮 1M 盤與融合 | 吞吐、儲存、效益實測後才配置算力 |
-| E6 校準 | 11/04 後真實資料稽核與受控 LB 探針 | 由使用者上傳；校準後定案 |
+| T1 管線 | 10/22–10/27 | 兩賽端到端提交管線（官方 CSV → 提交檔），用假測試檔彩排；Day-0 稽核腳本 |
+| T2 保險模型 | 10/23–11/01 | 競賽一：V2 盤面 ResNet 當逐手 encoder → 盤內平均 → GE2E，作為不靠開局的保險；競賽二：固定切分 seed 2027 的多初始化 seed ensemble |
+| T3 凍結彩排 | 11/02–11/03 | 凍結程式重跑；報告骨架 |
+| T4 Day-0 | 11/04–11/06 | 真實資料稽核、格式上傳、真實候選庫自驗、L10／L4／方位／一對一判斷 |
+| T5 校準 | 11/07–11/20 | 受控 LB 探針、ensemble（≤5 元件）；HumanSL／KataGo 特徵若要做，只能在此當 ensemble 元件 |
+| T6 收尾 | 11/21–11/24 | 凍結；使用者手動做最後一次上傳 |
 
-SE 的群組排序與手級十類分類不是同一方法。手數增加不代表獨立樣本等量增加。具體提案須依第 9 節先討論數值 gate、預期增益（未知可明寫）及成本，不能由本路線圖推定已批准訓練。詳見 EXECUTION_PLAN.md 與 STRATEGY.md。
+已砍：競賽二 GBDT（E1-001）、座標 Transformer 預訓與 scaling curve、家族 B 生成式。延後到 T5：SE 排序、ArcFace、attention 聚合、gallery 微調、L9。具體提案仍須依第 9 節先討論數值 gate、預期增益（未知可明寫）及成本。
 
 ---
 
@@ -369,5 +372,5 @@ project/
 2. **`preprocess.py`（Day 1–2）**：一次性轉檔，1M 盤 → memmap，之後所有訓練吃這份
 3. **`cv.py`（Day 2）**：GroupKFold by player_id + 競賽一的合成候選庫產生器，附零重疊 assert
 4. **`feature_policy.py`（Day 2）**：把第 4 節的檢查清單寫成 code（禁用欄位名單 + fold-safe encoder）
-5. **後續基線與對照**：依第 7 節與 EXECUTION_PLAN.md 執行；11/04 前僅本地驗證，不安排官方上傳。
-6. **主力未定案**：先完成文獻對照及盤面／序列比較，再決定是否擴大訓練。
+5. **後續工作**：依第 7 節與 EXECUTION_PLAN.md 的 T1–T6 執行；11/04 前僅本地驗證，不安排官方上傳。
+6. **主力現況（2026-10-22）**：競賽二為 V2 ResNet＋C2；競賽一為 D4 開局模型＋L6，另做不靠開局的保險模型。
