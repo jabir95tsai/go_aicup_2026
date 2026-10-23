@@ -299,6 +299,28 @@ python scripts/plot_rank_v1.py --run-dir outputs/rank_cnn_v1_seed2027 --skip-con
 
 舊 seed2026 run 的 JSONL／evaluation 格式仍可繪圖：保留 `--evaluation-dir`、`--smooth-window` 與原有 hash 檢查；validation batch loss 缺少或為 null 時警告並略過，仍畫其他資料。舊格式不依賴 PyTorch。
 
+## 提交管線（T1，2026-10-22）
+
+官方 CSV → GameStore → 兩賽各自的模型 → 暫定格式提交檔。**提交格式要到 11/04 sample_submission 才知道**，目前寫的是暫定格式（競賽二 `question_id,rank`；競賽一 `question_id,prediction`，top-5 以空白分隔），屆時只改輸出那一段。
+
+```bash
+# 0. 官方 CSV 放 data/raw/ → GameStore（寬鬆解析：pass、setup 石、奇怪 header 只計數不中斷）
+python -m go_aicup.data.preprocess release --raw-dir data/raw --out-dir data/processed
+# 1. Day-0 稽核（EXECUTION_PLAN §5 的 1–7、9；L10 另跑）
+python scripts/day0_audit.py --store-dir data/processed --raw-dir data/raw --out outputs/day0_audit/report.json
+# 2. 競賽一：public／private 各自獨立（CPU，每個池約 40 秒）
+python -m go_aicup.tasks.identity.predict --store-dir data/processed --pool pool_public --questions pid_public \
+    --out-dir outputs/pid_submit/public --submission submissions/pid/public.csv
+python -m go_aicup.tasks.identity.predict --store-dir data/processed --pool pool_private --questions pid_private \
+    --out-dir outputs/pid_submit/private --submission submissions/pid/private.csv
+# 3. 競賽二：prepare（CPU）→ infer（1 張 GPU，Slurm dev）→ aggregate（C2＋score_rank）
+sbatch slurm/strength_predict.slurm   # 預設 data/processed → outputs/rank_submit/<name>/submission.csv
+```
+
+- 競賽一預設 D4 正規化＋pp+slot＋Sinkhorn／Hungarian（A-029）；`--orient raw`、`--assign sinkhorn|none` 留給 11/04 稽核後切換。每盤要有 ≥16 手且前 16 手黑白交替才用於開局分數；無可用盤的題目所有候選人同分（有計數）。
+- 競賽二使用 `outputs/v2_strength/model.pt`（A-024）與 `outputs/v2_agg_calibration/result.json` 的 T_k；`num_games` 不在 5／10／15／20 時用最近的 k；整題無可用盤時用其他題的平均機率（有計數）。
+- **彩排：** `python scripts/make_fake_release.py` 把 Valid-U 題目與合成候選庫 split 1／2 轉成官方寬格式（`outputs/rehearsal/raw/`），跑完上面 0–3 步（`--raw-dir outputs/rehearsal/raw --out-dir outputs/rehearsal/store` 等）後，`python scripts/rehearsal_check.py` 檢查 T1 gate。
+
 ## 結構
 
 詳見 CLAUDE.md 第 10 節。重點：

@@ -37,7 +37,7 @@ from go_aicup.tasks.strength.shared.runtime import (autocast_context, barrier, c
     distributed, file_hash, load_dataset_manifest, model_state_hash, object_hash, on_rank_zero,
     setup_distributed, write_json)
 from go_aicup.tasks.strength.shared.training import (configure_torch, environment, log_event,
-    restore_rng, rng_state, seed_process)
+    restore_rng, rng_state, scheduler_for, seed_process)
 from go_aicup.tasks.strength.v2.aggregate import monitor_metrics
 from go_aicup.tasks.strength.v2.config import DEFAULT_CONFIG, read_config
 from go_aicup.tasks.strength.v2.infer import infer_games
@@ -159,8 +159,14 @@ def train(config: dict, *, resume: Path | None = None,
         optimizer = torch.optim.AdamW(model.parameters(), **config["optimizer"])
         batches_per_epoch = math.ceil(manifest["sets"]["train"]["num_samples"] /
                                       config["training"]["global_batch_size"])
-        # Retain a checkpointable scheduler object as a no-op for fixed LR.
-        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda _: 1.0)
+        if "warmup_fraction" in config["training"]:
+            # A-024 recipe: linear warmup, then cosine decay over all configured epochs.
+            scheduler = scheduler_for(optimizer, batches_per_epoch * config["training"]["epochs"],
+                                      config["training"]["warmup_fraction"],
+                                      config["training"]["minimum_lr_ratio"])
+        else:
+            # Retain a checkpointable scheduler object as a no-op for fixed LR.
+            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda _: 1.0)
         scaler = torch.amp.GradScaler("cuda", enabled=config["precision"] == "fp16")
         state = {"epoch": 0, "next_batch": 0, "optimizer_steps": 0, "samples_seen": 0,
                  "permutation": None, "permutation_sha256": None, "gpu_seconds": 0.0,

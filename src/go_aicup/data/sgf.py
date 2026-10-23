@@ -94,3 +94,49 @@ def parse(sgf: str) -> Game:
     game.moves = np.asarray([point_to_index(node[2:4]) for node in nodes], dtype=np.int16)
     game.colors = np.asarray([BLACK if node[0] == "B" else WHITE for node in nodes], dtype=np.int8)
     return game
+
+
+_NODE_RE = re.compile(r";\s*([BW])\[([^\]]*)\]")
+_SETUP = ("AB", "AW", "AE", "HA")
+
+
+def parse_lenient(sgf: str) -> Game:
+    """Release-file parser: never rejects a whole game for an unexpected header.
+
+    Every `;B[..]` / `;W[..]` node is read in order. Passes (`[]`, `[tt]`) are
+    dropped and counted in props["_passes"]; colours stay as written, so later
+    code must not infer colour from parity. Setup stones or handicap are kept
+    as errors (the replayed board would be wrong) but moves are still returned.
+    The training files never need this path (strict `parse`, RESULTS A-001).
+    """
+    game = Game()
+    if not isinstance(sgf, str) or not sgf.strip():
+        game.errors.append("empty")
+        return game
+    for match in _PROP_RE.finditer(sgf):
+        key, raw = match.group(1), match.group(2)
+        if key not in ("B", "W"):
+            game.props.setdefault(key, []).extend(_VAL_RE.findall(raw))
+    moves, colors, passes, bad = [], [], 0, 0
+    for color, value in _NODE_RE.findall(sgf):
+        if value in ("", "tt"):
+            passes += 1
+            continue
+        index = point_to_index(value)
+        if index == INVALID:
+            bad += 1
+            continue
+        moves.append(index)
+        colors.append(BLACK if color == "B" else WHITE)
+    game.moves = np.asarray(moves, dtype=np.int16)
+    game.colors = np.asarray(colors, dtype=np.int8)
+    game.props["_passes"] = [str(passes)]
+    if bad:
+        game.errors.append(f"{bad} off-board moves dropped")
+    if any(key in game.props for key in _SETUP):
+        game.errors.append("setup stones or handicap present")
+    if game.board_size not in (None, BOARD_SIZE):
+        game.errors.append(f"board size {game.board_size}")
+    if not moves:
+        game.errors.append("no moves")
+    return game

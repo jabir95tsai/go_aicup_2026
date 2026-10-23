@@ -11,12 +11,21 @@ from pathlib import Path
 from go_aicup.artifacts import file_hash, object_hash, write_json
 
 
+def dataset_seed(config: dict) -> int:
+    """Seed of the split, questions and monitors: `split_seed` if set, else `seed`.
+
+    Separate from the training seed so several initialisations can share one
+    split and its Valid-U players (RESULTS D-002, decision D4).
+    """
+    return config.get("split_seed", config["seed"])
+
+
 def load_dataset_manifest(config: dict) -> dict:
     directory = Path(config["paths"]["dataset_dir"])
     record = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
     cache = json.loads((Path(config["paths"]["cache_dir"]) / "manifest.json").read_text(encoding="utf-8"))
     expected = {"cache_build_id": cache["build_id"], "split_config": config["split"],
-                "questions_config": config["questions"], "seed": config["seed"]}
+                "questions_config": config["questions"], "seed": dataset_seed(config)}
     if "monitoring" in config:
         expected["monitoring_config"] = config["monitoring"]
     if record.get("complete") is not True or record.get("format_version") != 2:

@@ -402,6 +402,87 @@ def convert_training(input_directory: Path = DEFAULT_INPUT, directory: Path = DE
     return manifest_path
 
 
+def write_store_cache(moves: np.ndarray, colors: np.ndarray, meta: pd.DataFrame, directory: Path,
+                      *, games_per_shard: int = 4096) -> Path:
+    """Build a BoardCache directory from an in-memory GameStore (release files).
+
+    `meta` needs `offset`, `length` and the judged player's `color` (B/W);
+    `rank_id` is optional (0 placeholder for unlabelled test games, never a
+    feature). Games without moves are skipped; cache row i is store row
+    games.parquet["store_row"][i]. Planes are replayed exactly as in
+    _write_shard, so identical moves give byte-identical packed boards.
+    """
+    from go_aicup.features.sgf_planes import moves_to_planes
+
+    directory = Path(directory).resolve()
+    if directory.exists() and any(directory.iterdir()):
+        raise ValueError(f"cache directory is nonempty: {directory}")
+    directory.mkdir(parents=True, exist_ok=True)
+    rows = np.flatnonzero(meta["length"].to_numpy() > 0)
+    if not len(rows):
+        raise ValueError("no game has moves")
+    player_color = meta["color"].map({"B": 0, "W": 1})
+    if player_color.iloc[rows].isna().any():
+        raise ValueError("every game needs a B/W player color")
+    rank_id = meta["rank_id"].to_numpy(np.uint8) if "rank_id" in meta else np.zeros(len(meta), np.uint8)
+    build_id = hashlib.sha256(json.dumps({"rows": int(len(rows)), "plies": int(meta["length"].sum()),
+                                          "time": time.time()}).encode()).hexdigest()
+    records, summaries = [], []
+    for shard_id, start in enumerate(range(0, len(rows), games_per_shard)):
+        chunk = rows[start:start + games_per_shard]
+        prefix = f"shard_{shard_id:05d}"
+        lengths = meta["length"].to_numpy(np.int64)[chunk]
+        total = int(lengths.sum())
+        boards = np.empty((total, 2, PLANE_BYTES), np.uint8)
+        shard_moves = np.empty(total, np.int16)
+        shard_colors = np.empty(total, np.int8)
+        offset = 0
+        for store_row, length in zip(chunk, lengths):
+            begin = int(meta["offset"].iloc[store_row])
+            game_moves = np.asarray(moves[begin:begin + length])
+            game_colors = np.asarray(colors[begin:begin + length])
+            span = slice(offset, offset + int(length))
+            boards[span] = pack_planes(moves_to_planes(game_moves, game_colors))
+            shard_moves[span], shard_colors[span] = game_moves, game_colors
+            color = int(player_color.iloc[store_row])
+            records.append({"game_index": len(records), "store_row": int(store_row), "shard_id": shard_id,
+                            "local_offset": offset, "length": int(length), "rank_id": int(rank_id[store_row]),
+                            "player_color": color,
+                            "player_ply_count": int(np.count_nonzero(game_colors == color))})
+            offset += int(length)
+        files = {}
+        for filename, array in ((f"{prefix}.npy", boards), (f"{prefix}_moves.npy", shard_moves),
+                                (f"{prefix}_colors.npy", shard_colors)):
+            np.save(directory / filename, array)
+            files[filename] = {"bytes": (directory / filename).stat().st_size,
+                               "sha256": _sha256(directory / filename),
+                               "dtype": str(array.dtype), "shape": list(array.shape)}
+        summary = {"format_version": FORMAT_VERSION, "build_id": build_id, "shard_id": shard_id,
+                   "rank": "release", "source_start": int(start), "game_start": int(start),
+                   "num_games": len(chunk), "total_ply": total,
+                   "player_ply_count": int(sum(r["player_ply_count"] for r in records[start:])),
+                   "files": files, "seconds": 0.0}
+        _json_write(directory / f"{prefix}.done.json", summary)
+        summaries.append(summary)
+    games = pd.DataFrame(records)
+    for column, dtype in {"game_index": "int64", "store_row": "int64", "shard_id": "int32",
+                          "local_offset": "int64", "length": "int32", "rank_id": "uint8",
+                          "player_color": "uint8", "player_ply_count": "int32"}.items():
+        games[column] = games[column].astype(dtype)
+    games_path = directory / "games.parquet"
+    games.to_parquet(games_path, index=False)
+    manifest = {"format_version": FORMAT_VERSION, "codec": CODEC, "bitorder": BITORDER,
+                "plane_shape": [2, 19, 19], "packed_shape": [2, PLANE_BYTES], "dtype": "uint8",
+                "channels": ["black", "white"], "padding_bits": 7, "build_id": build_id,
+                "source": "release store", "complete": True, "num_games": len(games),
+                "total_ply": int(games["length"].sum()),
+                "player_ply_count": int(games["player_ply_count"].sum()),
+                "games": {"file": "games.parquet", "bytes": games_path.stat().st_size,
+                          "sha256": _sha256(games_path)}, "shards": summaries}
+    _json_write(directory / "manifest.json", manifest)
+    return directory
+
+
 class BoardCache:
     """Read-only, process-local memmaps with an LRU limit on open shards.
 

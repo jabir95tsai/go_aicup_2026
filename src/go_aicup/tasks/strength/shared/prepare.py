@@ -16,7 +16,7 @@ import pandas as pd
 from go_aicup.data.board_cache import BoardCache, _close_mmap
 from go_aicup.data.cv import (make_strength_v1_questions, make_strength_v1_split,
                               make_strength_v2_split, strength_v1_overlap, strength_v2_overlap)
-from go_aicup.tasks.strength.shared.runtime import (check_index_hashes,
+from go_aicup.tasks.strength.shared.runtime import (check_index_hashes, dataset_seed,
     file_hash, load_dataset_manifest, object_hash, write_json)
 
 
@@ -103,17 +103,18 @@ def player_disjoint_sets(meta: pd.DataFrame, config: dict):
     (games_per_rank per rank and per set).
     """
     options = {key: value for key, value in config["split"].items() if key != "policy"}
-    table = make_strength_v2_split(meta, config["seed"], **options)
+    seed = dataset_seed(config)
+    table = make_strength_v2_split(meta, seed, **options)
     tables = {"strength_v2_games.parquet": table}
     selections = {"train": table.loc[table["split"] == "train", "game_index"].to_numpy()}
     monitors = {}
     for offset, name in enumerate(("valid_unseen", "valid_seen")):
         questions, _ = make_strength_v1_questions(
-            table, name, config["questions"]["validation"], config["seed"] + 2 + offset)
+            table, name, config["questions"]["validation"], seed + 2 + offset)
         tables[f"strength_v2_{name}_questions.parquet"] = questions
         selections[name] = table.loc[table["split"] == name, "game_index"].to_numpy()
         monitors[f"monitor_{name.removeprefix('valid_')}"] = select_monitoring_games(
-            table, config["seed"] + offset, config["monitoring"]["games_per_rank"], name)
+            table, seed + offset, config["monitoring"]["games_per_rank"], name)
     return (table, tables, selections, monitors, strength_v2_overlap(table),
             "Player-disjoint folds; valid_seen players also appear in train.")
 
@@ -125,7 +126,7 @@ def prepare(config: dict) -> Path:
     try:
         identity = {"format_version": 2, "cache_build_id": cache.manifest["build_id"],
                     "split_config": config["split"], "questions_config": config["questions"],
-                    "seed": config["seed"],
+                    "seed": dataset_seed(config),
                     "generator_sha256": {name: file_hash(path) for name, path in {
                         "cv.py": Path(__file__).resolve().parents[3] / "data" / "cv.py",
                         "shared/prepare.py": Path(__file__),

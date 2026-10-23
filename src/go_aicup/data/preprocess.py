@@ -24,6 +24,7 @@ Usage:
     python -m go_aicup.data.preprocess train              # convert + combine + verify
     python -m go_aicup.data.preprocess train --verify-only
     python -m go_aicup.data.preprocess release            # pools / questions present on disk
+    python -m go_aicup.data.preprocess release --raw-dir outputs/rehearsal/raw --out-dir outputs/rehearsal/store
 """
 
 from __future__ import annotations
@@ -70,17 +71,21 @@ def sgf_hash(content: str) -> int:
     return int.from_bytes(digest, "little") & 0x7FFF_FFFF_FFFF_FFFF
 
 
-def _parse_batch(contents: list[str]):
+def _parse_batch(contents: list[str], lenient: bool = False):
     moves, colors = [], []
     lengths = np.zeros(len(contents), dtype=np.int32)
     n_errors = np.zeros(len(contents), dtype=np.int16)
     alternating = np.zeros(len(contents), dtype=bool)
     first_color = np.full(len(contents), -1, dtype=np.int8)
     hashes = np.zeros(len(contents), dtype=np.int64)
+    passes = np.zeros(len(contents), dtype=np.int16)
+    props = []
     for i, content in enumerate(contents):
-        game = sgflib.parse(content)
-        if not game.ok:
+        game = sgflib.parse_lenient(content) if lenient else sgflib.parse(content)
+        if not game.ok and not lenient:
             raise ValueError(f"batch game {i}: {'; '.join(game.errors)}")
+        passes[i] = int(game.props.get("_passes", ["0"])[0])
+        props.append(",".join(sorted(k for k in game.props if not k.startswith("_"))))
         moves.append(game.moves)
         colors.append(game.colors)
         lengths[i] = game.n_moves
@@ -92,17 +97,19 @@ def _parse_batch(contents: list[str]):
         hashes[i] = sgf_hash(content) if isinstance(content, str) else 0
     flat_moves = np.concatenate(moves) if moves else np.empty(0, np.int16)
     flat_colors = np.concatenate(colors) if colors else np.empty(0, np.int8)
-    return flat_moves, flat_colors, lengths, n_errors, alternating, first_color, hashes
+    return (flat_moves, flat_colors, lengths, n_errors, alternating, first_color, hashes, passes,
+            np.asarray(props, dtype=object))
 
 
-def parse_many(contents: list[str], workers: int, batch: int = 5_000):
+def parse_many(contents: list[str], workers: int, batch: int = 5_000, lenient: bool = False):
     """Parse a list of SGF strings in parallel, preserving order."""
     batches = [contents[i:i + batch] for i in range(0, len(contents), batch)]
+    flags = [lenient] * len(batches)
     if workers <= 1:
-        results = [_parse_batch(b) for b in batches]
+        results = [_parse_batch(b, lenient) for b in batches]
     else:
         with ProcessPoolExecutor(max_workers=workers) as pool:
-            results = list(pool.map(_parse_batch, batches))
+            results = list(pool.map(_parse_batch, batches, flags))
     parts = list(zip(*results))
     return (
         np.concatenate(parts[0]).astype(np.int16),
@@ -112,13 +119,15 @@ def parse_many(contents: list[str], workers: int, batch: int = 5_000):
         np.concatenate(parts[4]),
         np.concatenate(parts[5]),
         np.concatenate(parts[6]),
+        np.concatenate(parts[7]),
+        np.concatenate(parts[8]),
     )
 
 
-def _to_store(frame: pd.DataFrame, contents: list[str], workers: int):
+def _to_store(frame: pd.DataFrame, contents: list[str], workers: int, lenient: bool = False):
     """Parse `contents` (aligned with `frame`) into (moves, colors, meta)."""
-    moves, colors, lengths, n_errors, alternating, first_color, hashes = parse_many(
-        contents, workers
+    moves, colors, lengths, n_errors, alternating, first_color, hashes, passes, props = parse_many(
+        contents, workers, lenient=lenient
     )
     meta = frame.reset_index(drop=True).copy()
     meta["length"] = lengths.astype(np.int16)
@@ -126,6 +135,8 @@ def _to_store(frame: pd.DataFrame, contents: list[str], workers: int):
     meta["alternating"] = alternating
     meta["first_color"] = first_color
     meta["sgf_hash"] = hashes
+    meta["n_passes"] = passes
+    meta["props"] = props  # SGF property names other than B/W, for the Day-0 audit
     return moves, colors, meta
 
 
@@ -145,7 +156,7 @@ def _write_store(name: str, moves, colors, meta: pd.DataFrame, directory: pathli
 
 
 def load_store(name: str, directory: pathlib.Path = OUT_DIR, mmap: bool = True):
-    mode = "r" if mmap else None
+    directory, mode = pathlib.Path(directory), "r" if mmap else None
     moves = np.load(directory / f"{name}_moves.npy", mmap_mode=mode)
     colors = np.load(directory / f"{name}_colors.npy", mmap_mode=mode)
     meta = pd.read_parquet(directory / f"{name}_meta.parquet")
@@ -235,9 +246,9 @@ def verify_train(n: int = 1_000, seed: int = 0) -> bool:
 # released files (pools, questions)
 # --------------------------------------------------------------------------
 
-def _find_release(filename: str) -> pathlib.Path | None:
-    for directory in RAW_DIRS:
-        path = directory / filename
+def _find_release(filename: str, raw_dirs=None) -> pathlib.Path | None:
+    for directory in raw_dirs or RAW_DIRS:
+        path = pathlib.Path(directory) / filename
         if path.exists():
             return path
     return None
@@ -260,32 +271,49 @@ def melt_questions(frame: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
             contents.append(content)
     meta = pd.DataFrame(rows)
     counts = meta.groupby("question_id").size()
-    declared = frame.set_index("question_id")["num_games"]
+    declared = frame.set_index("question_id")["num_games"].astype(int)
     bad = (counts.reindex(declared.index).fillna(0) != declared)
     if bad.any():
         print(f"  ! {int(bad.sum())} questions whose non-empty slots != num_games")
     return meta, contents
 
 
-def convert_release(workers: int) -> None:
+def convert_release(workers: int, raw_dirs=None, out_dir: pathlib.Path = OUT_DIR,
+                    names=None, overwrite: bool = False) -> dict:
+    """Official pools / questions -> GameStores `<name>_*` in `out_dir`.
+
+    Parsing is lenient (sgf.parse_lenient): an unexpected header, pass or
+    setup stone is counted in the meta (`n_errors`, `n_passes`) instead of
+    aborting, so a submission can still be produced. Returns {name: path}.
+    """
+    out_dir = pathlib.Path(out_dir)
+    written = {}
     for name, filename in RELEASE_FILES.items():
-        path = _find_release(filename)
+        if names is not None and name not in names:
+            continue
+        path = _find_release(filename, raw_dirs)
         if path is None:
             print(f"  {name}: {filename} not found, skipping")
             continue
-        if (OUT_DIR / f"{name}_meta.parquet").exists():
+        if (out_dir / f"{name}_meta.parquet").exists() and not overwrite:
             print(f"  {name}: store exists, skipping")
+            written[name] = path
             continue
-        frame = pd.read_csv(path, dtype=str)
+        frame = pd.read_csv(path, dtype=str, keep_default_na=False)
         if name.startswith("pool"):
             contents = frame.pop("sgf_content").tolist()
             meta = frame
         else:
             meta, contents = melt_questions(frame)
-        moves, colors, meta = _to_store(meta, contents, workers)
-        _write_store(name, moves, colors, meta, OUT_DIR)
+        moves, colors, meta = _to_store(meta, contents, workers, lenient=True)
+        _write_store(name, moves, colors, meta, out_dir)
+        written[name] = path
+        lengths = meta["length"].to_numpy()
         print(f"  {name}: {len(meta):,} games from {path.name}, "
-              f"errors={int(meta['n_errors'].sum())}")
+              f"errors={int((meta['n_errors'] > 0).sum())} passes={int(meta['n_passes'].sum())} "
+              f"non-alternating={int((~meta['alternating']).sum())} "
+              f"length=[{lengths.min()}, {lengths.max()}]")
+    return written
 
 
 def main() -> int:
@@ -294,6 +322,10 @@ def main() -> int:
     parser.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) - 2))
     parser.add_argument("--verify-only", action="store_true")
     parser.add_argument("--keep-shards", action="store_true")
+    parser.add_argument("--raw-dir", type=pathlib.Path, action="append",
+                        help="release: directory holding the official CSVs (repeatable)")
+    parser.add_argument("--out-dir", type=pathlib.Path, default=OUT_DIR)
+    parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
     start = time.time()
@@ -312,7 +344,7 @@ def main() -> int:
         print(f"done ({time.time() - start:.0f}s)")
         return 0 if ok else 1
 
-    convert_release(args.workers)
+    convert_release(args.workers, args.raw_dir, args.out_dir, overwrite=args.overwrite)
     print(f"done ({time.time() - start:.0f}s)")
     return 0
 
