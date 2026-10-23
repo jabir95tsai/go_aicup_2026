@@ -108,6 +108,16 @@ def finalize_run(directory: Path, model, config: dict, manifest: dict, state: di
     return path
 
 
+def save_snapshot(directory: Path, model, epoch: int) -> Path:
+    """Rank zero only: state_dict after a completed epoch, kept by cleanup_run."""
+    path = directory / "snapshots" / f"epoch_{epoch:04d}.pt"
+    path.parent.mkdir(exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    torch.save({name: value.detach().cpu() for name, value in model.state_dict().items()}, temporary)
+    os.replace(temporary, path)
+    return path
+
+
 def cleanup_run(directory: Path) -> None:
     """Remove only trainer-owned transient files after model publication."""
     for name in ("checkpoints", "permutations"):
@@ -312,6 +322,9 @@ def train(config: dict, *, resume: Path | None = None,
                         save("periodic")
                         checkpoint_time = window = time.monotonic()
                 del loader
+                if config["training"].get("epoch_snapshots"):
+                    # Weights only, for post-hoc per-epoch evaluation; never used to resume.
+                    on_rank_zero(lambda: save_snapshot(directory, raw_model, epoch + 1), rank)
                 state["epoch"] += 1
                 state["next_batch"] = 0
                 state["permutation"] = None

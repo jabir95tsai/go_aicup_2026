@@ -66,6 +66,22 @@ def test_end_to_end_artifacts_and_monitor_rows(v2_train_data, tmp_path):
         train(config)
 
 
+def test_epoch_snapshots_survive_cleanup(v2_train_data, tmp_path):
+    config = clone(v2_train_data, tmp_path / "run")
+    config["training"]["epochs"] = 2
+    config["training"]["epoch_snapshots"] = True
+    train(config)
+    run = Path(config["paths"]["output_dir"])
+    snapshots = sorted(p.name for p in (run / "snapshots").iterdir())
+    assert snapshots == ["epoch_0001.pt", "epoch_0002.pt"]
+    payload = torch.load(run / "model.pt", map_location="cpu", weights_only=False)
+    last = torch.load(run / "snapshots" / "epoch_0002.pt", map_location="cpu")
+    assert last.keys() == payload["model"].keys()
+    assert all(torch.equal(last[name], payload["model"][name]) for name in last)
+    first = torch.load(run / "snapshots" / "epoch_0001.pt", map_location="cpu")
+    assert any(not torch.equal(first[name], last[name]) for name in last)
+
+
 def test_resume_matches_uninterrupted(v2_train_data, tmp_path):
     full = clone(v2_train_data, tmp_path / "full")
     train(full)
