@@ -119,7 +119,7 @@
 | 項目 | 處置 | 依據 |
 |---|---|---|
 | 競賽二手工特徵＋GBDT | 砍 | E1-001：三個變體都低於 LR，過不了 baseline |
-| 競賽二繼續加長訓練 | 重開（A-037） | A-028 的 3 epochs 用固定 LR（A-032），不能代表 cosine 下加長訓練的效果；A-037 以 A-024 recipe 跑 14 epochs |
+| 競賽二繼續加長訓練 | 砍 | A-038：A-024 recipe 跑 14 epochs，Valid-U C2 0.4747（−0.081），第 2 個 epoch 起就過擬合（記住訓練盤） |
 | 座標 Transformer 預訓、scaling curve（D-001 E3、E5） | 砍 | 時間不夠；V2 盤面模型已過 baseline |
 | SE 排序、ArcFace、attention 聚合、gallery 微調（D-001 E4） | 延後到 T5 | 先有管線與 LB 校準 |
 | HumanSL／KataGo 特徵 | 依 D3 | 授權、成本、級距對應都未查 |
