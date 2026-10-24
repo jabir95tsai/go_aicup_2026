@@ -321,6 +321,25 @@ sbatch slurm/strength_predict.slurm   # 預設 data/processed → outputs/rank_s
 - 競賽二使用 `outputs/v2_strength/model.pt`（A-024）與 `outputs/v2_agg_calibration/result.json` 的 T_k；`num_games` 不在 5／10／15／20 時用最近的 k；整題無可用盤時用其他題的平均機率（有計數）。
 - **彩排：** `python scripts/make_fake_release.py` 把 Valid-U 題目與合成候選庫 split 1／2 轉成官方寬格式（`outputs/rehearsal/raw/`），跑完上面 0–3 步（`--raw-dir outputs/rehearsal/raw --out-dir outputs/rehearsal/store` 等）後，`python scripts/rehearsal_check.py` 檢查 T1 gate。
 
+### 競賽二 HumanSL 路徑（A-039～A-042）
+
+第 3 步完成後（需要 `category.npy` 與 V2 的 `predictions.parquet` 當備援），再跑 KataGo HumanSL 抽取與 B2 聚合。外部檔案放 `data/external/`（不進 git）：KataGo v1.18.2 CUDA 12.8 版、`b18c384nbt-humanv0.bin.gz`、從 NVIDIA PyPI wheel 解出的 CUDA／cuDNN 函式庫（來源與 sha256 見 RESULTS A-039）。
+
+```bash
+# 每個 release 檔拆 4 個 1-GPU 作業（每卡每秒約 3,500–5,500 盤面；5,000 盤約 20 分鐘）
+W=outputs/rank_submit/rank_public
+for i in 0 1 2 3; do
+  RUN=$W/humansl GAMES=$W/cache/games.parquet CACHE=$W/cache NUM_SHARDS=4 SHARD=$i ALLOW_FAILURES=1 \
+      sbatch --export=ALL slurm/humansl.slurm
+done
+# 全部完成後（CPU）
+python -m go_aicup.tasks.strength.humansl_predict aggregate --work $W --submission $W/humansl_submission.csv
+```
+
+- 模型 `outputs/humansl_model/model.pkl` 由 `python -m go_aicup.tasks.strength.humansl_predict fit --method B2` 產生（S-fit＋S-select 驗證盤）。
+- 每節點每位使用者最多 2,048 個執行緒，KataGo 每個引擎約用 analysis threads × 2；`configs/strength/humansl_analysis.cfg` 設 120，8 個作業擠在同一節點也不會超過。
+- 彩排檢查：`python scripts/humansl_rehearsal_check.py`。
+
 ## 結構
 
 詳見 CLAUDE.md 第 10 節。重點：
