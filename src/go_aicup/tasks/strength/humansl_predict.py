@@ -1,7 +1,7 @@
 """Competition-2 HumanSL submission path (RESULTS A-041, A-042).
 
-    fit        RankModel on the S-fit and S-select validation games (A-041
-               method) -> outputs/humansl_model/model.pkl. CPU.
+    fit        RankModel on every extracted Valid-S game (A-044: q1000 S-fit,
+               qsel S-select, vs_rest) -> outputs/humansl_model/model.pkl. CPU.
     aggregate  for a release work directory already processed by
                v2/predict.py (prepare, infer, aggregate) and by HumanSL
                extraction into <work>/humansl/shard_*: per-game A-024 mean
@@ -31,7 +31,8 @@ from go_aicup.tasks.strength.humansl import RankModel
 from go_aicup.tasks.strength.v2.predict import question_table
 
 MODEL = ROOT / "outputs" / "humansl_model" / "model.pkl"
-FIT_RUNS = (ROOT / "outputs" / "humansl_q1000", ROOT / "outputs" / "humansl_qsel")
+FIT_RUNS = (ROOT / "outputs" / "humansl_q1000", ROOT / "outputs" / "humansl_qsel", ROOT / "outputs" / "humansl_vs_rest")
+FIT_ROLES = ("S-fit", "S-select", "S-extra")   # Valid-U is never fitted
 A024 = ROOT / "outputs" / "v2_strength"
 DATASET = PROCESSED / "strength_v2" / "seed2027"
 
@@ -54,14 +55,15 @@ def fit(method: str, out: Path) -> None:
                       for name in ("validation_unseen_category.npy", "validation_seen_category.npy")])
     games, questions, tables = [], [], []
     for run in FIT_RUNS:
-        g, q = pd.read_parquet(run / "games.parquet"), pd.read_parquet(run / "questions.parquet")
-        keep = q["role"].isin(["S-fit", "S-select"])
-        games.append(g[g["role"].isin(["S-fit", "S-select"])])
-        questions.append(q[keep])
+        g = pd.read_parquet(run / "games.parquet")
+        games.append(g[g["role"].isin(FIT_ROLES)])
+        if (run / "questions.parquet").exists():   # B0/B1 temperatures need questions; B2 does not
+            q = pd.read_parquet(run / "questions.parquet")
+            questions.append(q[q["role"].isin(FIT_ROLES)])
         tables.append(run_features(run))
     games = pd.concat(games, ignore_index=True)
     questions = pd.concat(questions, ignore_index=True)
-    table = features(a024, pd.concat(tables, ignore_index=True)).loc[games["game_index"]]
+    table = features(a024, pd.concat(tables, ignore_index=True).drop_duplicates("game_index")).loc[games["game_index"]]
     if len(table) != len(games):
         raise ValueError("fitting games without features")
     model = RankModel(method).fit(games, questions, table.to_numpy())
