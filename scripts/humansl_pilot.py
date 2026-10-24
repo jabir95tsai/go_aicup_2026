@@ -56,7 +56,7 @@ def select(out: Path) -> None:
 
 def load_features(run: Path) -> pd.DataFrame:
     rows = []
-    for shard in sorted(run.glob("shard_*")):
+    for shard in sorted(p for p in run.glob("shard_*") if p.is_dir()):
         table = pd.read_parquet(shard / "games.parquet")
         logp, offsets, done = (np.load(shard / f"{name}.npy") for name in ("logp", "offsets", "done"))
         profiles = json.loads((shard / "meta.json").read_text())["profiles"]
