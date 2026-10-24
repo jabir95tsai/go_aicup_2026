@@ -3,6 +3,8 @@
 select  : 250 Valid-U questions per k (evaluation) and 250 per k from the S-fit
           half of Valid-S (fitting; A-025 player draw), seed 2027; writes the
           union of their games for HumanSL extraction.
+select-sselect : 250 per k from the S-select half of Valid-S (A-041 aggregation
+          choice), seed 2027, into its own run directory.
 analyze : per-game multinomial logistic regression (StandardScaler, C=1) on
           S-fit games -> per-game log-posterior; a question averages its games
           (1/k each), multiplies by a per-k temperature fitted on S-fit
@@ -66,6 +68,21 @@ def select(out: Path) -> None:
     table.drop(columns="split").to_parquet(out / "games.parquet")
     print(questions.groupby(["role", "k"]).size().unstack(), "\ngames", table.groupby("role").size().to_dict(),
           "positions", int(table["length"].sum()))
+
+
+def select_sselect(out: Path) -> None:
+    seen = pd.read_parquet(DATASET / "strength_v2_valid_seen_questions.parquet")
+    pool = seen[~seen["player_id"].astype(str).isin(fit_players(seen))]
+    rng = np.random.default_rng(SEED)
+    questions = pd.concat([pool[pool["k"] == k].iloc[np.sort(rng.permutation(int((pool["k"] == k).sum()))[:PER_K])]
+                           for k in K_BUCKETS]).assign(role="S-select").reset_index(drop=True)
+    games = pd.read_parquet(DATASET / "strength_v2_games.parquet").set_index("game_index")
+    index = np.unique(np.concatenate(list(questions["games"])))
+    table = games.loc[index, ["rank_id", "player_id", "player_color", "length"]].reset_index().assign(role="S-select")
+    out.mkdir(parents=True, exist_ok=True)
+    questions.to_parquet(out / "questions.parquet")
+    table.to_parquet(out / "games.parquet")
+    print(questions.groupby("k").size().to_dict(), "games", len(table), "positions", int(table["length"].sum()))
 
 
 def log_posterior(train_x, train_y, test_x) -> np.ndarray:
@@ -161,10 +178,10 @@ def analyze(run: Path) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("command", choices=("select", "analyze"))
+    parser.add_argument("command", choices=("select", "select-sselect", "analyze"))
     parser.add_argument("--run", type=Path, default=ROOT / "outputs" / "humansl_q1000")
     args = parser.parse_args()
-    select(args.run) if args.command == "select" else analyze(args.run)
+    {"select": select, "select-sselect": select_sselect, "analyze": analyze}[args.command](args.run)
     return 0
 
 

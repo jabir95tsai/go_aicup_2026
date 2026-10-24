@@ -7,8 +7,10 @@ the played move is that profile's likelihood of the move. Pass-free games only
 (the training set has none, A-002).
 
 Output (one directory per shard): logp.npy float32 [total turns, profiles] in
-game order, offsets.npy int64 [games + 1], done.npy bool [games, profiles],
-meta.json (profiles, settings, throughput).
+game order, colors.npy int8 [total turns], offsets.npy int64 [games + 1],
+done.npy bool [games, profiles], meta.json (profiles, settings, throughput).
+Training data is strict (any engine error aborts); release files use
+--allow-failures, which records rejected games as not done and continues.
 
     python -m go_aicup.features.humansl --games outputs/humansl_pilot/games.parquet \\
         --out outputs/humansl_pilot/shard_0 --shard 0 --num-shards 1
@@ -42,13 +44,13 @@ def gtp(move: int) -> str:
     return f"{COLUMNS[col]}{19 - row}"
 
 
-def cache_games(indices) -> list[tuple[np.ndarray, np.ndarray]]:
-    """(moves, colors) for training-cache game_index values."""
-    table = pd.read_parquet(CACHE / "games.parquet").set_index("game_index").loc[np.asarray(indices)]
+def cache_games(indices, cache: Path = CACHE) -> list[tuple[np.ndarray, np.ndarray]]:
+    """(moves, colors) for game_index values of a board cache (training or release)."""
+    table = pd.read_parquet(cache / "games.parquet").set_index("game_index").loc[np.asarray(indices)]
     shards, out = {}, []
     for row in table.itertuples():
         if row.shard_id not in shards:
-            prefix = CACHE / f"shard_{int(row.shard_id):05d}"
+            prefix = cache / f"shard_{int(row.shard_id):05d}"
             shards[row.shard_id] = (np.load(f"{prefix}_moves.npy", mmap_mode="r"),
                                     np.load(f"{prefix}_colors.npy", mmap_mode="r"))
         moves, colors = shards[row.shard_id]
@@ -57,23 +59,25 @@ def cache_games(indices) -> list[tuple[np.ndarray, np.ndarray]]:
     return out
 
 
-def query(game: int, profile: int, moves, colors, name: str) -> bytes:
+def query(game: int, profile: int, moves, colors, name: str, komi: float = KOMI) -> bytes:
     return (json.dumps({
         "id": f"{game}:{profile}", "moves": [["BW"[c], gtp(m)] for m, c in zip(moves, colors)],
-        "rules": RULES, "komi": KOMI, "boardXSize": 19, "boardYSize": 19,
+        "rules": RULES, "komi": komi, "boardXSize": 19, "boardYSize": 19,
         "analyzeTurns": list(range(len(moves))), "maxVisits": 1, "includePolicy": True,
         "overrideSettings": {"humanSLProfile": name, "ignorePreRootHistory": False}},
         separators=(",", ":")) + "\n").encode()
 
 
 def run(games, profiles, out: Path, *, in_flight: int = 48, max_seconds: float | None = None,
-        overrides: str | None = None, katago: Path = KATAGO, model: Path = MODEL, config: Path = CONFIG) -> dict:
+        overrides: str | None = None, komi: float = KOMI, allow_failures: bool = False,
+        katago: Path = KATAGO, model: Path = MODEL, config: Path = CONFIG) -> dict:
     out.mkdir(parents=True, exist_ok=True)
     (ROOT / "outputs" / "humansl_logs").mkdir(parents=True, exist_ok=True)
     lengths = np.array([len(m) for m, _ in games], dtype=np.int64)
     offsets = np.r_[0, np.cumsum(lengths)]
     logp = np.full((offsets[-1], len(profiles)), np.nan, dtype=np.float32)
     remaining = np.repeat(lengths[:, None], len(profiles), axis=1)
+    rejected = []
     slots, stop = threading.Semaphore(in_flight), threading.Event()
     with open(out / "katago_stderr.log", "wb") as stderr:
         command = [str(katago), "analysis", "-config", str(config), "-model", str(model)]
@@ -92,7 +96,7 @@ def run(games, profiles, out: Path, *, in_flight: int = 48, max_seconds: float |
                                 return
                         if stop.is_set():
                             return
-                        engine.stdin.write(query(g, p, moves, colors, name))
+                        engine.stdin.write(query(g, p, moves, colors, name, komi))
                         engine.stdin.flush()
             finally:
                 engine.stdin.close()
@@ -105,16 +109,20 @@ def run(games, profiles, out: Path, *, in_flight: int = 48, max_seconds: float |
             for line in engine.stdout:
                 result = json.loads(line)
                 if "error" in result:
-                    raise RuntimeError(f"katago error: {result}")
+                    if not allow_failures or "id" not in result:
+                        raise RuntimeError(f"katago error: {result}")
+                    rejected.append(result)   # whole query rejected; the game stays not done
+                    slots.release()
+                    continue
                 if "warning" in result:
                     print("katago warning:", result, flush=True)
                     continue
                 g, p = map(int, result["id"].split(":"))
                 t = int(result["turnNumber"])
                 probability = result["policy"][int(games[g][0][t])]
-                if not probability > 0:
+                if not probability > 0 and not allow_failures:
                     raise ValueError(f"game {g} turn {t}: played move has policy {probability}")
-                logp[offsets[g] + t, p] = np.log(probability)
+                logp[offsets[g] + t, p] = np.log(probability) if probability > 0 else np.nan
                 evaluated += 1
                 remaining[g, p] -= 1
                 if remaining[g, p] == 0:
@@ -137,21 +145,55 @@ def run(games, profiles, out: Path, *, in_flight: int = 48, max_seconds: float |
     done = remaining == 0
     np.save(out / "logp.npy", logp)
     np.save(out / "offsets.npy", offsets)
+    np.save(out / "colors.npy", np.concatenate([c for _, c in games]).astype(np.int8))
     np.save(out / "done.npy", done)
-    meta = {"profiles": list(profiles), "rules": RULES, "komi": KOMI, "games": len(games),
+    meta = {"profiles": list(profiles), "rules": RULES, "komi": komi, "games": len(games),
             "games_complete": int(done.all(axis=1).sum()), "positions": evaluated, "seconds": round(seconds, 1),
             "positions_per_second": round(evaluated / seconds, 1), "model": model.name, "katago": str(katago)}
     meta["katago_returncode"] = engine.returncode
+    meta["rejected_queries"] = len(rejected)
     (out / "meta.json").write_text(json.dumps(meta, indent=1))
-    if max_seconds is None and (engine.returncode != 0 or not done.all()):
+    if rejected:
+        (out / "rejected.json").write_text(json.dumps(rejected[:200], indent=1))
+    if max_seconds is None and (engine.returncode != 0 or not (done.all() or allow_failures)):
         raise RuntimeError(f"katago exited with {engine.returncode}; {meta['games_complete']}/{len(games)} "
                            f"games complete (see {out / 'katago_stderr.log'})")
     return meta
 
 
+def shard_features(shard: Path) -> pd.DataFrame:
+    """Per complete game: mean log-likelihood of the labelled player's and the
+    opponent's moves under each profile (own_<profile>, opp_<profile>)."""
+    table = pd.read_parquet(shard / "games.parquet")
+    logp, offsets, done = (np.load(shard / f"{name}.npy") for name in ("logp", "offsets", "done"))
+    colors = np.load(shard / "colors.npy") if (shard / "colors.npy").exists() else None
+    profiles = json.loads((shard / "meta.json").read_text())["profiles"]
+    rows = []
+    for i, game in enumerate(table.itertuples()):
+        values = logp[offsets[i]:offsets[i + 1]]
+        if not done[i].all() or np.isnan(values).any():
+            continue
+        # Shards written before colors.npy existed are training games: black first, alternating (A-002).
+        turn_colors = colors[offsets[i]:offsets[i + 1]] if colors is not None else np.arange(len(values)) % 2
+        mine = turn_colors == game.player_color
+        if not mine.any() or mine.all():
+            continue
+        rows.append({"game_index": game.game_index,
+                     **{f"own_{p}": float(values[mine, j].mean()) for j, p in enumerate(profiles)},
+                     **{f"opp_{p}": float(values[~mine, j].mean()) for j, p in enumerate(profiles)}})
+    return pd.DataFrame(rows)
+
+
+def run_features(run: Path) -> pd.DataFrame:
+    """shard_features over every shard_* directory of a run."""
+    parts = [shard_features(p) for p in sorted(run.glob("shard_*")) if p.is_dir()]
+    return pd.concat(parts, ignore_index=True)
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--games", type=Path, required=True, help="parquet with a game_index column")
+    parser.add_argument("--games", type=Path, required=True, help="parquet with game_index (and player_color)")
+    parser.add_argument("--cache", type=Path, default=CACHE, help="board cache holding the games")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--shard", type=int, default=0)
     parser.add_argument("--num-shards", type=int, default=1)
@@ -160,6 +202,8 @@ def main(argv=None) -> int:
     parser.add_argument("--in-flight", type=int, default=48, help="queries (game x profile) outstanding")
     parser.add_argument("--max-seconds", type=float)
     parser.add_argument("--override-config", help="KataGo -override-config, e.g. numAnalysisThreads=512")
+    parser.add_argument("--komi", type=float, default=KOMI)
+    parser.add_argument("--allow-failures", action="store_true", help="release files: skip rejected games")
     args = parser.parse_args(argv)
     table = pd.read_parquet(args.games)
     table = table.iloc[args.shard::args.num_shards]
@@ -167,8 +211,9 @@ def main(argv=None) -> int:
         table = table.iloc[:args.limit]
     args.out.mkdir(parents=True, exist_ok=True)
     table.to_parquet(args.out / "games.parquet")
-    meta = run(cache_games(table["game_index"]), args.profiles.split(","), args.out,
-               in_flight=args.in_flight, max_seconds=args.max_seconds, overrides=args.override_config)
+    meta = run(cache_games(table["game_index"], args.cache), args.profiles.split(","), args.out,
+               in_flight=args.in_flight, max_seconds=args.max_seconds, overrides=args.override_config,
+               komi=args.komi, allow_failures=args.allow_failures)
     print(json.dumps(meta), flush=True)
     return 0
 
