@@ -843,3 +843,19 @@ split 1／2 分開：保險單獨 0.9385／0.9343，融合 0.9865／0.9828，融
 - **判讀：** 第 2 個 epoch 起就過擬合，train CE 一路降到 0.67，U 與 S 的 CE 同步上升。S 是**訓練玩家沒見過的盤**，它的 CE 也一起惡化，所以模型記住的主要是**訓練盤本身**（盤面 → 該盤標籤），不只是玩家習慣。機制屬推測：同一盤約 230 手共用一個標籤，模型看過幾次就能認出盤；1M 盤對 2,400 萬參數的 ResNet 不夠多。
 - **快照：** 依 A-037 規則只能用 Valid-S 挑 epoch。S 監控在 epoch 1.5 最好（2.027），但那時 LR 仍接近峰值；同一時點的 U CE 2.065 也比 A-024 終點 2.038 差，看不出有快照能超過 A-024。**不另花 GPU 評估快照**；權重保留。
 - **處置：** 競賽二提交候選維持 **A-024 單模型＋C2**。同 recipe 加長訓練砍掉（EXECUTION_PLAN 同步更新）。若要回收更多資料價值，方向應是抑制記盤，例如每批每盤只取少數手、更強的正則化或更小的模型，而不是多跑幾輪。這些都未驗證，須另提計畫。
+
+
+### A-039 KataGo HumanSL 試算：吞吐量與單盤訊號（2026-10-24，使用者確認提前 D3，≤1 GPU-h）
+
+**目的：** A-038 後判斷競賽二的瓶頸是「每盤一個標籤」的監督量；HumanSL 用大量人類棋譜、以段位為條件預測每一手，可能提供 A-024 沒有的訊號。使用者 10/24 同意把 D3 提前做小規模試算（原定 T5）。
+
+**外部資源（需在報告申報）：** KataGo v1.18.2 `katago-v1.18.2-cuda12.8-cudnn9.8.0-linux-x64.zip`（2026-08-30，sha256 `2cb197fc…6c02`）、HumanSL 網路 `b18c384nbt-humanv0.bin.gz`（KataGo v1.15.0 release，sha256 `637746e4…4ab5`，KataGo Neural Network License，見 R3）。CUDA 12.8／cuDNN 9.8 共享函式庫取自 NVIDIA 的 PyPI wheel（cublas 12.8.4.1、cudart 12.8.90、nvrtc 12.8.93、cudnn 9.8.0.87），libstdc++ 取自 `go` 環境；全部在 `data/external/`（不進 git）。
+
+**做法（`src/go_aicup/features/humansl.py`）：** HumanSL 當主模型，analysis engine 每盤每個 profile 一個 query、所有手數、1 visit、`includePolicy`、`ignorePreRootHistory=false`、規則 japanese、貼目 6.5（SGF 沒有貼目，A-001；幽玄一般為日本規則 6.5，未驗證）。讀出實際落子在該 profile 下的機率；落子轉換（row 0＝GTP 第 19 線）若錯，KataGo 會因非法著手報錯，並且程式要求實際落子的機率 >0。15 個 profile：rank_20k／15k／10k／7k／5k／3k／1k／1d–7d（不含 8d）／9d。
+
+**吞吐量（1×H200，dev 佇列每卡上限 12 CPU）：** 單一引擎 256 threads 時每秒 3,136 個盤面（平均批次 170）；768 threads＋批次 512 時 3,306（批次滿 509，代表卡在單一 NN 服務執行緒）；加上 3 個 NN 服務執行緒時 **4,519**（平均批次 219，代表改由 CPU 餵資料限制）。多引擎並行會碰到使用者執行緒上限而崩潰。Python 解析 JSON 約每秒 3.1 萬行，不是瓶頸。小樣本檢查：各 profile 的機率明顯不同；最弱的 D 級盤最符合 5k–10k profile（10 盤，只是合理性檢查）。
+
+**試算設計（`scripts/humansl_pilot.py`，事先登記）：** 樣本為 Valid-U 每級 200 盤（評估），以及 A-025 S-fit 那一半 Valid-S 玩家每級 200 盤（擬合），seed 2027，共 4,000 盤、887,445 個盤面 × 15 profiles。每盤特徵＝每個 profile 對指定玩家落子的平均 log-likelihood（另算對手落子的平均）。三個 multinomial logistic regression 只在 S-fit 擬合，用 `score_rank` 解碼，在 Valid-U 逐盤計官方分數：A（A-024 每盤平均 log-prob，10 維）、H（HumanSL 特徵）、AH（兩者合併）。
+- **Gate：** AH − A 的單盤分數 ≥ +0.01，且以玩家為群組的 bootstrap 95% 下界 >0 → 進到題目層級（分 k 桶）評估與擴大計算。未過 → HumanSL 回到 T5，或放棄。
+- 單盤增益不保證能轉成題目層級的增益；這只是是否值得繼續的第一關。
+- 估算：887,445 × 15 ÷ 每秒約 4,800 ≈ 46 分鐘，約 0.8 GPU-h。
