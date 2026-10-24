@@ -161,9 +161,36 @@ def run(games, profiles, out: Path, *, in_flight: int = 48, max_seconds: float |
     return meta
 
 
-def shard_features(shard: Path) -> pd.DataFrame:
-    """Per complete game: mean log-likelihood of the labelled player's and the
-    opponent's moves under each profile (own_<profile>, opp_<profile>)."""
+FEATURE_SETS = ("mean", "phase", "vote", "full")
+PHASES = (("open", 0, 60), ("mid", 60, 150), ("end", 150, None))   # ply ranges (A-046)
+
+
+def side_features(values: np.ndarray, ply: np.ndarray, side: str, profiles, feature_set: str) -> dict:
+    """Features of one player's moves; values [moves, profiles] log-likelihoods."""
+    mean = values.mean(axis=0)
+    out = {f"{side}_{p}": float(m) for p, m in zip(profiles, mean)}
+    if feature_set in ("phase", "full"):
+        for name, start, stop in PHASES:
+            rows = (ply >= start) & (ply < stop if stop is not None else True)
+            # A phase without moves (short games) takes the whole-game mean.
+            phase = values[rows].mean(axis=0) if rows.any() else mean
+            out.update({f"{side}_{name}_{p}": float(m) for p, m in zip(profiles, phase)})
+    if feature_set in ("vote", "full"):
+        z = values - values.max(axis=1, keepdims=True)
+        vote = (np.exp(z) / np.exp(z).sum(axis=1, keepdims=True)).mean(axis=0)
+        out.update({f"{side}_vote_{p}": float(v) for p, v in zip(profiles, vote)})
+    if feature_set == "full":
+        out.update({f"{side}_std_{p}": float(v) for p, v in zip(profiles, values.std(axis=0))})
+    return out
+
+
+def shard_features(shard: Path, feature_set: str = "mean") -> pd.DataFrame:
+    """Per complete game, features of the labelled player's (own_) and the
+    opponent's (opp_) moves. "mean" (A-039..A-045): mean log-likelihood per
+    profile; "phase" adds opening / middle / end means; "vote" adds the mean
+    per-move softmax over profiles; "full" = phase + vote + per-profile std."""
+    if feature_set not in FEATURE_SETS:
+        raise ValueError(f"feature_set must be one of {FEATURE_SETS}")
     table = pd.read_parquet(shard / "games.parquet")
     logp, offsets, done = (np.load(shard / f"{name}.npy") for name in ("logp", "offsets", "done"))
     colors = np.load(shard / "colors.npy") if (shard / "colors.npy").exists() else None
@@ -178,15 +205,16 @@ def shard_features(shard: Path) -> pd.DataFrame:
         mine = turn_colors == game.player_color
         if not mine.any() or mine.all():
             continue
+        ply = np.arange(len(values))
         rows.append({"game_index": game.game_index,
-                     **{f"own_{p}": float(values[mine, j].mean()) for j, p in enumerate(profiles)},
-                     **{f"opp_{p}": float(values[~mine, j].mean()) for j, p in enumerate(profiles)}})
+                     **side_features(values[mine], ply[mine], "own", profiles, feature_set),
+                     **side_features(values[~mine], ply[~mine], "opp", profiles, feature_set)})
     return pd.DataFrame(rows)
 
 
-def run_features(run: Path) -> pd.DataFrame:
+def run_features(run: Path, feature_set: str = "mean") -> pd.DataFrame:
     """shard_features over every shard_* directory of a run."""
-    parts = [shard_features(p) for p in sorted(run.glob("shard_*")) if p.is_dir()]
+    parts = [shard_features(p, feature_set) for p in sorted(run.glob("shard_*")) if p.is_dir()]
     return pd.concat(parts, ignore_index=True)
 
 

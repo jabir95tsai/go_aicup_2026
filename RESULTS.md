@@ -1006,3 +1006,10 @@ split 1／2 分開：保險單獨 0.9385／0.9343，融合 0.9865／0.9828，融
 - B2_H 與 B2_AH：S-select 上 AH 高 0.003、U 上 H 高 0.007，都在雜訊內。A-024 特徵在未見玩家上沒有額外貢獻。
 - HumanSL 在 10 個級別中 9 個高於 A-024；A 級是例外（0.486／0.433 vs 0.504）。2D、3D 這兩個 A-024 最弱的級別提升 0.07–0.21。
 - 差兩級以上（0 分）的比例約 7–9%；完全答對約 50%，差一級約 40%。
+
+
+### A-046 HumanSL 每盤特徵組（2026-10-24，事先登記；CPU，不重抽）
+
+從已存的每手 log-likelihood 算四組特徵（`features/humansl.shard_features(feature_set=…)`，只用 HumanSL、不含 A-024）：F0 `mean`（本人／對手每 profile 平均，30 維，即 A-045 的 B2_H）；F1 `phase`（再加開局 <60 手、中盤 60–149、收官 ≥150 手各自的平均；某段沒有手時用全盤平均，120 維）；F2 `vote`（再加每手在 15 個 profile 之間做 softmax 後的平均，60 維）；F3 `full`（F1＋F2＋每 profile 標準差，180 維）。B2 在 S-fit 擬合、S-select 1,000 題評分（`scripts/humansl_features.py`）；A-044 資料完成後用 `--with-rest` 以更大的擬合集重跑一次。
+- **規則：** S-select Equal-k 最高者比 F0 高 ≥0.005 → 採用；否則維持 F0。Valid-U 不使用。
+- 註：`mean` 改寫後與 A-039～A-045 的特徵差 ≤1.9e-6（float32 加總順序不同）。
