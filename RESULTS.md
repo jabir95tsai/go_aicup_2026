@@ -1129,3 +1129,12 @@ split 1／2 分開：保險單獨 0.9385／0.9343，融合 0.9865／0.9828，融
 | 貼目 0 | S-select +0.005 | 測試集以貼目 0 重抽 HumanSL（約 2.5 GPU-h）；擬合資料只有 18,772 盤 |
 | 平衡解碼 | 平衡時 +0.006 | CPU，可套在任何候選的機率上 |
 | V2 14 epochs／其他 seed | 本地差 0.05–0.08 | `strength_predict` 換 run-dir 與 T_k（小改） |
+
+
+### A-050 HumanSL PyTorch 路徑第 0 階段：重現引擎 policy（2026-10-25，事先登記；使用者同意）
+
+**外部資源：** KataGo v1.18.2 原始碼（`v1.18.2.tar.gz`，sha256 `fefd554b…f8bf9`，MIT；使用 `python/katago` 的 Board、Features、SGFMetadata、model_pytorch、load_model）與 `b18c384nbt-humanv0.ckpt`（v1.15.0 release，sha256 `84b23476…c8b27`，KataGo Neural Network License）。放 `data/external/`。
+
+**做法（`scripts/humansl_torch_check.py`）：** 用 KataGo 自己的 Python 程式載入 ckpt、重播棋局、算輸入特徵；每個 profile 的 metadata 照 `cpp/neuralnet/sgfmetadata.cpp` 的 `makeBasicRankProfile`（雙方同段位、人類、計分未知、讀秒 1200 秒＋30 秒×5、日期 2020-03-01、來源 KGS）；policy 取主 head、非法著手遮掉後做 softmax（pass 保留）。與 A-039 引擎的每手 log p 比較（試算 shard 0 的前 100 盤 × 15 profiles）。
+- **Gate：** 每手 |Δlog-p| 平均 ≤3e-3 且 p99 ≤2e-2，且每盤特徵（本人／對手平均）最大差的 p99 ≤1e-2。引擎自身雜訊（A-041）：平均 1.1e-3、p99 5.9e-3。
+- **2 盤小測：** 一般權重平均 1.19e-3、p99 6.5e-3、最大 1.2e-2；SWA 權重平均 5.5e-2、p99 0.34 → 引擎的 `.bin.gz` 對應的是一般權重，之後只用一般權重。
