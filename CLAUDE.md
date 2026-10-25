@@ -31,7 +31,7 @@
 
 | | 官方 baseline | 我們目前的本地數字（2026-10-22 更新） |
 |---|---|---|
-| 競賽二（棋力） | **0.4631** | V2 ResNet（A-024）＋C2 正式解碼（A-025）：Valid-U Equal-k **0.5553**（k=5/10/15/20：0.503/0.550/0.572/0.597）→ **已過 baseline**（本地合成題目，不是 LB）。舊的手工特徵線性探針為 0.4117（A-006） |
+| 競賽二（棋力） | **0.4631** | **A-024 每盤特徵＋KataGo HumanSL likelihood＋B2 題目層級 LR（2026-10-25 更新，A-044）：Valid-U 1,000 題 Equal-k 0.6833**（k=5/10/15/20：0.617/0.679/0.722/0.715）；同題 V2 ResNet（A-024）＋C2 為 0.5532（全部 10,000 題 0.5553）→ 已過 baseline（本地合成題目，不是 LB）。舊的手工特徵線性探針為 0.4117（A-006） |
 | 競賽一（玩家辨識） | **0.2845** | 開局 pp+slot、D4 正規化（A-029）：合成驗證 0.9494（0.838/0.971/0.989/1.000），加 L6 Hungarian 0.9829 → **遠高於 baseline，但合成驗證已飽和，且與 baseline 的落差未解（見下方警訊）**。零訓練的黑前 4 手 naive Bayes 為 0.929（A-006） |
 
 ⚠️ **競賽一的落差是警訊，不是好消息：** 零訓練計數模型在合成驗證拿 0.93，官方 baseline 卻只有 0.28。
@@ -106,6 +106,8 @@ H200 佇列限制**每張 GPU 最多 12 CPU 核心、200GB 主記憶體**；200G
 **棋力 V2 首輪切分與 gate（2026-10-19 使用者確認）：** 改 player-disjoint：fold 0＝Valid-U、fold 1–4 每玩家顏色組留出 10%＝Valid-S、fold −1 不使用；監控每級 U／S 各 2,500 盤，S8b 實測單次監控占 100 steps 訓練 32.4%，依規則改每 200 steps（A-023）。模型選擇與 baseline 一律看 Valid-U 四桶等權 `score_rank`（≥0.4631 過 baseline、≥0.47 列提交候選）；G＝Equal-k(S)−Equal-k(U)：≤0.03 維持、≤0.08 注意、>0.08 須加反記憶對策。每盤另存 log-prob 總和，機率平均與 log-prob 聚合的 CPU 比較不論分數都要做。S4 推論聚合與 S4b 切分已完成（`RESULTS.md` A-018、A-019）；正式 1 epoch run 提交前須先回報實測估時並經使用者確認。
 
 **棋力 V2 正式解碼與切分 seed 更新（2026-10-22 使用者確認，`RESULTS.md` D-002）：** 題目聚合改用 A-025 的 C2：每盤指定玩家落子的 log-prob 平均，題內各盤等權平均後，乘上每個 k 各自的溫度 T_k（4.42／6.24／7.67／8.13，只在 Valid-S 的 S-fit 擬合，存於 `outputs/v2_agg_calibration/result.json`），softmax 後以 `score_rank` 解碼；取代上方 10/19 的「每盤十類平均機率」規則，舊規則只保留作對照。A-024 模型在 Valid-U 的 Equal-k 由 0.4910 升為 0.5553，四個 k 桶都提升。之後的 V2 run 固定切分 seed 2027（與 A-024 相同），只改初始化 seed；A-028（seed2026）的切分不同，不能當 ensemble 元件。
+
+**棋力主線改為 HumanSL＋B2（2026-10-24～25，使用者同意提前 D3，`RESULTS.md` A-039～A-047、D-003）：** KataGo v1.18.2 analysis engine 以 HumanSL 網路 `b18c384nbt-humanv0` 為主模型，每個位置 1 visit、15 個 `rank_*` profile、日本規則貼目 6.5，取實際著手的 log-likelihood；每盤特徵＝本人／對手各 15 個平均，再加 A-024 每盤平均 log-prob（10 維）。題目聚合 B2：每個 k 一個 logistic regression，在擬合玩家的合成題目（同一玩家抽 k 盤、特徵取平均）上擬合，`score_rank` 解碼。正式模型 `outputs/humansl_model/model.pkl` 以全部 Valid-S 擬合（65,223 盤、5,000 人），Valid-U 從不擬合。A-024＋C2 保留為對照提交與 HumanSL 失敗時的備援。外部資源見 `EXTERNAL_RESOURCES.md`。D-003：本地沒過 gate 的方向（只用 HumanSL＋train 玩家、強引擎特徵、貼目 0、平衡解碼、主幹表示等）保留，T5 以 LB 探針判斷。
 
 ### 仍待確認 ⏳
 
@@ -284,10 +286,10 @@ H200 佇列限制**每張 GPU 最多 12 CPU 核心、200GB 主記憶體**；200G
 | 階段 | 日期 | 內容 |
 |------|------|------|
 | T1 管線 | 10/22–10/27 | 兩賽端到端提交管線（官方 CSV → 提交檔），用假測試檔彩排；Day-0 稽核腳本 |
-| T2 保險模型 | 10/23–11/01 | 競賽一：V2 盤面 ResNet 當逐手 encoder → 盤內平均 → GE2E，作為不靠開局的保險；競賽二：固定切分 seed 2027 的多初始化 seed ensemble |
+| T2 保險模型 | 10/23–11/01 | 競賽一：V2 盤面 ResNet 當逐手 encoder → 盤內平均 → GE2E，作為不靠開局的保險（A-035 gate 通過，待接進提交管線）；競賽二：多初始化 seed ensemble 未過（A-033），改由 HumanSL＋B2 成為主線（A-039～A-047） |
 | T3 凍結彩排 | 11/02–11/03 | 凍結程式重跑；報告骨架 |
 | T4 Day-0 | 11/04–11/06 | 真實資料稽核、格式上傳、真實候選庫自驗、L10／L4／方位／一對一判斷 |
-| T5 校準 | 11/07–11/20 | 受控 LB 探針、ensemble（≤5 元件）；HumanSL／KataGo 特徵若要做，只能在此當 ensemble 元件 |
+| T5 校準 | 11/07–11/20 | 受控 LB 探針、ensemble（≤5 元件）；D-003 保留的候選在此用 LB 判斷（Public 400 題，標準誤約 0.02） |
 | T6 收尾 | 11/21–11/24 | 凍結；使用者手動做最後一次上傳 |
 
 已砍：競賽二 GBDT（E1-001）、座標 Transformer 預訓與 scaling curve、家族 B 生成式。延後到 T5：SE 排序、ArcFace、attention 聚合、gallery 微調、L9。具體提案仍須依第 9 節先討論數值 gate、預期增益（未知可明寫）及成本。
@@ -373,4 +375,4 @@ project/
 3. **`cv.py`（Day 2）**：GroupKFold by player_id + 競賽一的合成候選庫產生器，附零重疊 assert
 4. **`feature_policy.py`（Day 2）**：把第 4 節的檢查清單寫成 code（禁用欄位名單 + fold-safe encoder）
 5. **後續工作**：依第 7 節與 EXECUTION_PLAN.md 的 T1–T6 執行；11/04 前僅本地驗證，不安排官方上傳。
-6. **主力現況（2026-10-22）**：競賽二為 V2 ResNet＋C2；競賽一為 D4 開局模型＋L6，另做不靠開局的保險模型。
+6. **主力現況（2026-10-25）**：競賽二為 A-024＋HumanSL＋B2（備援 V2 ResNet＋C2）；競賽一為 D4 開局模型＋L6，加上不靠開局的 GE2E 保險模型（待接進管線）。

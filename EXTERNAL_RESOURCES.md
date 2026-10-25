@@ -8,14 +8,18 @@
 
 | 資源 | 版本 | 來源 | 授權 | 用途 | 狀態 | 實際貢獻 |
 |---|---|---|---|---|---|---|
-| KataGo Human SL 網路 | `b18c384nbt-humanv0`（2024-07） | [katagotraining.org/extra_networks](https://katagotraining.org/extra_networks/)；[KataGo v1.15.0](https://github.com/lightvector/KataGo/releases/tag/v1.15.0) | KataGo Neural Network License（MIT 式，須保留版權聲明）—[已驗證](https://katagotraining.org/network_license/) | 競賽二：p(手 \| 盤面, 段位) 特徵（STRATEGY L5 / §1b） | 候選 | — |
-| KataGo 引擎（analysis engine） | v1.15 以上 | [github.com/lightvector/KataGo](https://github.com/lightvector/KataGo) | MIT | 批次推論 HumanSL 網路 | 候選 | — |
+| KataGo Human SL 網路 | `b18c384nbt-humanv0.bin.gz`（2024-07；sha256 `637746e4…4ab5`） | [KataGo v1.15.0 release](https://github.com/lightvector/KataGo/releases/tag/v1.15.0) | KataGo Neural Network License（MIT 式，須保留版權聲明）—[已驗證](https://katagotraining.org/network_license/) | 競賽二：15 個 `rank_*` profile 下實際著手的 log-likelihood，本人／對手各取每盤平均（A-039～A-047） | **使用中**（2026-10-24 起；正式候選模型的特徵） | Valid-U 1,000 題：A-024＋C2 0.5532 → A-024＋HumanSL＋B2 0.6833（+0.130，A-044）；單用 HumanSL 0.657（A-045） |
+| KataGo Human SL 網路（PyTorch checkpoint） | `b18c384nbt-humanv0.ckpt`（sha256 `84b23476…c8b27`；使用一般權重，非 SWA） | [KataGo v1.15.0 release](https://github.com/lightvector/KataGo/releases/tag/v1.15.0) | 同上 | PyTorch 重現引擎 policy（A-050）、主幹表示（A-051、A-052） | 使用中（實驗；未進正式模型） | 主幹表示加入主線後 S-select −0.035（A-052）；未用於提交 |
+| KataGo 強網路 | `kata1-b18c384nbt-s9996604416-d4316597426.bin.gz`（sha256 `9d7a6afe…a51f1d`） | [katagotraining.org/networks](https://katagotraining.org/networks/) | KataGo Neural Network License（同上） | 競賽二：每手目數／勝率損失等著手品質特徵（A-048） | 使用中（實驗；未進正式模型，D-003 保留待 LB） | 加入主線後 S-select −0.0024（A-048） |
 
 ## 開源程式
 
 | 資源 | 版本 | 來源 | 授權 | 用途 | 狀態 | 實際貢獻 |
 |---|---|---|---|---|---|---|
-| （尚無） | | | | | | |
+| KataGo 引擎（analysis engine，預編譯執行檔） | v1.18.2 `katago-v1.18.2-cuda12.8-cudnn9.8.0-linux-x64.zip`（2026-08-30；sha256 `2cb197fc…6c02`） | [github.com/lightvector/KataGo/releases](https://github.com/lightvector/KataGo/releases/tag/v1.18.2) | MIT | 批次推論 HumanSL 與強網路（`features/humansl.py`、`features/katago_engine.py`）；1 visit、日本規則、貼目 6.5 | **使用中**（正式候選模型的特徵抽取） | 同 HumanSL 網路列 |
+| KataGo 原始碼（Python 部分） | v1.18.2 `v1.18.2.tar.gz`（sha256 `fefd554b…f8bf9`） | [github.com/lightvector/KataGo](https://github.com/lightvector/KataGo/archive/refs/tags/v1.18.2.tar.gz) | MIT | 執行時匯入 `python/katago`（Board、Features、SGFMetadata、model_pytorch、load_model）；profile metadata 依 `cpp/neuralnet/sgfmetadata.cpp` 重寫成 Python（`features/humansl_torch.py`）；未修改原始碼 | 使用中（實驗） | 見 PyTorch checkpoint 列 |
+| NVIDIA CUDA／cuDNN 執行期函式庫 | `nvidia-cublas-cu12==12.8.4.1`、`nvidia-cuda-runtime-cu12==12.8.90`、`nvidia-cuda-nvrtc-cu12==12.8.93`、`nvidia-cudnn-cu12==9.8.0.87`（PyPI wheel，只解出 `.so`） | [PyPI](https://pypi.org/project/nvidia-cudnn-cu12/) | NVIDIA 軟體授權（隨 wheel 附帶） | 讓 KataGo CUDA 12.8 版在 Nano4 執行（`data/external/cuda-libs-12.8/`）；另用 `go` 環境的 libstdc++ | 使用中（執行環境） | 環境依賴，非模型增益 |
+| scikit-learn | 1.7.2（`requirements.txt`） | [scikit-learn.org](https://scikit-learn.org/) | BSD-3 | B2 題目層級 logistic regression、PCA | 使用中 | 正式候選模型的分類器 |
 
 ## 外部資料
 
