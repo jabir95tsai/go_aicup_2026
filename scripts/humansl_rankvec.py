@@ -6,7 +6,8 @@ select  : learning games from the A-047 train-split draw (outputs/humansl_train2
           rank -> outputs/humansl_rankvec/games.parquet (role learn / monitor).
 check   : (GPU) with every vector at its rank_1d initial value, per-move log p
           must equal the unmodified network with the rank_1d metadata row
-          (A-050 path, Board.would_be_legal mask), max |diff| <= 1e-3 on 2 games.
+          (A-050 path, Board.would_be_legal mask), max |diff| <= 1e-3 on 2 games,
+          in full fp32 (TF32 off).
 analyze : B2 fitted on the Valid-S fitting games (q1000 S-fit + vs_rest S-fit /
           S-extra, 38,589 games, as A-044 (i)), scored on the 1,000 S-select
           questions; C = own_r* / opp_r* means from humansl_rankvec extract
@@ -76,7 +77,7 @@ def check() -> None:
     from go_aicup.features.humansl_torch import CKPT, encode_game, _init_worker, profile_metadata
 
     device = torch.device("cuda")
-    model, init = rv.load_frozen(device)
+    model, init = rv.load_frozen(device, fp32=True)
     plain, _, _ = load_model(str(CKPT), use_swa=False, device=device)
     plain.eval()
     features = Features(plain.config, plain.pos_len)

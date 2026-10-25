@@ -39,13 +39,17 @@ RANKS, PLANES, AREA = 10, 22, 361
 SEED = 2027
 
 
-def load_frozen(device):
-    """HumanSL with its metadata encoder replaced by the identity (input_meta is the trunk offset)."""
+def load_frozen(device, fp32: bool = False):
+    """HumanSL with its metadata encoder replaced by the identity (input_meta is the trunk offset).
+
+    fp32=True disables TF32 (the path check); TF32 moves per-move log p by up to
+    2.4e-3 (p99 1.5e-3), below the engine's own noise (A-041 p99 5.9e-3), and
+    is ~7x faster, so learning and extraction use it."""
     import torch
     _katago()
     from katago.train.load_model import load_model
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
+    torch.backends.cuda.matmul.allow_tf32 = not fp32
+    torch.backends.cudnn.allow_tf32 = not fp32
     model, _, _ = load_model(str(CKPT), use_swa=False, device=device)
     model.eval()
     model.requires_grad_(False)
@@ -230,40 +234,66 @@ def _monitor_games(run: Path, model, vectors, data, monitor) -> dict:
             "score_rank_official": round(float(((decoded == truth) + (np.abs(decoded - truth) == 1) / np.e).mean()), 4)}
 
 
-def extract(table: pd.DataFrame, vectors_path: Path, out: Path, cache: Path, workers: int) -> dict:
+def extract(table: pd.DataFrame, vectors_path: Path, out: Path, cache: Path, workers: int,
+            batch_positions: int = 409) -> dict:
+    """Positions of consecutive games are pooled into fixed batches (batch_positions x RANKS
+    evaluations) for torch.compile: 10.5k vs 4.5k evaluations/s eager on an H200 (A-055)."""
     import torch
     out.mkdir(parents=True, exist_ok=True)
     table.reset_index(drop=True).to_parquet(out / "games.parquet")
     device = torch.device("cuda")
     model, _ = load_frozen(device)
+    forward = torch.compile(model, dynamic=False)
     vectors = torch.load(vectors_path, map_location=device)["vectors"]
     games = cache_games(table["game_index"], cache)
-    feature = np.zeros((len(table), 2 * RANKS), dtype=np.float32)
-    done = np.zeros(len(table), dtype=bool)
+    sums = torch.zeros((len(table) * 2, RANKS), device=device)
+    counts = np.zeros(len(table) * 2, dtype=np.int64)
+    pending: list[tuple] = []
+
+    def flush(final: bool) -> list[tuple]:
+        bins, globals_, played, own, slot = (np.concatenate(a) for a in zip(*pending))
+        while len(played) >= batch_positions or (final and len(played)):
+            n = min(batch_positions, len(played))
+            chunk = [a[:n] for a in (bins, globals_, played, own)]
+            if n < batch_positions:    # pad the last batch so the compiled shape never changes
+                chunk = [np.concatenate([a, np.repeat(a[-1:], batch_positions - n, axis=0)]) for a in chunk]
+            logp = game_logp(forward, vectors, *chunk, batch=batch_positions * RANKS)[:n]
+            sums.index_add_(0, torch.as_tensor(slot[:n], device=device), logp)
+            np.add.at(counts, slot[:n], 1)
+            bins, globals_, played, own, slot = (a[n:] for a in (bins, globals_, played, own, slot))
+        return [(bins, globals_, played, own, slot)] if len(played) else []
+
     started = last = time.monotonic()
-    positions = 0
+    positions = waiting = 0
     with mp.get_context("spawn").Pool(workers, initializer=_init_worker, initargs=(model.config,)) as pool:
         for g, (bins, globals_, played) in enumerate(pool.imap(encode_game, games, chunksize=4)):
             own = games[g][1] == table["player_color"].iloc[g]
             if not own.any() or own.all():
                 continue
-            logp = game_logp(model, vectors, bins, globals_, played, own)
-            mine = torch.as_tensor(own, device=device)
-            feature[g] = torch.cat([logp[mine].mean(0), logp[~mine].mean(0)]).cpu().numpy()
-            done[g] = True
+            pending.append((bins, globals_, played, own, 2 * g + (~own).astype(np.int64)))
             positions += len(played)
+            waiting += len(played)
+            if waiting >= batch_positions:
+                pending = flush(final=False)
+                waiting = sum(len(p[2]) for p in pending)
             now = time.monotonic()
             if now - last >= 30:
-                print(json.dumps({"games_done": int(done.sum()), "positions_per_second":
+                print(json.dumps({"games_read": g + 1, "positions_per_second":
                                   round(positions / (now - started), 1)}), flush=True)
                 last = now
+        if pending:
+            flush(final=True)
     seconds = time.monotonic() - started
+    counts = counts.reshape(-1, 2)
+    done = (counts > 0).all(axis=1)
+    mean = (sums.reshape(-1, 2, RANKS).cpu().numpy() / np.maximum(counts, 1)[:, :, None]).reshape(len(table), -1)
+    feature = np.where(done[:, None], mean, 0).astype(np.float32)
     np.save(out / "feature.npy", feature)
     np.save(out / "done.npy", done)
     meta = {"columns": [f"own_r{r}" for r in range(RANKS)] + [f"opp_r{r}" for r in range(RANKS)],
             "games": len(table), "games_complete": int(done.sum()), "positions": positions,
             "seconds": round(seconds, 1), "positions_per_second": round(positions / seconds, 1),
-            "vectors": str(vectors_path)}
+            "vectors": str(vectors_path), "precision": "tf32, torch.compile"}
     (out / "meta.json").write_text(json.dumps(meta, indent=1))
     return meta
 

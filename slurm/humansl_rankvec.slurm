@@ -27,6 +27,7 @@ printf 'Job=%s node=%s mode=%s\n' "${SLURM_JOB_ID:-unknown}" "${SLURMD_NODENAME:
 nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv
 EXTRA=()
 [[ -n "${LIMIT:-}" ]] && EXTRA+=(--limit "$LIMIT")
+[[ -n "${WORKERS:-}" ]] && EXTRA+=(--workers "$WORKERS")
 start=$(date +%s)
 case "$MODE" in
     check)   "$PYTHON_BIN" scripts/humansl_rankvec.py check ;;
