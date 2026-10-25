@@ -7,11 +7,11 @@
 #        bash scripts/run_release.sh outputs/rehearsal/raw outputs/rehearsal_t3
 #
 # Jobs (all `dev`, account GOV115094):
-#   prep       CPU   preprocess release -> GameStores
+#   prep       1 GPU (the dev partition requires one; CPU work) preprocess release -> GameStores
 #   pid        1 GPU competition 1: GE2E insurance vectors, then opening + insurance + L6 per pool (A-053)
 #   rank-v2    1 GPU competition 2 fallback path: V2 prepare / infer / C2 aggregate (A-030)
 #   rank-hsl   8 x 1 GPU HumanSL extraction, 4 shards per question file (A-042)
-#   finish     CPU   HumanSL B2 aggregate (falls back to V2 per question), Day-0 audit, SUMMARY.md
+#   finish     1 GPU (CPU work) HumanSL B2 aggregate (falls back to V2 per question), Day-0 audit, SUMMARY.md
 # If an sbatch call times out, check `squeue -u $USER` before rerunning: the job may exist.
 set -euo pipefail
 RAW="${1:?raw dir}"; OUT="${2:?out dir}"
@@ -32,7 +32,7 @@ submit() {   # name, extra sbatch args..., -- command
         --wrap "set -euo pipefail; $ENV; $*"
 }
 
-PREP=$(submit prep -c 12 --mem=100G -t 01:00:00 -- \
+PREP=$(submit prep --gres=gpu:1 -c 12 --mem=100G -t 01:00:00 -- \
     "$PY -m go_aicup.data.preprocess release --raw-dir $RAW --out-dir $STORE")
 
 # Insurance failure falls back to the opening model alone (still a valid submission).
@@ -56,7 +56,7 @@ for name in rank_public rank_private; do
 done
 
 DEPS=$(IFS=:; echo "${HSL[*]}")
-FINISH=$(submit finish --dependency=afterany:$DEPS:$PID -c 8 --mem=64G -t 01:00:00 -- \
+FINISH=$(submit finish --dependency=afterany:$DEPS:$PID --gres=gpu:1 -c 8 --mem=64G -t 01:00:00 -- \
     "for name in rank_public rank_private; do $PY -m go_aicup.tasks.strength.humansl_predict aggregate --work $OUT/rank/\$name \
        --submission $OUT/submissions/\$name.csv || echo \"HumanSL aggregate failed for \$name\"; \
        cp $OUT/rank/\$name/submission.csv $OUT/submissions/\${name}_v2_fallback.csv || echo \"no V2 submission for \$name\"; done; \
