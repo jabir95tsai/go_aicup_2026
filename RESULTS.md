@@ -1217,3 +1217,15 @@ split 1／2 分開：保險單獨 0.9385／0.9343，融合 0.9865／0.9828，融
 - **Gate：PASS。** 四個提交檔各 400 列；競賽一 top-5 public／private 都 400/400 與 A-053 相同；競賽二 HumanSL 類別 public 399/400、**private 398/400**（剛好等於門檻），V2 備援檔與 A-030 逐位相同；兩檔都沒有題目退回 V2。
 - 競賽二的 1–2 題差異來自 HumanSL 抽取的批次雜訊（A-042：同一路徑兩次抽取之間每盤特徵 p99 約 7.5e-3），屬已知雜訊；private 剛好壓線，所以這個門檻對 400 題來說偏緊，往後的比對可能偶爾低於 398。
 - 一鍵流程送出時發現 dev 佇列不接受不申請 GPU 的作業，prep 與 finish 改為各申請 1 張 GPU（實際只用 CPU，各約 10 秒）。
+
+
+### A-055 C2：學幽玄級別的 HumanSL 條件向量（2026-10-25，事先登記；使用者同意）
+
+**機制：** HumanSL 把 metadata（192 維）經小 MLP 編碼成 384 維向量，加到主幹第一層。C2 凍結整個網路，以學到的向量取代這個編碼器輸出：每個幽玄級別 r 兩個向量，e[r, 本人]（輪到標註玩家）與 e[r, 對手]（輪到他的對手），共 10×2×384 個參數，全部從 `rank_1d` profile 的編碼值初始化，最大化真實級別下實際落子的 policy log-likelihood（`src/go_aicup/features/humansl_rankvec.py`，實驗腳本 `scripts/humansl_rankvec.py`）。合法手遮罩＝空點、非劫禁點＋pass（不排除自殺手；A-050 的遮罩有排除）。
+- **假設：** KataGo 的 rank profile 是 KGS 尺度，直接用幽玄標籤校準，相鄰級別會更好分。增益未知。可學參數只有 7.7k，推測比 A-052 的主幹表示不容易「認人」（未驗證）。
+- **學習資料：** A-047 的 train 切分抽樣（`outputs/humansl_train20`），排除 S-select 那一半的 906 人；每級 10% 玩家當 monitor 玩家，每級 learn 1,350 盤、monitor 150 盤，共 15,000 盤、3,325,141 個盤面（`outputs/humansl_rankvec/games.parquet`）。Valid-U、S-select 玩家不參與。Adam lr 3e-3、cosine、batch 512、2 epochs（約 1.2 萬步）。
+- **正確性檢查（先跑）：** 向量全為初始值時，每手 log p 與未修改網路＋`rank_1d` metadata（A-050 路徑）在 2 盤上最大差 ≤1e-3。
+- **特徵：** A-051 的 47,964 盤（擬合集 38,589 盤＋S-select 9,375 盤），每個盤面在 10 個級別假設下各算一次 log p；每盤 C＝本人／對手各 10 個平均（20 維）。
+- **比較（B2，擬合＝A-044 (i) 的 38,589 盤，S-select 1,000 題）：** AH（0.7101）vs AH＋C；診斷 A＋C、H＋C、C 單獨（H 單獨 0.7025）。monitor 盤另報單盤 argmax／score_rank 診斷。
+- **Gate：** AH＋C − AH ≥ +0.01 → 擴大到全部 Valid-S、Valid-U 與測試集；否則依 D-003 保留程式與向量，不碰 Valid-U。
+- **估算：** 打包 4×1 H200 約 15 分；學向量 1×H200 <1 小時；特徵 10×1 H200 約 3–4 GPU-h；合計約 5 GPU-h。
