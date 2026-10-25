@@ -11,9 +11,13 @@ see Day-0 audit item 3). A game is used for the opening only if it has at
 least MIN_PLIES plies and strictly alternates B, W, ... over them; a question
 with no usable game scores 0 for every candidate (count printed).
 
-Outputs in --out-dir: scores.npy (questions x candidates, opening
-log-likelihoods before L6, for later fusion), candidates.npy, predictions.parquet
-and a provisional submission CSV (format fixed on 11/04).
+With --insurance-dir (GE2E vectors from identity/insurance.py, A-035 / A-053)
+the scores become opening + lambda * w * cosine before L6; a question without
+a usable opening game is then ranked by the insurance alone.
+
+Outputs in --out-dir: scores.npy (questions x candidates, scores fed to L6:
+opening log-likelihoods, fused when --insurance-dir is given), candidates.npy,
+predictions.parquet and a provisional submission CSV (format fixed on 11/04).
 
     python -m go_aicup.tasks.identity.predict --store-dir data/processed --pool pool_public \\
         --questions pid_public --out-dir outputs/pid_submit/public
@@ -93,7 +97,7 @@ def opening_scores(prefix, gallery_games, query_games, population, params) -> np
 
 
 def predict(store_dir: Path, pool_name: str, question_name: str, orient: str, method: str,
-            params: dict | None = None):
+            params: dict | None = None, insurance_dir: Path | None = None):
     params = params or load_params(orient)
     min_plies = 2 * max(params["moves"], params["slot_moves"])
     train_meta, train_pre = train_prefix(orient)
@@ -121,6 +125,11 @@ def predict(store_dir: Path, pool_name: str, question_name: str, orient: str, me
     if scored.any():
         scores[scored] = opening_scores(prefix, gallery_games, [g for g, s in zip(query_games, scored) if s],
                                         np.arange(n_pop), params)
+    insurance_info = {}
+    if insurance_dir is not None:
+        from go_aicup.tasks.identity.insurance import fused_scores
+        scores, insurance_info = fused_scores(scores, insurance_dir, pool_name, question_name, candidates,
+                                              pool_players, [rows_by_q[q] for q in question_ids])
     if method == "none":
         ranked = assign.top5(scores)
     else:
@@ -131,7 +140,7 @@ def predict(store_dir: Path, pool_name: str, question_name: str, orient: str, me
             "unusable_query_games": int((~q_ok).sum()),
             "empty_candidates": int(sum(len(g) == 0 for g in gallery_games)),
             "population_games": n_pop, "candidates_seen_in_train": overlap,
-            "orient": orient, "assign": method, **params}
+            "orient": orient, "assign": method, **params, **insurance_info}
     num_games = q_meta.groupby("question_id", sort=False)["num_games"].first()
     table = pd.DataFrame({"question_id": question_ids,
                           "num_games": num_games.loc[question_ids].to_numpy(),
@@ -150,8 +159,10 @@ def main(argv=None) -> int:
     parser.add_argument("--orient", choices=("d4", "raw"), default="d4")
     parser.add_argument("--assign", choices=("hungarian", "sinkhorn", "none"), default="hungarian")
     parser.add_argument("--submission", type=Path, help="default <out-dir>/submission.csv")
+    parser.add_argument("--insurance-dir", type=Path, help="identity/insurance.py work dir; fuse GE2E (A-053)")
     args = parser.parse_args(argv)
-    table, scores, candidates, info = predict(args.store_dir, args.pool, args.questions, args.orient, args.assign)
+    table, scores, candidates, info = predict(args.store_dir, args.pool, args.questions, args.orient, args.assign,
+                                              insurance_dir=args.insurance_dir)
     args.out_dir.mkdir(parents=True, exist_ok=True)
     np.save(args.out_dir / "scores.npy", scores)
     np.save(args.out_dir / "candidates.npy", candidates)

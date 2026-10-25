@@ -1189,3 +1189,9 @@ split 1／2 分開：保險單獨 0.9385／0.9343，融合 0.9865／0.9828，融
 - 推測（未驗證）：主幹表示強烈編碼了玩家的個人風格（同一人的盤彼此很像），B2 的合成題目重複使用同一批玩家，LR 學到的是「認人」的方向，換到新玩家就失效。只用表示仍有 0.63（A-051），所以訊號存在，只是線性 head 加在 AH 上用不起來。
 - AH 選到 C=0.3 時 S-select 0.7114，比 C=1 的 0.7101 高 0.0013（雜訊內）；正式模型維持 C=1。
 - **處置：** 依 D-003 保留表示、程式與結果。C1 這條線先停在這裡；C2（用幽玄級別微調 policy）仍是未試的選項。
+
+
+### A-053 競賽一 GE2E 保險模型接進提交管線（2026-10-25，事先登記；T2 待辦）
+
+**程式：** `tasks/identity/insurance.py`：release GameStore → `write_store_cache`（與競賽二同一套重播）→ A-035 編碼器（`outputs/pid_ge2e_v1_short`）對每盤 ply ≥20 的黑方手取平均（依存檔顏色選手，不靠奇偶）→ `ge2e.npz`。`identity/predict.py --insurance-dir`：開局分數＋λ×w×cos（λ＝8、w 取自 `eval_summary.json`／`model.pt`；與 `scripts/identity_ge2e_eval.py` 相同：每盤向量先正規化、再平均、再正規化），之後照常 Sinkhorn＋Hungarian（tau 用開局模型的值，與 A-035 相同）；沒有可用開局盤的題目只靠保險分數排序。
+- **彩排 gate（假 release：public＝合成 split 1、private＝split 2）：** (a) release 路徑每盤向量與 A-035 訓練路徑向量（`embeddings_split{1,2}.npz`）的 cosine 全部 ≥0.999；(b) 融合＋Hungarian 的 top-5 與 A-035 驗證路徑（同一套開局分數＋訓練路徑向量）相同 ≥398/400，不同者須為近乎平手；(c) 分數與 A-035 的融合＋Hungarian（split 1／2 皆 1.0）相差 ≤0.005。bf16 與批次組成會造成微小數值差（A-036），所以 (a)(b) 不要求逐位相同。
