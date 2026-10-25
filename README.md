@@ -308,16 +308,18 @@ python scripts/plot_rank_v1.py --run-dir outputs/rank_cnn_v1_seed2027 --skip-con
 python -m go_aicup.data.preprocess release --raw-dir data/raw --out-dir data/processed
 # 1. Day-0 稽核（EXECUTION_PLAN §5 的 1–7、9；L10 另跑）
 python scripts/day0_audit.py --store-dir data/processed --raw-dir data/raw --out outputs/day0_audit/report.json
-# 2. 競賽一：public／private 各自獨立（CPU，每個池約 40 秒）
+# 2. 競賽一：GE2E 保險向量（1 張 GPU，4 個 store 約 10 分鐘，A-053）→ public／private 各自獨立（CPU，每個池約 40 秒）
+python -m go_aicup.tasks.identity.insurance --store-dir data/processed \
+    --name pid_public pid_private pool_public pool_private --work-dir outputs/pid_submit/insurance
 python -m go_aicup.tasks.identity.predict --store-dir data/processed --pool pool_public --questions pid_public \
-    --out-dir outputs/pid_submit/public --submission submissions/pid/public.csv
+    --insurance-dir outputs/pid_submit/insurance --out-dir outputs/pid_submit/public --submission submissions/pid/public.csv
 python -m go_aicup.tasks.identity.predict --store-dir data/processed --pool pool_private --questions pid_private \
-    --out-dir outputs/pid_submit/private --submission submissions/pid/private.csv
+    --insurance-dir outputs/pid_submit/insurance --out-dir outputs/pid_submit/private --submission submissions/pid/private.csv
 # 3. 競賽二：prepare（CPU）→ infer（1 張 GPU，Slurm dev）→ aggregate（C2＋score_rank）
 sbatch slurm/strength_predict.slurm   # 預設 data/processed → outputs/rank_submit/<name>/submission.csv
 ```
 
-- 競賽一預設 D4 正規化＋pp+slot＋Sinkhorn／Hungarian（A-029）；`--orient raw`、`--assign sinkhorn|none` 留給 11/04 稽核後切換。每盤要有 ≥16 手且前 16 手黑白交替才用於開局分數；無可用盤的題目所有候選人同分（有計數）。
+- 競賽一預設 D4 正規化＋pp+slot＋GE2E 保險（λ＝8，A-035、A-053）＋Sinkhorn／Hungarian（A-029）；不加 `--insurance-dir` 即為只用開局；`--orient raw`、`--assign sinkhorn|none` 留給 11/04 稽核後切換。每盤要有 ≥16 手且前 16 手黑白交替才用於開局分數；無可用盤的題目所有候選人同分（有計數）。
 - 競賽二使用 `outputs/v2_strength/model.pt`（A-024）與 `outputs/v2_agg_calibration/result.json` 的 T_k；`num_games` 不在 5／10／15／20 時用最近的 k；整題無可用盤時用其他題的平均機率（有計數）。
 - **彩排：** `python scripts/make_fake_release.py` 把 Valid-U 題目與合成候選庫 split 1／2 轉成官方寬格式（`outputs/rehearsal/raw/`），跑完上面 0–3 步（`--raw-dir outputs/rehearsal/raw --out-dir outputs/rehearsal/store` 等）後，`python scripts/rehearsal_check.py` 檢查 T1 gate。
 
