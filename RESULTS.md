@@ -1205,3 +1205,10 @@ split 1／2 分開：保險單獨 0.9385／0.9343，融合 0.9865／0.9828，融
 
 - **Gate：PASS**（三項都通過）。λ＝8、w＝10.026；沒有題目或候選人缺保險向量。T2 競賽一的待辦完成。
 - 合成驗證仍飽和（1.0），只證明管線正確；真實資料表現未知（CLAUDE.md §0 警訊照舊）。
+
+
+### A-054 一鍵提交流程（T3 提前；2026-10-25）
+
+`scripts/run_release.sh <raw-dir> <out-dir>`：一次送出全部 Slurm 作業並設好依賴後返回：prep（前處理）→ pid（GE2E 向量＋開局＋保險＋L6；保險失敗時退回只用開局）與 rank-v2（V2 prepare／infer／C2，備援）→ 8 個 HumanSL 抽取（依賴 rank-v2，V2 失敗時自動取消）→ finish（B2 聚合，逐題退回 V2；Day-0 稽核；`scripts/release_summary.py` 寫 `SUMMARY.md`）。HumanSL 聚合只讀完成的 shard（有 `meta.json`），全部失敗時每題退回 V2。`slurm/humansl.slurm` 補上自動建立輸出目錄。
+- **彩排（事先登記）：** 用假 release（`outputs/rehearsal/raw`）從頭跑到 `outputs/rehearsal_t3_1025`。Gate：四個提交檔都產生、各 400 列；競賽一 top-5 與 A-053 彩排完全相同；競賽二 HumanSL 預測與 A-044 正式模型在 A-042 彩排路徑上的類別相同 ≥398/400（HumanSL 抽取的批次雜訊，A-042），且 V2 備援檔與 A-030 相同。估約 3 GPU-h。
+- 待使用者決定：`slurm/` 在 `.gitignore` 裡，一鍵流程依賴的 `slurm/humansl.slurm` 與 `slurm/strength_predict.slurm` 不在版本控制內。

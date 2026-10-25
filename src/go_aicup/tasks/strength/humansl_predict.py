@@ -24,7 +24,7 @@ import numpy as np
 import pandas as pd
 
 from go_aicup.data.board_cache import RANKS
-from go_aicup.features.humansl import run_features
+from go_aicup.features.humansl import run_features, shard_features
 from go_aicup.metrics import score_rank
 from go_aicup.paths import PROCESSED, ROOT
 from go_aicup.tasks.strength.humansl import RankModel
@@ -72,11 +72,21 @@ def fit(method: str, out: Path) -> None:
     print(f"fit: {method} on {len(games):,} games / {len(questions):,} questions -> {out}")
 
 
+def release_features(run: Path) -> pd.DataFrame:
+    """HumanSL features of finished shards only; a failed shard (no meta.json) is skipped."""
+    shards = sorted(p for p in run.glob("shard_*") if (p / "meta.json").exists() and (p / "done.npy").exists())
+    skipped = sorted(p.name for p in run.glob("shard_*") if p.is_dir() and p not in shards)
+    if skipped:
+        print(f"aggregate: skipping unfinished HumanSL shards {skipped}")
+    parts = [shard_features(p) for p in shards]
+    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame({"game_index": []})
+
+
 def aggregate(work: Path, model_path: Path, submission: Path | None) -> pd.DataFrame:
     model, info = RankModel.load(model_path)
     table = features(a024_per_game(np.load(work / "category.npy", allow_pickle=False)),
-                     run_features(work / "humansl"))
-    if list(table.columns) != info["columns"]:
+                     release_features(work / "humansl"))
+    if len(table) and list(table.columns) != info["columns"]:
         raise ValueError("feature columns differ from the fitted model")
     questions = question_table(work)
     available = set(table.index)
@@ -85,7 +95,8 @@ def aggregate(work: Path, model_path: Path, submission: Path | None) -> pd.DataF
     usable = questions["games"].map(len).to_numpy() > 0
     v2 = pd.read_parquet(work / "predictions.parquet").set_index("question_id")
     probabilities = v2.loc[questions["question_id"], [f"p_{r}" for r in RANKS]].to_numpy()
-    probabilities[usable] = model.probabilities(table.to_numpy(), table.index.to_numpy(), questions[usable])
+    if usable.any():
+        probabilities[usable] = model.probabilities(table.to_numpy(), table.index.to_numpy(), questions[usable])
     rank_id = score_rank(probabilities)
     result = questions.drop(columns=["games"]).assign(
         humansl_games=questions["games"].map(len), fallback_v2=~usable, rank_id=rank_id,
