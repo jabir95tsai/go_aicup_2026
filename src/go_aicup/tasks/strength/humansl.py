@@ -65,10 +65,12 @@ def player_folds(games: pd.DataFrame) -> np.ndarray:
 
 
 class RankModel:
-    def __init__(self, method: str):
+    def __init__(self, method: str, C: float = 1.0):
+        """C: inverse L2 strength of the B2 per-k LRs (A-052); B0/B1 keep C=1."""
         if method not in METHODS:
             raise ValueError(f"method must be one of {METHODS}")
         self.method = method
+        self.C = C
 
     # ---------------------------------------------------------------- fitting
     def fit(self, games: pd.DataFrame, questions: pd.DataFrame, x: np.ndarray) -> "RankModel":
@@ -117,7 +119,8 @@ class RankModel:
             features = np.stack([x[rng.choice(players[p], k, replace=False)].mean(axis=0) for p in picks])
             labels = np.array([y[players[p][0]] for p in picks])
             scaler = StandardScaler().fit(features)
-            self.per_k[k] = (scaler, LogisticRegression(C=1.0, max_iter=5000).fit(scaler.transform(features), labels))
+            model = LogisticRegression(C=getattr(self, "C", 1.0), max_iter=5000)
+            self.per_k[k] = (scaler, model.fit(scaler.transform(features), labels))
 
     # ------------------------------------------------------------- prediction
     def probabilities(self, x: np.ndarray, game_index, questions: pd.DataFrame) -> np.ndarray:
