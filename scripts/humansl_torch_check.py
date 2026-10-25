@@ -102,7 +102,7 @@ def main() -> int:
     metas = [profile_metadata(p) for p in PROFILES]
     table = pd.read_parquet(REFERENCE / "games.parquet").iloc[:args.games]
     reference, offsets = np.load(REFERENCE / "logp.npy"), np.load(REFERENCE / "offsets.npy")
-    diffs, feature_diffs = [], []
+    diffs, feature_diffs, late_diffs, late_feature_diffs = [], [], [], []
     for i, ((moves, colors), game) in enumerate(zip(cache_games(table["game_index"]), table.itertuples())):
         mine = game_logp(model, features, moves, colors, metas, device)
         engine = reference[offsets[i]:offsets[i + 1]]
@@ -110,11 +110,21 @@ def main() -> int:
         own = colors == game.player_color
         feature_diffs.append(max(np.abs(mine[own].mean(0) - engine[own].mean(0)).max(),
                                  np.abs(mine[~own].mean(0) - engine[~own].mean(0)).max()))
+        # Diagnostic: the engine's NN cache reuses evals across transpositions with different
+        # history (cpp/neuralnet/nninputs.cpp getHash); early-opening transpositions are common.
+        late = np.arange(len(moves)) >= 10
+        late_diffs.append(np.abs(mine[late] - engine[late]).ravel())
+        late_feature_diffs.append(max(np.abs(mine[own & late].mean(0) - engine[own & late].mean(0)).max(),
+                                      np.abs(mine[~own & late].mean(0) - engine[~own & late].mean(0)).max()))
     d, f = np.concatenate(diffs), np.array(feature_diffs)
     result = {"weights": "swa" if args.swa else "model", "games": len(f), "moves_x_profiles": int(len(d)),
               "per_move": {"mean": float(d.mean()), "p50": float(np.median(d)), "p99": float(np.quantile(d, 0.99)),
                            "max": float(d.max())},
               "per_game_feature": {"p99": float(np.quantile(f, 0.99)), "max": float(f.max())}}
+    late, late_f = np.concatenate(late_diffs), np.array(late_feature_diffs)
+    result["diagnostic_turns_10_plus"] = {"per_move_mean": float(late.mean()), "per_move_p99": float(np.quantile(late, 0.99)),
+                                          "per_move_max": float(late.max()), "per_game_feature_p99": float(np.quantile(late_f, 0.99)),
+                                          "per_game_feature_max": float(late_f.max())}
     result["gate"] = bool(result["per_move"]["mean"] <= 3e-3 and result["per_move"]["p99"] <= 2e-2
                           and result["per_game_feature"]["p99"] <= 1e-2)
     print(json.dumps(result, indent=1))
