@@ -111,6 +111,8 @@ H200 佇列限制**每張 GPU 最多 12 CPU 核心、200GB 主記憶體**；200G
 
 **棋力主線改為 HumanSL＋B2（2026-10-24～25，使用者同意提前 D3，`RESULTS.md` A-039～A-047、D-003）：** KataGo v1.18.2 analysis engine 以 HumanSL 網路 `b18c384nbt-humanv0` 為主模型，每個位置 1 visit、15 個 `rank_*` profile、日本規則貼目 6.5，取實際著手的 log-likelihood；每盤特徵＝本人／對手各 15 個平均，再加 A-024 每盤平均 log-prob（10 維）。題目聚合 B2：每個 k 一個 logistic regression，在擬合玩家的合成題目（同一玩家抽 k 盤、特徵取平均）上擬合，`score_rank` 解碼。正式模型 `outputs/humansl_model/model.pkl` 以全部 Valid-S 擬合（65,223 盤、5,000 人），Valid-U 從不擬合。A-024＋C2 保留為對照提交與 HumanSL 失敗時的備援。外部資源見 `EXTERNAL_RESOURCES.md`。D-003：本地沒過 gate 的方向（只用 HumanSL＋train 玩家、強引擎特徵、貼目 0、平衡解碼、主幹表示等）保留，T5 以 LB 探針判斷。
 
+**棋力首選改為 AH＋C（2026-10-26，使用者決定，`RESULTS.md` A-055、A-056）：** C2：凍結 HumanSL，為每個幽玄級別學兩個 384 維條件向量（本人／對手，取代 metadata 編碼器輸出），每盤 C＝10 個級別假設下本人／對手的平均 log p（20 維）。B2 以全部 Valid-S 擬合 AH＋C（`outputs/humansl_rankvec_model/model.pkl`）：S-select 0.7209 vs AH 0.7101，Valid-U 0.6934 vs 0.6833（+0.0102，玩家 bootstrap 95% [−0.0003, +0.0211]）。AH 保留為對照提交。提交流程輸出 `rank_<part>.csv`（AH＋C）、`rank_<part>_ah.csv`（AH）、`rank_<part>_v2_fallback.csv`。
+
 ### 仍待確認 ⏳
 
 | 項目 | 為什麼重要 | 何時／去哪查 |
@@ -377,4 +379,4 @@ project/
 3. **`cv.py`（Day 2）**：GroupKFold by player_id + 競賽一的合成候選庫產生器，附零重疊 assert
 4. **`feature_policy.py`（Day 2）**：把第 4 節的檢查清單寫成 code（禁用欄位名單 + fold-safe encoder）
 5. **後續工作**：依第 7 節與 EXECUTION_PLAN.md 的 T1–T6 執行；11/04 前僅本地驗證，不安排官方上傳。
-6. **主力現況（2026-10-25）**：競賽二為 A-024＋HumanSL＋B2（備援 V2 ResNet＋C2）；競賽一為 D4 開局模型＋L6，加上不靠開局的 GE2E 保險模型（λ＝8，A-053）。一鍵提交流程 `scripts/run_release.sh`（A-054）。
+6. **主力現況（2026-10-26）**：競賽二首選為 A-024＋HumanSL＋C2 級別向量＋B2（AH＋C，A-055／A-056），對照 AH（A-024＋HumanSL＋B2），備援 V2 ResNet＋C2；競賽一為 D4 開局模型＋L6，加上不靠開局的 GE2E 保險模型（λ＝8，A-053）。一鍵提交流程 `scripts/run_release.sh`（A-054；10/26 加入 AH＋C 與 AH 對照檔，彩排通過，A-056）。

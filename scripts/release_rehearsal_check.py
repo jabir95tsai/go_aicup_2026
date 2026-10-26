@@ -36,6 +36,11 @@ REHEARSAL = ROOT / "outputs" / "rehearsal"
 SAME_MIN, C_DIFF_P99 = 398, 2e-3
 
 
+def same_rows(a: pd.DataFrame, b: pd.DataFrame) -> bool:
+    """Row-for-row equality as text (CSV reads question_id as int, parquet keeps str)."""
+    return a.astype(str).reset_index(drop=True).equals(b.astype(str).reset_index(drop=True))
+
+
 def _keys(games) -> list[bytes]:
     return [moves.tobytes() + colors.tobytes() for moves, colors in games]
 
@@ -55,8 +60,9 @@ def c_feature_match(work: Path, offline: pd.DataFrame, offline_keys: dict) -> di
 
 
 def answer_scores(predictions: pd.DataFrame, answers: pd.DataFrame) -> dict:
-    merged = predictions[["question_id", "rank_id"]].merge(answers[["question_id", "rank_id", "k"]], on="question_id",
-                                                           suffixes=("", "_true"))
+    left = predictions[["question_id", "rank_id"]].astype({"question_id": str})
+    merged = left.merge(answers[["question_id", "rank_id", "k"]].astype({"question_id": str}), on="question_id",
+                        suffixes=("", "_true"), validate="one_to_one")
     scores, k = official_scores(merged["rank_id"].to_numpy(), merged["rank_id_true"].to_numpy()), merged["k"].to_numpy()
     by = {str(b): round(float(scores[k == b].mean()), 4) for b in K_BUCKETS}
     return by | {"equal_k": round(float(np.mean(list(by.values()))), 4)}
@@ -90,8 +96,8 @@ def main() -> int:
         merged = new.merge(ref, on="question_id", suffixes=("", "_ref"))
         same = int((merged["rank_id"] == merged["rank_id_ref"]).sum())
         ah_file = pd.read_csv(out / "submissions" / f"{name}_ah.csv")
-        ah_file_matches = bool(ah_file.equals(pd.read_parquet(out / "rank" / name / "humansl_predictions.parquet")
-                                              [["question_id", "rank"]]))
+        ah_file_matches = same_rows(ah_file, pd.read_parquet(out / "rank" / name / "humansl_predictions.parquet")
+                                    [["question_id", "rank"]])
         v2_new = pd.read_csv(out / "submissions" / f"{name}_v2_fallback.csv")
         v2_old = pd.read_csv(old_work / "submission.csv")
         v2_same = bool(v2_new.equals(v2_old))
@@ -104,7 +110,7 @@ def main() -> int:
         result[name] = {"ah_classes_identical_to_a042_path": same, "questions": len(merged),
                         "ah_fallback_v2": int(merged["fallback_v2"].sum()), "ah_file_matches": ah_file_matches,
                         "v2_fallback_identical": v2_same,
-                        "ahc_complete": complete, "ahc_file_matches": bool(primary_file.equals(primary[["question_id", "rank"]])),
+                        "ahc_complete": complete, "ahc_file_matches": same_rows(primary_file, primary[["question_id", "rank"]]),
                         "ahc_vs_ah_same_class": int((primary["rank_id"].to_numpy()
                                                      == new.set_index("question_id").loc[primary["question_id"], "rank_id"].to_numpy()).sum()),
                         "c_features": c_match,

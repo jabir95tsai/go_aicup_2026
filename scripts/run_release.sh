@@ -64,7 +64,7 @@ for name in rank_public rank_private; do
     W="$OUT/rank/$name"
     for i in 0 1 2 3; do
         RV+=($(MODE=extract FEAT="$W/rankvec" GAMES="$W/cache/games.parquet" CACHE="$W/cache" NUM_SHARDS=4 SHARD=$i \
-            timeout 60 sbatch "${COMMON[@]}" --dependency=afterok:$V2 --kill-on-invalid-dep=yes --time=00:45:00 \
+            timeout 60 sbatch "${COMMON[@]}" --dependency=afterok:$V2 --kill-on-invalid-dep=yes --time=01:30:00 \
             --job-name="rel-c-${name#rank_}$i" --output="$OUT/logs/c-$name-$i-%j.out" --export=ALL slurm/humansl_rankvec.slurm))
     done
 done
