@@ -89,7 +89,9 @@ H200 佇列限制**每張 GPU 最多 12 CPU 核心、200GB 主記憶體**；200G
 
 **算力額度查核（2026-10-25）：** `wallet` 顯示專案 GOV115094（名稱「量子計算」，可能與其他成員共用）SU 餘額 **108,387.0087**；`sreport` 顯示本帳號 2026-10-01～10-25 共用 **254 GPU-h**；`sacctmgr` 的 QoS 為 normal、無 GrpTRESMins 上限。H200 每 GPU 小時的 SU 費率在官方公開頁面查不到，無法換算剩餘 GPU 小時；換算方式：下次跑已知 GPU 時數的作業前後各記一次 `wallet`（有其他成員同時使用時會有雜訊），或向國網中心客服詢問。
 
-**仍未知：** 專案 account／QoS、剩餘 GPU 小時、RQ／NRQ 身分、儲存配額、實際 driver／CUDA／PyTorch／NCCL 版本與排隊時間。晶創 26 另有 GB200／Arm 資源；本專案目前的 HPC 支援範圍限定上述 H200 佇列。
+**儲存配額（2026-10-26 查得）：** `/work/jason1122` 與 `/home/jason1122` 各有 **100 GB** 目錄配額（WekaFS，`df -h /work/jason1122` 可見）。寫滿時所有寫入都會失敗，Slurm log 也寫不進去，作業會在沒有任何錯誤訊息的情況下以 exit 1 結束（A-057：5 個作業在 40 秒內同時失敗）。大檔要先估容量；刪除後配額要過約 1 分鐘才更新。
+
+**仍未知：** 專案 account／QoS、剩餘 GPU 小時、RQ／NRQ 身分、實際 driver／CUDA／PyTorch／NCCL 版本與排隊時間。晶創 26 另有 GB200／Arm 資源；本專案目前的 HPC 支援範圍限定上述 H200 佇列。
 
 **依賴安裝基準（2026-10-11）：** 本機 Windows 與 Nano4 Linux x86_64 共用 `requirements.txt` 的直接依賴 pins，使用標準 CPython 3.11–3.13、`torch==2.6.0+cu124` 與官方 CUDA 12.4 額外索引。Linux CUDA wheel 的 NCCL 依賴由 pip 安裝；系統 module 不必恰好是 CUDA 12.4，但 driver 必須相容。Nano4 的 Conda **`go`** 環境已建置（2026-10-11 使用者確認）；上述依賴 pins 是否已完整安裝、實際套件版本與多卡測試結果仍待驗證。安裝、driver／glibc 檢查與 `scripts/check_torch_ddp.py` 的 1／2／8 卡驗證方式見 [README 的 Nano4 段落](README.md#nano4-linux單節點多卡)；環境紀錄放 `outputs/rank_env_nano4/`。2026-10-12 已依確認的 V1 計畫撰寫 DDP 模型訓練入口；使用者要求先寫程式不驗證，因此單／多卡 loss 與梯度、SyncBN、尾批及續跑皆尚未驗收，環境通過不代表訓練程式通過。
 
