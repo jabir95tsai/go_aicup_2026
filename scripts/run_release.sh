@@ -8,7 +8,9 @@
 #
 # Jobs (all `dev`, account GOV115094):
 #   prep       1 GPU (the dev partition requires one; CPU work) preprocess release -> GameStores
-#   pid        1 GPU competition 1: GE2E insurance vectors, then opening + insurance + L6 per pool (A-053)
+#   pid        1 GPU competition 1: GE2E insurance vectors, then opening + insurance + L6 per pool (A-053);
+#              also LB-probe variants (A-059): pid_<part>_noassign / _sinkhorn (fused, other L6) and
+#              pid_<part>_opening_only (Hungarian, no insurance)
 #   rank-v2    1 GPU competition 2 fallback path: V2 prepare / infer / C2 aggregate (A-030)
 #   rank-hsl   8 x 1 GPU HumanSL extraction, 4 shards per question file (A-042)
 #   rank-c     8 x 1 GPU C2 rank-vector extraction (A-055), 4 shards per question file
@@ -24,6 +26,13 @@ PROJECT_DIR=/work/jason1122/go_aicup_2026
 PY="${PYTHON_BIN:-${HOME}/.conda/envs/go/bin/python}"
 cd "$PROJECT_DIR"
 if [[ -e "$OUT" ]]; then echo "refusing to reuse existing $OUT" >&2; exit 1; fi
+# /work has a 100 GB directory quota; when full, jobs die without any log line (RESULTS A-057).
+FREE_GB=$(df -BG --output=avail /work/jason1122 | tail -1 | tr -dc '0-9')
+if (( FREE_GB < ${MIN_FREE_GB:-10} )); then
+    echo "only ${FREE_GB} GB free under /work/jason1122 (need ${MIN_FREE_GB:-10}); a run writes about 5 GB. Free space first:" >&2
+    du -sh "$PROJECT_DIR"/outputs/* 2>/dev/null | sort -h | tail -8 >&2
+    exit 1
+fi
 mkdir -p "$OUT/logs" "$OUT/submissions"
 STORE="$OUT/store"
 ENV="export PYTHONPATH=$PROJECT_DIR/src:$PROJECT_DIR/scripts PYTHONUNBUFFERED=1"
@@ -45,7 +54,13 @@ PID=$(submit pid --dependency=afterok:$PREP --gres=gpu:1 -c 12 --mem=150G -t 01:
     "if $PY -m go_aicup.tasks.identity.insurance --store-dir $STORE --name pid_public pid_private pool_public pool_private --work-dir $OUT/pid/insurance; \
      then INS='--insurance-dir $OUT/pid/insurance'; else echo 'insurance failed: opening only'; INS=''; fi; \
      for part in public private; do $PY -m go_aicup.tasks.identity.predict --store-dir $STORE --pool pool_\$part --questions pid_\$part \
-       \$INS --out-dir $OUT/pid/\$part --submission $OUT/submissions/pid_\$part.csv; done")
+       \$INS --out-dir $OUT/pid/\$part --submission $OUT/submissions/pid_\$part.csv; done; \
+     for part in public private; do for a in none sinkhorn; do $PY -m go_aicup.tasks.identity.predict --store-dir $STORE \
+       --pool pool_\$part --questions pid_\$part \$INS --assign \$a --out-dir $OUT/pid/\${part}_\$a \
+       --submission $OUT/submissions/pid_\${part}_\${a/none/noassign}.csv || echo \"variant \$a failed for \$part\"; done; \
+       $PY -m go_aicup.tasks.identity.predict --store-dir $STORE --pool pool_\$part --questions pid_\$part \
+       --out-dir $OUT/pid/\${part}_opening_only --submission $OUT/submissions/pid_\${part}_opening_only.csv \
+       || echo \"opening-only failed for \$part\"; done")
 
 V2=$(STORE_DIR="$STORE" WORK_DIR="$OUT/rank" timeout 60 sbatch "${COMMON[@]}" --dependency=afterok:$PREP \
     --job-name=rel-rank-v2 --output="$OUT/logs/rank-v2-%j.out" --export=ALL slurm/strength_predict.slurm)
