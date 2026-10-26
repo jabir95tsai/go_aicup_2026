@@ -99,6 +99,15 @@ def game_logp(model, vectors, bins, globals_, played, own, batch: int = 4096):
     return out
 
 
+def _encode_or_none(item):
+    """encode_game, or None for a game the replay rejects (it is then left out, not fatal)."""
+    try:
+        return encode_game(item)
+    except Exception as error:   # noqa: BLE001 - release data may hold games the replay cannot follow
+        print(json.dumps({"encode_failed": repr(error)[:200]}), flush=True)
+        return None
+
+
 def _games(path: Path, shard: int, num_shards: int, limit: int | None):
     table = pd.read_parquet(path).iloc[shard::num_shards]
     return table.iloc[:limit] if limit else table
@@ -266,10 +275,11 @@ def extract(table: pd.DataFrame, vectors_path: Path, out: Path, cache: Path, wor
     started = last = time.monotonic()
     positions = waiting = 0
     with mp.get_context("spawn").Pool(workers, initializer=_init_worker, initargs=(model.config,)) as pool:
-        for g, (bins, globals_, played) in enumerate(pool.imap(encode_game, games, chunksize=4)):
+        for g, encoded in enumerate(pool.imap(_encode_or_none, games, chunksize=4)):
             own = games[g][1] == table["player_color"].iloc[g]
-            if not own.any() or own.all():
+            if encoded is None or not own.any() or own.all():
                 continue
+            bins, globals_, played = encoded
             pending.append((bins, globals_, played, own, 2 * g + (~own).astype(np.int64)))
             positions += len(played)
             waiting += len(played)

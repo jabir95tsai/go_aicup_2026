@@ -1268,3 +1268,22 @@ split 1／2 分開：保險單獨 0.9385／0.9343，融合 0.9865／0.9828，融
 - A-055 合計用量約 7.1 GPU-h（原估 5；擴大步驟 2.0）。
 
 **決定（2026-10-26，使用者）：** **AH＋C 設為競賽二首選提交，AH 留作對照提交。** 理由：S-select 與 Valid-U 兩組獨立玩家都是約 +0.01、四個 k 桶全升；C 不依賴 A-024 對訓練玩家的記憶；Public LB 標準誤約 0.02，兩者在 LB 上大概分不出來，所以兩個都保留可提交。正式模型：B2（C=1）以全部 Valid-S 65,223 盤（A-044 (ii) 的列順序）擬合 AH＋C。接進提交管線的工作見 A-056。
+
+
+### A-056 AH＋C 接進一鍵提交流程（2026-10-26，事先登記；使用者同意）
+
+**變更：**
+- `humansl_predict fit --rankvec`：以 A-044 (ii) 的擬合盤與列順序（65,223 盤）擬合 AH＋C，寫入 `outputs/humansl_rankvec_model/model.pkl`（C 欄位加 `c_` 前綴）。**自檢通過**（Slurm 614751）：以存檔模型在 Valid-U 評分，AH＋C 0.6934、AH 0.6833，與 A-055 逐位相同。
+- `aggregate` 讀取 `<work>/rankvec/shard_*` 的 C 特徵；新增 `--predictions`（輸出檔名）與 `--fallback`（沒有可用盤的題目改用哪個預測檔）。
+- `humansl_rankvec extract`：重播失敗的盤改為跳過，不讓整個 shard 失敗；Slurm 腳本支援 `CACHE`、`VECTORS`。
+- `run_release.sh`：新增 8 個 C 抽取作業（每個題目檔 4 個 shard，依賴 rank-v2）。finish 依序產生：`rank_<part>_ah.csv`（AH 對照；題目缺 HumanSL 時退回 V2）、`rank_<part>.csv`（**AH＋C 首選**；題目缺 C 時退回 AH，AH＋C 整個失敗時複製 AH 檔），以及原本的 `_v2_fallback.csv`。
+- `release_summary.py`、`release_rehearsal_check.py` 跟著更新。
+
+**彩排 gate（假 release `outputs/rehearsal/raw` → `outputs/rehearsal_t3_1026`）：**
+1. 8 個提交檔各 400 列（pid ×2、AH＋C ×2、AH ×2、V2 ×2）。
+2. 競賽一 top-5 與 A-053 完全相同（400/400）。
+3. AH 對照：類別與 A-042 路徑相同 ≥398/400；`_ah.csv` 與 `humansl_predictions.parquet` 一致；V2 備援檔與 A-030 逐位相同。
+4. AH＋C：沒有題目退回、沒有缺盤；`rank_<part>.csv` 與 `rankvec_predictions.parquet` 一致。
+5. release 路徑的 C 特徵與離線抽取的同一批盤（以落子序列比對）每盤最大差 p99 ≤2e-3。TF32 雜訊與批次組成會造成微小差異（A-055 編譯版 vs eager p99 為 1.5e-4）。
+- **只作診斷、不作 gate：** AH＋C 與 AH 對彩排答案的官方分數。假題目來自 A-024 的 Valid-U 題目，分數不用來調任何設定。
+- **估算：** 約 3 GPU-h（A-054 的 2.1，加上 C 抽取 8×約 6 分鐘）。

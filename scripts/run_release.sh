@@ -11,7 +11,11 @@
 #   pid        1 GPU competition 1: GE2E insurance vectors, then opening + insurance + L6 per pool (A-053)
 #   rank-v2    1 GPU competition 2 fallback path: V2 prepare / infer / C2 aggregate (A-030)
 #   rank-hsl   8 x 1 GPU HumanSL extraction, 4 shards per question file (A-042)
-#   finish     1 GPU (CPU work) HumanSL B2 aggregate (falls back to V2 per question), Day-0 audit, SUMMARY.md
+#   rank-c     8 x 1 GPU C2 rank-vector extraction (A-055), 4 shards per question file
+#   finish     1 GPU (CPU work) Day-0 audit, SUMMARY.md and competition-2 B2 aggregates:
+#                rank_<part>.csv     AH+C, the primary (A-055); questions without C use AH
+#                rank_<part>_ah.csv  AH, the control (A-044); questions without HumanSL use V2
+#                rank_<part>_v2_fallback.csv  A-024 + C2
 # If an sbatch call times out, check `squeue -u $USER` before rerunning: the job may exist.
 set -euo pipefail
 RAW="${1:?raw dir}"; OUT="${2:?out dir}"
@@ -55,12 +59,28 @@ for name in rank_public rank_private; do
     done
 done
 
-DEPS=$(IFS=:; echo "${HSL[*]}")
+RV=()
+for name in rank_public rank_private; do
+    W="$OUT/rank/$name"
+    for i in 0 1 2 3; do
+        RV+=($(MODE=extract FEAT="$W/rankvec" GAMES="$W/cache/games.parquet" CACHE="$W/cache" NUM_SHARDS=4 SHARD=$i \
+            timeout 60 sbatch "${COMMON[@]}" --dependency=afterok:$V2 --kill-on-invalid-dep=yes --time=00:45:00 \
+            --job-name="rel-c-${name#rank_}$i" --output="$OUT/logs/c-$name-$i-%j.out" --export=ALL slurm/humansl_rankvec.slurm))
+    done
+done
+
+DEPS=$(IFS=:; echo "${HSL[*]}:${RV[*]}")
 FINISH=$(submit finish --dependency=afterany:$DEPS:$PID --gres=gpu:1 -c 8 --mem=64G -t 01:00:00 -- \
     "for name in rank_public rank_private; do $PY -m go_aicup.tasks.strength.humansl_predict aggregate --work $OUT/rank/\$name \
-       --submission $OUT/submissions/\$name.csv || echo \"HumanSL aggregate failed for \$name\"; \
+       --submission $OUT/submissions/\${name}_ah.csv || echo \"HumanSL aggregate failed for \$name\"; \
+       $PY -m go_aicup.tasks.strength.humansl_predict aggregate --work $OUT/rank/\$name \
+         --model outputs/humansl_rankvec_model/model.pkl --predictions rankvec_predictions.parquet \
+         --fallback humansl_predictions.parquet --submission $OUT/submissions/\$name.csv \
+       || { echo \"AH+C aggregate failed for \$name: primary = AH\"; cp $OUT/submissions/\${name}_ah.csv $OUT/submissions/\$name.csv; } \
+       || echo \"no AH submission for \$name\"; \
        cp $OUT/rank/\$name/submission.csv $OUT/submissions/\${name}_v2_fallback.csv || echo \"no V2 submission for \$name\"; done; \
      $PY scripts/day0_audit.py --store-dir $STORE --raw-dir $RAW --identity-dir $OUT/pid --out $OUT/day0_audit.json || echo 'day0 audit failed'; \
      $PY scripts/release_summary.py --out $OUT")
 
-printf 'prep=%s pid=%s rank-v2=%s humansl=%s finish=%s\n' "$PREP" "$PID" "$V2" "${HSL[*]}" "$FINISH" | tee "$OUT/jobs.txt"
+printf 'prep=%s pid=%s rank-v2=%s humansl=%s rank-c=%s finish=%s\n' "$PREP" "$PID" "$V2" "${HSL[*]}" "${RV[*]}" "$FINISH" \
+    | tee "$OUT/jobs.txt"

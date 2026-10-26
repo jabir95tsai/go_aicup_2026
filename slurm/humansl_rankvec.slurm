@@ -16,6 +16,7 @@
 #   MODE=pack    SHARD=0 NUM_SHARDS=4                 sbatch slurm/humansl_rankvec.slurm
 #   MODE=train                                        sbatch --time=03:00:00 slurm/humansl_rankvec.slurm
 #   MODE=extract SHARD=0 NUM_SHARDS=10 [LIMIT=N]      sbatch slurm/humansl_rankvec.slurm
+#   release: MODE=extract FEAT=<work>/rankvec GAMES=<work>/cache/games.parquet CACHE=<work>/cache SHARD=i NUM_SHARDS=4
 set -euo pipefail
 PROJECT_DIR=/work/jason1122/go_aicup_2026
 PYTHON_BIN="${PYTHON_BIN:-${HOME}/.conda/envs/go/bin/python}"
@@ -28,6 +29,7 @@ nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv
 EXTRA=()
 [[ -n "${LIMIT:-}" ]] && EXTRA+=(--limit "$LIMIT")
 [[ -n "${WORKERS:-}" ]] && EXTRA+=(--workers "$WORKERS")
+[[ -n "${CACHE:-}" ]] && EXTRA+=(--cache "$CACHE")
 start=$(date +%s)
 case "$MODE" in
     check)   "$PYTHON_BIN" scripts/humansl_rankvec.py check ;;
@@ -36,7 +38,7 @@ case "$MODE" in
     train)   "$PYTHON_BIN" -m go_aicup.features.humansl_rankvec train --run "$RUN" "${EXTRA[@]}" ;;
     extract) mkdir -p "$FEAT"
              "$PYTHON_BIN" -m go_aicup.features.humansl_rankvec extract --games "${GAMES:-outputs/emb_stage1/games.parquet}" \
-                 --vectors "$RUN/vectors.pt" --out "$FEAT/shard_$SHARD" --shard "$SHARD" --num-shards "$NUM_SHARDS" \
+                 --vectors "${VECTORS:-$RUN/vectors.pt}" --out "$FEAT/shard_$SHARD" --shard "$SHARD" --num-shards "$NUM_SHARDS" \
                  "${EXTRA[@]}" ;;
     *) echo "unknown MODE=$MODE"; exit 2 ;;
 esac
