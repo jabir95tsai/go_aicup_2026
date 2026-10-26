@@ -41,7 +41,8 @@ def main() -> int:
         lines.append(f"| `{path.name}` | {len(table)} | {spread} |")
     lines += ["", "## Competition 2 (B2; primary `rank_<part>.csv` = AH+C, control `rank_<part>_ah.csv` = AH)", ""]
     for name in ("rank_public", "rank_private"):
-        for label, file in (("AH+C", "rankvec_predictions.parquet"), ("AH", "humansl_predictions.parquet")):
+        for label, file in (("AH+C", "rankvec_predictions.parquet"), ("AH", "humansl_predictions.parquet"),
+                            ("AH+C all players", "allplayers_predictions.parquet")):
             path = out / "rank" / name / file
             if path.exists():
                 pred = pd.read_parquet(path)
