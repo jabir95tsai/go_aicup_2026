@@ -13,6 +13,11 @@ move under the true rank on a fixed position subset, and the single-game officia
 score (sum of log p under each rank hypothesis -> softmax -> score_rank). Step 0
 is C2 (A-055) exactly.
 
+--mmi LAMBDA (C4b) adds a rank-discrimination term: every position is evaluated
+under all 10 rank hypotheses and loss = NLL(true rank) + LAMBDA * CE(true rank |
+softmax over ranks of log p(played move)). Positions per step are then --batch,
+forward passes --batch x 10.
+
     torchrun --standalone --nproc-per-node=8 -m go_aicup.tasks.strength.humansl_finetune \\
         --data outputs/humansl_finetune --out outputs/c4_s2 [--max-positions N] [--resume]
 """
@@ -138,6 +143,7 @@ def main(argv=None) -> int:
     parser.add_argument("--lr", type=float, default=3e-5)
     parser.add_argument("--vector-lr", type=float, default=3e-4)
     parser.add_argument("--warmup", type=int, default=300)
+    parser.add_argument("--mmi", type=float, default=0.0, help="weight of the rank-discrimination CE (C4b)")
     parser.add_argument("--monitor-every", type=int, default=2000)
     parser.add_argument("--monitor-positions", type=int, default=200_000)
     parser.add_argument("--checkpoint-every", type=int, default=1000, help="steps between last.pt saves")
@@ -189,7 +195,8 @@ def main(argv=None) -> int:
              "data": str(args.data), "out": str(args.out)}})
     if step == 0:
         log({"step": 0, **monitor(model, eval_forward, mon, probe, rank, world)})
-    started, window, seen, monitor_seconds = time.monotonic(), [], 0, 0.0
+    started, window, window_disc, seen, monitor_seconds = time.monotonic(), [], [], 0, 0.0
+    hypotheses = torch.arange(rv.RANKS, device=device).repeat(args.batch)
 
     def save(name: str) -> None:
         if rank == 0:
@@ -208,21 +215,35 @@ def main(argv=None) -> int:
                 group["lr"] = lr * scale
             index = order[local_step * args.batch:(local_step + 1) * args.batch]
             x = rv.unpack(data["bits"][index])
-            with torch.autocast("cuda", dtype=torch.bfloat16):
-                logits = train_forward(x, data["globals"][index], data["rank"][index], data["side"][index])
-            loss = -legal_logp(logits, x, data["target"][index]).mean()
+            if args.mmi:
+                xr = x.repeat_interleave(rv.RANKS, 0)
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    logits = train_forward(xr, data["globals"][index].repeat_interleave(rv.RANKS, 0), hypotheses,
+                                           data["side"][index].repeat_interleave(rv.RANKS, 0))
+                logp = legal_logp(logits, xr, data["target"][index].repeat_interleave(rv.RANKS, 0)).reshape(-1, rv.RANKS)
+                truth = data["rank"][index]
+                nll = -logp.gather(1, truth[:, None]).mean()
+                discrimination = torch.nn.functional.cross_entropy(logp, truth)
+                loss = nll + args.mmi * discrimination
+                window_disc.append(discrimination.detach())
+            else:
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    logits = train_forward(x, data["globals"][index], data["rank"][index], data["side"][index])
+                loss = nll = -legal_logp(logits, x, data["target"][index]).mean()
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
             step += 1
             seen += len(index)
-            window.append(loss.detach())
+            window.append(nll.detach())
             if step % 100 == 0 or step == total:
                 mean = all_sum(torch.stack(window).mean().reshape(1))[0] / world
+                extra = {"train_rank_ce": round(float(all_sum(torch.stack(window_disc).mean().reshape(1))[0] / world), 5)} \
+                    if window_disc else {}
                 elapsed = time.monotonic() - started - monitor_seconds
-                log({"step": step, "epoch": round(step / steps_per_epoch, 4), "train_nll": round(float(mean), 5),
+                log({"step": step, "epoch": round(step / steps_per_epoch, 4), "train_nll": round(float(mean), 5), **extra,
                      "lr": optimizer.param_groups[0]["lr"], "positions_per_second": round(seen * world / elapsed, 1)})
-                window = []
+                window, window_disc = [], []
             if step % args.monitor_every == 0 or step == total or step % steps_per_epoch == 0:
                 tic = time.monotonic()
                 log({"step": step, **monitor(model, eval_forward, mon, probe, rank, world),
