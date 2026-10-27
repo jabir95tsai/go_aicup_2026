@@ -8,9 +8,10 @@
 #
 # Jobs (all `dev`, account GOV115094):
 #   prep       1 GPU (the dev partition requires one; CPU work) preprocess release -> GameStores
-#   pid        1 GPU competition 1: GE2E insurance vectors, then opening + insurance + L6 per pool (A-053);
-#              also LB-probe variants (A-059): pid_<part>_noassign / _sinkhorn (fused, other L6) and
-#              pid_<part>_opening_only (Hungarian, no insurance)
+#   pid        1 GPU competition 1: GE2E insurance vectors, then opening + insurance per pool (A-053).
+#              Default assumes questions and candidates are NOT one-to-one (A-059, user decision
+#              2026-10-27): pid_<part>.csv has no L6 assignment. LB-probe variants: pid_<part>_hungarian /
+#              _sinkhorn (fused + L6) and pid_<part>_opening_only (no insurance, no assignment)
 #   rank-v2    1 GPU competition 2 fallback path: V2 prepare / infer / C2 aggregate (A-030)
 #   rank-hsl   8 x 1 GPU HumanSL extraction, 4 shards per question file (A-042)
 #   rank-c     8 x 1 GPU C2 rank-vector extraction (A-055), 4 shards per question file
@@ -54,11 +55,11 @@ PID=$(submit pid --dependency=afterok:$PREP --gres=gpu:1 -c 12 --mem=150G -t 01:
     "if $PY -m go_aicup.tasks.identity.insurance --store-dir $STORE --name pid_public pid_private pool_public pool_private --work-dir $OUT/pid/insurance; \
      then INS='--insurance-dir $OUT/pid/insurance'; else echo 'insurance failed: opening only'; INS=''; fi; \
      for part in public private; do $PY -m go_aicup.tasks.identity.predict --store-dir $STORE --pool pool_\$part --questions pid_\$part \
-       \$INS --out-dir $OUT/pid/\$part --submission $OUT/submissions/pid_\$part.csv; done; \
-     for part in public private; do for a in none sinkhorn; do $PY -m go_aicup.tasks.identity.predict --store-dir $STORE \
+       \$INS --assign none --out-dir $OUT/pid/\$part --submission $OUT/submissions/pid_\$part.csv; done; \
+     for part in public private; do for a in hungarian sinkhorn; do $PY -m go_aicup.tasks.identity.predict --store-dir $STORE \
        --pool pool_\$part --questions pid_\$part \$INS --assign \$a --out-dir $OUT/pid/\${part}_\$a \
-       --submission $OUT/submissions/pid_\${part}_\${a/none/noassign}.csv || echo \"variant \$a failed for \$part\"; done; \
-       $PY -m go_aicup.tasks.identity.predict --store-dir $STORE --pool pool_\$part --questions pid_\$part \
+       --submission $OUT/submissions/pid_\${part}_\$a.csv || echo \"variant \$a failed for \$part\"; done; \
+       $PY -m go_aicup.tasks.identity.predict --store-dir $STORE --pool pool_\$part --questions pid_\$part --assign none \
        --out-dir $OUT/pid/\${part}_opening_only --submission $OUT/submissions/pid_\${part}_opening_only.csv \
        || echo \"opening-only failed for \$part\"; done")
 

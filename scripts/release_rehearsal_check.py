@@ -3,8 +3,8 @@
 Compares scripts/run_release.sh output on the fake release with the rehearsal
 outputs that already passed their gates (same raw files):
   - eight submission files (pid x2, rank AH+C x2, AH x2, V2 x2), 400 rows each;
-  - competition 1: top-5 identical to identity/predict.py with the A-053
-    insurance vectors (outputs/rehearsal/identity_insurance);
+  - competition 1: top-5 identical to identity/predict.py (no L6 assignment, the
+    A-059 default) with the A-053 insurance vectors (outputs/rehearsal/identity_insurance);
   - competition 2: HumanSL classes identical to the A-042 extraction path under
     the current model on >= 398/400 questions per file; V2 fallback files
     identical to the A-030 rehearsal submissions;
@@ -80,8 +80,8 @@ def main() -> int:
     ok &= all(n == 400 for n in rows.values())
     for part in ("public", "private"):
         new = pd.read_parquet(out / "pid" / part / "predictions.parquet")
-        ref, _, _, _ = predict(REHEARSAL / "store", f"pool_{part}", f"pid_{part}", "d4", "hungarian",
-                               insurance_dir=REHEARSAL / "identity_insurance")
+        ref, _, _, _ = predict(REHEARSAL / "store", f"pool_{part}", f"pid_{part}", "d4", "none",
+                               insurance_dir=REHEARSAL / "identity_insurance")   # default: not one-to-one (A-059)
         cols = [f"top{j}" for j in range(1, 6)]
         merged = new.merge(ref, on="question_id", suffixes=("", "_ref"))
         same = int((merged[cols].to_numpy() == merged[[c + "_ref" for c in cols]].to_numpy()).all(axis=1).sum())

@@ -381,4 +381,4 @@ project/
 3. **`cv.py`（Day 2）**：GroupKFold by player_id + 競賽一的合成候選庫產生器，附零重疊 assert
 4. **`feature_policy.py`（Day 2）**：把第 4 節的檢查清單寫成 code（禁用欄位名單 + fold-safe encoder）
 5. **後續工作**：依第 7 節與 EXECUTION_PLAN.md 的 T1–T6 執行；11/04 前僅本地驗證，不安排官方上傳。
-6. **主力現況（2026-10-26）**：競賽二首選為 A-024＋HumanSL＋C2 級別向量＋B2（AH＋C，A-055／A-056），對照 AH（A-024＋HumanSL＋B2），備援 V2 ResNet＋C2；競賽一為 D4 開局模型＋L6，加上不靠開局的 GE2E 保險模型（λ＝8，A-053）。一鍵提交流程 `scripts/run_release.sh`（A-054；10/26 加入 AH＋C 與 AH 對照檔，彩排通過，A-056）。
+6. **主力現況（2026-10-26）**：競賽二首選為 A-024＋HumanSL＋C2 級別向量＋B2（AH＋C，A-055／A-056），對照 AH（A-024＋HumanSL＋B2），備援 V2 ResNet＋C2；競賽一為 D4 開局模型＋不靠開局的 GE2E 保險模型（λ＝8，A-053），**預設不做 L6 指派**（D-004：在確認一對一之前假設不是一對一；Hungarian 版只作 LB 探針，A-059）。一鍵提交流程 `scripts/run_release.sh`（A-054；10/26 加入 AH＋C 與 AH 對照檔，彩排通過，A-056）。
