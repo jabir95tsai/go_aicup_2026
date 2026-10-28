@@ -55,7 +55,7 @@ V2 資料準備（只讀既有盤面快取，不解析 SGF、不執行模型）�
 python -m go_aicup.tasks.strength.v2.prepare --config configs/strength/rank_cnn_v2_seed2027.json
 ```
 
-預設 seed=2027、global batch=65,536、1 epoch、每 100 steps 監控；optimizer／scheduler／BN／SyncBN／precision／D4 沿用 V1。`dataset_dir` 為 `data/processed/strength_v2/seed2027/`，模型輸出預定為 `outputs/v2_strength/`。資料準備不建立模型輸出目錄。
+預設 seed=2027、global batch=65,536、1 epoch、每 200 steps 監控（A-023 由 100 改為 200）；optimizer／scheduler／BN／SyncBN／precision／D4 沿用 V1。`dataset_dir` 為 `data/processed/strength_v2/seed2027/`，模型輸出預定為 `outputs/v2_strength/`。資料準備不建立模型輸出目錄。
 
 切分與固定題目沿用 `data.cv` 的相同 seed 與設定，在 V2 的獨立目錄保存，保留 `strength_v1_games.parquet`、`strength_v1_validation_questions.parquet` 歷史檔名；同 seed／設定／快取的切分、題目與 train／valid 索引一致。V2 不改寫既有 V1 資料。
 
@@ -90,4 +90,4 @@ python -m torch.distributed.run --standalone --nnodes=1 --nproc-per-node=8 \
 python -m go_aicup.tasks.strength.v2.evaluate --run-dir outputs/v2_strength
 ```
 
-切分：`data.cv.make_strength_v2_split` 的 fold 0＝Valid-U（未見玩家），fold 1–4＝train 並每玩家顏色組留出 10%＝Valid-S，fold −1 不使用。每 200 steps 與最後一步監控 `monitor_unseen`／`monitor_seen`（每級各 2,500 整盤）。成功的 run 目錄只留 `model.pt`、`losses.npy`、`validation_unseen_category.npy`、`validation_seen_category.npy`，評估圖在 `plot/`。正式題目規則：每盤平均機率、題內 1/k、`metrics.score_rank`。CUDA 驗收測試 `tests/test_strength_v2_cuda.py` 需在配置 2 張 GPU 的計算節點執行。
+切分：`data.cv.make_strength_v2_split` 的 fold 0＝Valid-U（未見玩家），fold 1–4＝train 並每玩家顏色組留出 10%＝Valid-S，fold −1 不使用。每 200 steps 與最後一步監控 `monitor_unseen`／`monitor_seen`（每級各 2,500 整盤）。成功的 run 目錄只留 `model.pt`、`losses.npy`、`validation_unseen_category.npy`、`validation_seen_category.npy`，評估圖在 `plot/`。`evaluate` 的題目規則（每盤平均機率、題內 1/k、`metrics.score_rank`）只作 10/19 舊規則對照；V2 正式解碼已改為 C2（D-002，`predict.py`），競賽二首選已改為 HumanSL AH＋C（A-055／A-056，見 CLAUDE.md 第 11 節第 6 項）。CUDA 驗收測試 `tests/test_strength_v2_cuda.py` 需在配置 2 張 GPU 的計算節點執行。
