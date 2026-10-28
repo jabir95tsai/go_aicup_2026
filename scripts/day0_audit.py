@@ -9,6 +9,11 @@ Items covered (numbers as in the plan):
   6  opening concentration: per-candidate most-common first move share,
      versus the synthetic pools (split 0)
   7  one-to-one diagnostic from identity scores.npy if present
+  W1 opening drift (RESULTS A-062): prefix-match depth of query games against the
+     pool, between the pool itself (leave-one-out) and outside training players
+     -> p_hat; opening-only vs style-only top-1 agreement when both release
+     variants are present. Compare with the synthetic table in
+     outputs/pid_drift_robust/result.json ("detector").
   9  official CSV headers (and sample submission files if any)
 Not covered here: 8 (L10 needs a model run), 10 (judgement from 5-7).
 
@@ -31,11 +36,13 @@ import pandas as pd
 
 from go_aicup.data.preprocess import RELEASE_FILES, load_store
 from go_aicup.paths import PROCESSED, ROOT
-from go_aicup.tasks.identity import data
+from go_aicup.tasks.identity import data, drift
+from go_aicup.tasks.identity.predict import load_params, store_prefix
 
 CACHE = PROCESSED / "boards" / "strength_v1"
 TRAIN_HASH = PROCESSED / "audit" / "train_move_hash.npy"
 SHORT = (16, 60, 100)
+FOREIGN, SEED = 5_000, 2027
 
 
 def move_hash(moves: np.ndarray) -> int:
@@ -120,6 +127,38 @@ def quantiles(series) -> dict:
     return {q: round(float(np.quantile(series, q)), 3) for q in (0.1, 0.25, 0.5, 0.75, 0.9)}
 
 
+def opening_drift(stores: dict, train_meta: pd.DataFrame, identity_dir: Path | None) -> dict:
+    """Item W1 (A-062): p_hat from prefix-match depths, and the opening/style agreement."""
+    params = load_params("d4")
+    min_plies = 2 * max(params["moves"], params["slot_moves"])
+    train_pre = data.opening_prefix_d4(train_meta, 60)
+    black = train_meta["color"].astype(str).to_numpy() == "B"
+    train_pid = train_meta["player_id"].astype(str).to_numpy()
+    result = {}
+    for part in ("public", "private"):
+        if f"pool_{part}" not in stores or f"pid_{part}" not in stores:
+            continue
+        pool_pre, pool_ok = store_prefix(*stores[f"pool_{part}"], "d4", min_plies)
+        q_pre, q_ok = store_prefix(*stores[f"pid_{part}"], "d4", min_plies)
+        players = stores[f"pool_{part}"][2]["player_id"].astype(str).unique()
+        outside = np.flatnonzero(black & ~np.isin(train_pid, players))
+        foreign = np.random.default_rng(SEED).choice(outside, min(FOREIGN, len(outside)), replace=False)
+        prefix = np.concatenate([pool_pre, q_pre, train_pre[foreign]])
+        pool_rows = np.flatnonzero(pool_ok)
+        query_rows = len(pool_pre) + np.flatnonzero(q_ok)
+        foreign_rows = len(pool_pre) + len(q_pre) + np.arange(len(foreign))
+        row = drift.drift_estimate(drift.match_depth(prefix, pool_rows, pool_rows, in_reference=True),
+                                   drift.match_depth(prefix, pool_rows, query_rows),
+                                   drift.match_depth(prefix, pool_rows, foreign_rows))
+        row = {k: round(v, 4) for k, v in row.items()} | {"query_games": len(query_rows), "pool_games": len(pool_rows)}
+        if identity_dir is not None:
+            paths = [identity_dir / f"{part}_{v}" / "scores.npy" for v in ("opening_only", "style_only")]
+            if all(path.exists() for path in paths):
+                row["agreement_opening_style"] = round(drift.agreement(np.load(paths[0]), np.load(paths[1])), 4)
+        result[part] = row
+    return result
+
+
 def audit_release(store_dir: Path, raw_dirs: list[Path], identity_dir: Path | None) -> dict:
     stores = {}
     for name in RELEASE_FILES:
@@ -182,6 +221,10 @@ def audit_release(store_dir: Path, raw_dirs: list[Path], identity_dir: Path | No
                              "max_questions_on_one_candidate": int(np.bincount(best).max())}
         print("\n[7] one-to-one diagnostic (row argmax of opening scores)\n" + json.dumps(one, indent=1))
         out["one_to_one"] = one
+
+    out["opening_drift"] = opening_drift(stores, train_meta, identity_dir)
+    print("\n[W1] opening drift (compare outputs/pid_drift_robust/result.json detector)\n"
+          + json.dumps(out["opening_drift"], indent=1))
 
     headers = {}
     for directory in raw_dirs:

@@ -62,6 +62,12 @@ def main() -> int:
         else:
             lines.append(f"- {part}: **no predictions**")
     audit = out / "day0_audit.json"
+    if audit.exists():
+        drift = json.loads(audit.read_text()).get("opening_drift", {})
+        for part, row in drift.items():
+            lines.append(f"- {part} opening drift (A-062): p_hat={row.get('p_hat')}, "
+                         f"opening/style top-1 agreement={row.get('agreement_opening_style', '—')} "
+                         "(synthetic: p=0 -> 0.05 / 0.88, p=30 -> 0.32 / 0.73, p=60 -> 0.64 / 0.33, p=100 -> 0.99 / 0.00)")
     lines += ["", f"## Day-0 audit: {'`day0_audit.json`' if audit.exists() else '**missing**'}", "",
               "## Jobs", "", "```", *job_states(out), "```"]
     (out / "SUMMARY.md").write_text("\n".join(lines) + "\n")

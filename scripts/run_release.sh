@@ -11,7 +11,9 @@
 #   pid        1 GPU competition 1: GE2E insurance vectors, then opening + insurance per pool (A-053).
 #              Default assumes questions and candidates are NOT one-to-one (A-059, user decision
 #              2026-10-27): pid_<part>.csv has no L6 assignment. LB-probe variants: pid_<part>_hungarian /
-#              _sinkhorn (fused + L6) and pid_<part>_opening_only (no insurance, no assignment)
+#              _sinkhorn (fused + L6), pid_<part>_opening_only (no insurance, no assignment) and
+#              pid_<part>_style_only (insurance alone, no assignment; D-005 controlled probe) and
+#              pid_<part>_robust (robust opening eps 0.1 + 32 x insurance, no assignment; A-062 probe)
 #   rank-v2    1 GPU competition 2 fallback path: V2 prepare / infer / C2 aggregate (A-030)
 #   rank-hsl   8 x 1 GPU HumanSL extraction, 4 shards per question file (A-042)
 #   rank-c     8 x 1 GPU C2 rank-vector extraction (A-055), 4 shards per question file
@@ -61,7 +63,13 @@ PID=$(submit pid --dependency=afterok:$PREP --gres=gpu:1 -c 12 --mem=150G -t 01:
        --submission $OUT/submissions/pid_\${part}_\$a.csv || echo \"variant \$a failed for \$part\"; done; \
        $PY -m go_aicup.tasks.identity.predict --store-dir $STORE --pool pool_\$part --questions pid_\$part --assign none \
        --out-dir $OUT/pid/\${part}_opening_only --submission $OUT/submissions/pid_\${part}_opening_only.csv \
-       || echo \"opening-only failed for \$part\"; done")
+       || echo \"opening-only failed for \$part\"; \
+       if [[ -n \"\$INS\" ]]; then $PY -m go_aicup.tasks.identity.predict --store-dir $STORE --pool pool_\$part \
+       --questions pid_\$part \$INS --no-opening --assign none --out-dir $OUT/pid/\${part}_style_only \
+       --submission $OUT/submissions/pid_\${part}_style_only.csv || echo \"style-only failed for \$part\"; \
+       $PY -m go_aicup.tasks.identity.predict --store-dir $STORE --pool pool_\$part --questions pid_\$part \$INS \
+       --robust-eps 0.1 --insurance-lambda 32 --assign none --out-dir $OUT/pid/\${part}_robust \
+       --submission $OUT/submissions/pid_\${part}_robust.csv || echo \"robust failed for \$part\"; fi; done")
 
 V2=$(STORE_DIR="$STORE" WORK_DIR="$OUT/rank" timeout 60 sbatch "${COMMON[@]}" --dependency=afterok:$PREP \
     --job-name=rel-rank-v2 --output="$OUT/logs/rank-v2-%j.out" --export=ALL slurm/strength_predict.slurm)

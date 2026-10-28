@@ -88,9 +88,14 @@ def embed_store(store_dir: Path, name: str, work: Path, run_dir: Path = RUN, bat
 
 
 def fused_scores(opening: np.ndarray, work: Path, pool_name: str, question_name: str, candidates,
-                 pool_players, question_rows: list[np.ndarray], run_dir: Path = RUN) -> tuple[np.ndarray, dict]:
-    """opening + lambda * w * cos(question mean, candidate mean); missing vectors contribute 0."""
-    _, _, w, lam = load_run(run_dir)
+                 pool_players, question_rows: list[np.ndarray], run_dir: Path = RUN,
+                 lam: float | None = None) -> tuple[np.ndarray, dict]:
+    """opening + lambda * w * cos(question mean, candidate mean); missing vectors contribute 0.
+
+    lam: overrides the run's lambda (the robust variant, A-062).
+    """
+    _, _, w, run_lam = load_run(run_dir)
+    lam = run_lam if lam is None else lam
 
     def vectors(name, n):
         saved = np.load(work / name / "ge2e.npz")

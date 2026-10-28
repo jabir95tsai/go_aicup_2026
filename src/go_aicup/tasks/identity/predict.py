@@ -13,7 +13,12 @@ with no usable game scores 0 for every candidate (count printed).
 
 With --insurance-dir (GE2E vectors from identity/insurance.py, A-035 / A-053)
 the scores become opening + lambda * w * cosine before L6; a question without
-a usable opening game is then ranked by the insurance alone.
+a usable opening game is then ranked by the insurance alone. --no-opening
+drops the opening term (style-only LB probe, D-005): the ranking is then the
+GE2E cosine alone, and a question without insurance vectors scores 0 everywhere.
+--robust-eps replaces the summed opening scores by drift.robust_opening (each
+game's candidate posterior mixed with uniform, A-062 LB-probe variant; use with
+--insurance-lambda 32 as selected there).
 
 Outputs in --out-dir: scores.npy (questions x candidates, scores fed to L6:
 opening log-likelihoods, fused when --insurance-dir is given), candidates.npy,
@@ -33,7 +38,7 @@ import pandas as pd
 
 from go_aicup.data.preprocess import load_store
 from go_aicup.paths import ROOT
-from go_aicup.tasks.identity import assign, data, opening
+from go_aicup.tasks.identity import assign, data, drift, opening
 
 PLIES = 60
 SUMMARY = {"d4": ROOT / "outputs" / "pid_opening_v1_d4" / "summary.json",
@@ -97,7 +102,10 @@ def opening_scores(prefix, gallery_games, query_games, population, params) -> np
 
 
 def predict(store_dir: Path, pool_name: str, question_name: str, orient: str, method: str,
-            params: dict | None = None, insurance_dir: Path | None = None):
+            params: dict | None = None, insurance_dir: Path | None = None, use_opening: bool = True,
+            robust_eps: float | None = None, insurance_lambda: float | None = None):
+    if not use_opening and insurance_dir is None:
+        raise ValueError("without the opening model the insurance vectors are the only scores")
     params = params or load_params(orient)
     min_plies = 2 * max(params["moves"], params["slot_moves"])
     train_meta, train_pre = train_prefix(orient)
@@ -122,14 +130,22 @@ def predict(store_dir: Path, pool_name: str, question_name: str, orient: str, me
     query_games = [n_pop + n_pool + np.sort(rows_by_q[q][q_ok[rows_by_q[q]]]) for q in question_ids]
     scored = np.array([len(g) > 0 for g in query_games])
     scores = np.zeros((len(question_ids), len(candidates)))
-    if scored.any():
-        scores[scored] = opening_scores(prefix, gallery_games, [g for g, s in zip(query_games, scored) if s],
-                                        np.arange(n_pop), params)
+    if use_opening and scored.any():
+        games = [g for g, s in zip(query_games, scored) if s]
+        if robust_eps is None:
+            scores[scored] = opening_scores(prefix, gallery_games, games, np.arange(n_pop), params)
+        else:   # per-game scores (a question's score is their sum), then the robust aggregate
+            per_game = opening_scores(prefix, gallery_games, [np.array([g]) for g in np.concatenate(games)],
+                                      np.arange(n_pop), params)
+            starts = np.cumsum([0] + [len(g) for g in games])
+            scores[scored] = drift.robust_opening(per_game, [np.arange(a, b) for a, b in zip(starts[:-1], starts[1:])],
+                                                  robust_eps)
     insurance_info = {}
     if insurance_dir is not None:
         from go_aicup.tasks.identity.insurance import fused_scores
         scores, insurance_info = fused_scores(scores, insurance_dir, pool_name, question_name, candidates,
-                                              pool_players, [rows_by_q[q] for q in question_ids])
+                                              pool_players, [rows_by_q[q] for q in question_ids],
+                                              lam=insurance_lambda)
     if method == "none":
         ranked = assign.top5(scores)
     else:
@@ -140,7 +156,8 @@ def predict(store_dir: Path, pool_name: str, question_name: str, orient: str, me
             "unusable_query_games": int((~q_ok).sum()),
             "empty_candidates": int(sum(len(g) == 0 for g in gallery_games)),
             "population_games": n_pop, "candidates_seen_in_train": overlap,
-            "orient": orient, "assign": method, **params, **insurance_info}
+            "orient": orient, "assign": method, "opening": use_opening, "robust_eps": robust_eps,
+            **params, **insurance_info}
     num_games = q_meta.groupby("question_id", sort=False)["num_games"].first()
     table = pd.DataFrame({"question_id": question_ids,
                           "num_games": num_games.loc[question_ids].to_numpy(),
@@ -160,9 +177,13 @@ def main(argv=None) -> int:
     parser.add_argument("--assign", choices=("hungarian", "sinkhorn", "none"), default="hungarian")
     parser.add_argument("--submission", type=Path, help="default <out-dir>/submission.csv")
     parser.add_argument("--insurance-dir", type=Path, help="identity/insurance.py work dir; fuse GE2E (A-053)")
+    parser.add_argument("--no-opening", action="store_true", help="insurance only (needs --insurance-dir)")
+    parser.add_argument("--robust-eps", type=float, help="robust opening aggregate (A-062), e.g. 0.1")
+    parser.add_argument("--insurance-lambda", type=float, help="override the run's lambda, e.g. 32 (A-062)")
     args = parser.parse_args(argv)
     table, scores, candidates, info = predict(args.store_dir, args.pool, args.questions, args.orient, args.assign,
-                                              insurance_dir=args.insurance_dir)
+                                              insurance_dir=args.insurance_dir, use_opening=not args.no_opening,
+                                              robust_eps=args.robust_eps, insurance_lambda=args.insurance_lambda)
     args.out_dir.mkdir(parents=True, exist_ok=True)
     np.save(args.out_dir / "scores.npy", scores)
     np.save(args.out_dir / "candidates.npy", candidates)
