@@ -3,7 +3,9 @@
 Public and private are run separately (different 400 players; CLAUDE.md
 section 2). Model = A-029 default: pp+slot with D4 canonicalisation,
 hyper-parameters read from the split-0 selection in
-outputs/pid_opening_v1_d4/summary.json, then Sinkhorn + Hungarian (L6).
+outputs/pid_opening_v1_d4/summary.json. No L6 assignment by default (questions
+are assumed not one-to-one with candidates, D-004); --assign hungarian|sinkhorn
+gives the LB-probe variants.
 
 Population priors use training black games of players NOT in the pool (the
 A-029 protocol; on the real pool this is presumably every training player,
@@ -174,7 +176,8 @@ def main(argv=None) -> int:
     parser.add_argument("--questions", required=True, help="e.g. pid_public")
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--orient", choices=("d4", "raw"), default="d4")
-    parser.add_argument("--assign", choices=("hungarian", "sinkhorn", "none"), default="hungarian")
+    parser.add_argument("--assign", choices=("hungarian", "sinkhorn", "none"), default="none",
+                        help="L6 assignment; default none (D-004)")
     parser.add_argument("--submission", type=Path, help="default <out-dir>/submission.csv")
     parser.add_argument("--insurance-dir", type=Path, help="identity/insurance.py work dir; fuse GE2E (A-053)")
     parser.add_argument("--no-opening", action="store_true", help="insurance only (needs --insurance-dir)")

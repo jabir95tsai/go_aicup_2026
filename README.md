@@ -303,6 +303,14 @@ python scripts/plot_rank_v1.py --run-dir outputs/rank_cnn_v1_seed2027 --skip-con
 
 官方 CSV → GameStore → 兩賽各自的模型 → 暫定格式提交檔。**提交格式要到 11/04 sample_submission 才知道**，目前寫的是暫定格式（競賽二 `question_id,rank`；競賽一 `question_id,prediction`，top-5 以空白分隔），屆時只改輸出那一段。
 
+**11/04 正式用一鍵流程**（A-054；送出全部 Slurm 作業後返回，約 35 分鐘，結果看 `<out>/SUMMARY.md`）：
+
+```bash
+bash scripts/run_release.sh data/raw outputs/release_1104
+```
+
+產生的提交檔（皆在 `<out>/submissions/`）：競賽一 `pid_<part>.csv`（首選：開局＋保險、不指派）與探針 `_hungarian`、`_sinkhorn`、`_opening_only`、`_style_only`、`_robust`；競賽二 `rank_<part>.csv`（首選 AH＋C）與 `_ah`、`_allplayers`、`_v2_fallback`。各檔用途與切換規則見 RESULTS A-056、A-058～A-062。下面是一鍵流程內部的分步指令，只在除錯或單獨重跑某一步時使用。
+
 ```bash
 # 0. 官方 CSV 放 data/raw/ → GameStore（寬鬆解析：pass、setup 石、奇怪 header 只計數不中斷）
 python -m go_aicup.data.preprocess release --raw-dir data/raw --out-dir data/processed
@@ -319,7 +327,7 @@ python -m go_aicup.tasks.identity.predict --store-dir data/processed --pool pool
 sbatch slurm/strength_predict.slurm   # 預設 data/processed → outputs/rank_submit/<name>/submission.csv
 ```
 
-- 競賽一預設 D4 正規化＋pp+slot＋GE2E 保險（λ＝8，A-035、A-053）＋Sinkhorn／Hungarian（A-029）；不加 `--insurance-dir` 即為只用開局；`--orient raw`、`--assign sinkhorn|none` 留給 11/04 稽核後切換。每盤要有 ≥16 手且前 16 手黑白交替才用於開局分數；無可用盤的題目所有候選人同分（有計數）。
+- 競賽一預設 D4 正規化＋pp+slot＋GE2E 保險（λ＝8，A-035、A-053），**不做 L6 指派**（D-004：在確認題目與候選人一對一之前，假設不是一對一）；不加 `--insurance-dir` 即為只用開局；`--assign hungarian|sinkhorn`、`--orient raw` 只作 LB 探針或留給 11/04 稽核後切換（判讀規則見 EXECUTION_PLAN §5 第 7 項）。每盤要有 ≥16 手且前 16 手黑白交替才用於開局分數；無可用盤的題目所有候選人同分（有計數）。
 - 競賽二使用 `outputs/v2_strength/model.pt`（A-024）與 `outputs/v2_agg_calibration/result.json` 的 T_k；`num_games` 不在 5／10／15／20 時用最近的 k；整題無可用盤時用其他題的平均機率（有計數）。
 - **彩排：** `python scripts/make_fake_release.py` 把 Valid-U 題目與合成候選庫 split 1／2 轉成官方寬格式（`outputs/rehearsal/raw/`），跑完上面 0–3 步（`--raw-dir outputs/rehearsal/raw --out-dir outputs/rehearsal/store` 等）後，`python scripts/rehearsal_check.py` 檢查 T1 gate。
 

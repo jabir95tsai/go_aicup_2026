@@ -1546,3 +1546,29 @@ split 1／2 分開：保險單獨 0.9385／0.9343，融合 0.9865／0.9828，融
 - 外部盤取自訓練集中不在該候選庫的玩家；若真實候選人也在訓練集（Day-0 第 3 項），外部盤會自動排除他們。
 - **穩健版接成 LB 探針檔（2026-10-28，使用者同意）：** `identity/predict.py --robust-eps 0.1 --insurance-lambda 32`（`insurance.fused_scores` 可覆寫 λ）；`run_release.sh` 在保險向量成功時多產生 `pid_<part>_robust.csv`（不指派）。首選不變。檢查（srun，彩排 store＋release 路徑保險向量，對彩排答案）：public 0.9001／1.0／0.9937／1.0；0.9734，private 0.8738／1.0／1.0／1.0；0.9684，與上表 split 1／2 的穩健版 p＝0 逐桶相同。
 - **11/04 用法：** 與首選同日各傳一次即可比較；穩健版 − 首選在沒有漂移時預期約 −0.014（Public 400 題分不出來），有大範圍漂移時 +0.2 以上。若 LB 顯示漂移（A-061 規則觸發），`_robust` 與 `_style_only` 擇高者為新首選（合成上 p≤60 時穩健版較高、p＝100 時兩者差 0.003）。
+
+
+### A-063 提前凍結彩排：一鍵流程從頭產生所有提交檔（2026-10-29，事先登記；使用者同意）
+
+**目的：** A-054／A-056 之後，`run_release.sh` 加了 `rank_<part>_allplayers`（A-058）、`pid_<part>_hungarian／_sinkhorn／_opening_only`（A-059）、`_style_only`（A-060）、`_robust` 與 Day-0 開局漂移一致率（A-062），都還沒從頭彩排過。提前到 10/29 跑，出錯還有時間修；11/02 的 T3 凍結彩排照舊。沒有新模型、沒有設定調整。
+- **輸入／輸出：** 假 release `outputs/rehearsal/raw` → `outputs/rehearsal_t3_1029`。
+- **檢查腳本：** `scripts/release_rehearsal_check.py` 擴充（判準只增不改）。
+- **Gate：**
+  1. 20 個提交檔各 400 列：競賽一 public／private 各 6 個（首選、`_hungarian`、`_sinkhorn`、`_opening_only`、`_style_only`、`_robust`），競賽二各 4 個（首選 AH＋C、`_ah`、`_allplayers`、`_v2_fallback`）。
+  2. 競賽一首選 top-5 與 A-053 參考完全相同（400/400，沿用 A-054）。5 個探針檔：以彩排 store＋A-053 保險向量、相同旗標重算的 top-5 相同 ≥398/400。容許 2 題，因為 release 路徑的保險向量是重新嵌入的，`_style_only`（純 cosine）與 `_robust`（λ＝32）對向量的微小差異比首選敏感；首選在 A-054／A-056 是 400/400。
+  3. 競賽二沿用 A-056 五項；另加 `_allplayers`：沒有題目退回、沒有缺盤，檔案與 `allplayers_predictions.parquet` 一致。
+  4. `day0_audit.json` 的 `opening_drift` 兩個 part 都有 `agreement_opening_style`，`SUMMARY.md` 有列出。
+- **只作診斷：** 12 個競賽一檔對彩排答案的分數，預期與已登記值一致（首選 0.9865／0.9828、Hungarian 1.0／1.0、Sinkhorn 1.0／0.9959、只用開局 0.9458／0.9530、只用風格 0.9385／0.9343、穩健 0.9734／0.9684）；一致率在無漂移時預期約 0.88（A-062 對照表 p＝0：0.875–0.882）。
+- **估算：** 約 35 分鐘、約 4 GPU-h（A-056 為 3.8；新增的競賽一變體只用 CPU）。/work 剩約 12 GB，一次約寫 5 GB。
+
+**結果（2026-10-29，Slurm 634988–635009，20 個作業全部 COMPLETED；牆鐘 23 分鐘，約 3.6 GPU-h；檢查 635042，7 分鐘）：** 輸出 `outputs/rehearsal_t3_1029/`（`SUMMARY.md`、`rehearsal_check.json`，2.3 GB）。
+- **Gate：PASS**（四項都通過）：
+  1. 20 個提交檔各 400 列。
+  2. 競賽一 12 個檔的 top-5 與重算結果都是 400/400（探針檔的 ≥398 容許沒有用到）。
+  3. 競賽二：AH 類別與 A-042 路徑相同 public 399／private **398**（和 A-054 一樣剛好壓線，屬已知的 HumanSL 批次雜訊）；V2 備援逐位相同；AH＋C 與 `_allplayers` 都沒有退回或缺盤、檔案與 parquet 一致；C 特徵 10,000 盤全對上，p99 1.2e-6。
+  4. 一致率 public 0.8825／private 0.875，`SUMMARY.md` 有列（p̂ 0.047／0.000），落在 A-062 對照表 p＝0 的範圍。
+- **診斷（競賽一，對彩排答案）：** 12 個檔的全體分數與登記值逐位相同（首選 0.9865／0.9828、Hungarian 1.0／1.0、Sinkhorn 1.0／0.9959、只用開局 0.9458／0.9530、只用風格 0.9385／0.9343、穩健 0.9734／0.9684）。
+- **診斷（競賽二）：** AH＋C public 0.6849／private 0.7003、AH 0.6711／0.6941，與 A-056 相同。`_allplayers` 的 0.7247／0.6953 **不能解讀**：彩排題目來自 Valid-U，而全玩家模型就是用 Valid-U 玩家擬合的。
+- **時間：** pid 作業 18.5 分（A-054 為 10.9 分，多了 10 個探針檔）；HumanSL shard 12.6–19.0 分（hgpn030 上 7 個 shard 都約 18–19 分，A-054 為 12.6–14.0 分）。11/04 從送出到 `SUMMARY.md` 預估約 25–40 分鐘，視節點而定。
+- **/work 空間：** 彩排後剩 **8.8 GB**，低於 `run_release.sh` 的 10 GB 下限。**11/04 前不清空間，一鍵流程會拒絕啟動。**
+- **順帶修正（文件／預設值，不影響本次結果）：** `identity/predict.py` 的 `--assign` 預設由 `hungarian` 改為 `none`（D-004；`run_release.sh` 一律明確傳 `--assign`，所以不影響一鍵流程，但 README 的分步指令原本會默默做 Hungarian）；README 提交管線段落改為不指派，並補上 11/04 一鍵流程的用法與檔案清單。`release_rehearsal_check.py` 擴充為 A-063 gate。`tests/test_release_pipeline.py`、`tests/test_identity_opening.py` 9 passed。
