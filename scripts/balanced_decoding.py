@@ -18,40 +18,17 @@ import json
 
 import numpy as np
 import pandas as pd
-from scipy.optimize import linear_sum_assignment
 
 from humansl_aggregation import load, part
 from humansl_more_data import combine, rest_data
-from go_aicup.metrics import K_BUCKETS, NEAR, score_rank
+from go_aicup.metrics import K_BUCKETS, score_rank
 from go_aicup.paths import ROOT
+from go_aicup.tasks.strength.balanced import hungarian, sinkhorn
 from go_aicup.tasks.strength.humansl import RankModel
 from go_aicup.tasks.strength.v2.aggregate import official_scores
 
 OUT = ROOT / "outputs"
 DRAWS, PER_FILE, SEED = 300, 400, 2027
-
-
-def expected_scores(p: np.ndarray) -> np.ndarray:
-    padded = np.pad(p, ((0, 0), (1, 1)))
-    return p + NEAR * (padded[:, :-2] + padded[:, 2:])
-
-
-def sinkhorn(p: np.ndarray, iterations: int = 200) -> np.ndarray:
-    q = p.copy()
-    target = len(p) / p.shape[1]
-    for _ in range(iterations):
-        q *= target / q.sum(axis=0, keepdims=True)
-        q /= q.sum(axis=1, keepdims=True)
-    return q
-
-
-def hungarian(p: np.ndarray) -> np.ndarray:
-    per_rank = len(p) // p.shape[1]
-    columns = np.repeat(np.arange(p.shape[1]), per_rank)
-    rows, cols = linear_sum_assignment(-expected_scores(p)[:, columns])
-    pred = np.empty(len(p), dtype=np.int64)
-    pred[rows] = columns[cols]
-    return pred
 
 
 def draw(rng, questions: pd.DataFrame, shares) -> np.ndarray:

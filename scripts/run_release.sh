@@ -21,6 +21,7 @@
 #                rank_<part>.csv     AH+C, the primary (A-055); questions without C use AH
 #                rank_<part>_ah.csv  AH, the control (A-044); questions without HumanSL use V2
 #                rank_<part>_allplayers.csv  AH+C fitted on Valid-S + Valid-U players (A-058), LB probe
+#                rank_<part>_balanced.csv  AH+C probabilities, rank-balanced Hungarian decoding (A-064), LB probe
 #                rank_<part>_v2_fallback.csv  A-024 + C2
 # If an sbatch call times out, check `squeue -u $USER` before rerunning: the job may exist.
 set -euo pipefail
@@ -103,6 +104,8 @@ FINISH=$(submit finish --dependency=afterany:$DEPS:$PID --gres=gpu:1 -c 8 --mem=
          --fallback humansl_predictions.parquet --submission $OUT/submissions/\$name.csv \
        || { echo \"AH+C aggregate failed for \$name: primary = AH\"; cp $OUT/submissions/\${name}_ah.csv $OUT/submissions/\$name.csv; } \
        || echo \"no AH submission for \$name\"; \
+       $PY -m go_aicup.tasks.strength.balanced --predictions $OUT/rank/\$name/rankvec_predictions.parquet \
+         --submission $OUT/submissions/\${name}_balanced.csv || echo \"balanced decoding failed for \$name\"; \
        $PY -m go_aicup.tasks.strength.humansl_predict aggregate --work $OUT/rank/\$name \
          --model outputs/humansl_allplayers_model/model.pkl --predictions allplayers_predictions.parquet \
          --fallback humansl_predictions.parquet --submission $OUT/submissions/\${name}_allplayers.csv \

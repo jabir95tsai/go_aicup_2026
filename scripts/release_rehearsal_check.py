@@ -17,6 +17,8 @@ competition-1 variant's top-5 matches a recomputation with the same flags on
 >= 398/400 questions; all-player AH+C complete and matching its parquet; the Day-0
 audit reports the opening/style agreement for both parts. Diagnostic only: every
 competition-1 file's official score against the rehearsal answers.
+A-064 adds rank_<part>_balanced: exactly 40 questions per rank. Diagnostic only:
+its score against the (unbalanced) rehearsal answers.
 
     python scripts/release_rehearsal_check.py --out outputs/rehearsal_t3_1025
 """
@@ -30,6 +32,7 @@ import pandas as pd
 
 import numpy as np
 
+from go_aicup.data.board_cache import RANKS
 from go_aicup.features.humansl import cache_games
 from go_aicup.metrics import K_BUCKETS, pid_report
 from go_aicup.paths import ROOT
@@ -46,7 +49,7 @@ PID_VARIANTS = {"": {"method": "none"},
                 "_opening_only": {"method": "none", "insurance": False},
                 "_style_only": {"method": "none", "use_opening": False},
                 "_robust": {"method": "none", "robust_eps": 0.1, "insurance_lambda": 32}}
-RANK_SUFFIXES = ("", "_ah", "_allplayers", "_v2_fallback")
+RANK_SUFFIXES = ("", "_ah", "_allplayers", "_balanced", "_v2_fallback")
 
 
 def same_rows(a: pd.DataFrame, b: pd.DataFrame) -> bool:
@@ -139,6 +142,8 @@ def main() -> int:
                              and same_rows(pd.read_csv(out / "submissions" / f"{name}_allplayers.csv"),
                                            allplayers[["question_id", "rank"]]))
         c_match = c_feature_match(out / "rank" / name, offline, offline_keys)
+        balanced = pd.read_csv(out / "submissions" / f"{name}_balanced.csv")
+        balanced_ok = bool((balanced["rank"].value_counts() == 40).all() and balanced["rank"].nunique() == 10)
         answers = pd.read_csv(REHEARSAL / "answers" / f"{name}.csv")
         result[name] = {"ah_classes_identical_to_a042_path": same, "questions": len(merged),
                         "ah_fallback_v2": int(merged["fallback_v2"].sum()), "ah_file_matches": ah_file_matches,
@@ -147,12 +152,14 @@ def main() -> int:
                         "ahc_vs_ah_same_class": int((primary["rank_id"].to_numpy()
                                                      == new.set_index("question_id").loc[primary["question_id"], "rank_id"].to_numpy()).sum()),
                         "allplayers_complete_and_matches": allplayers_ok,
+                        "balanced_40_per_rank": balanced_ok,
                         "c_features": c_match,
                         "diagnostic_answers": {"AH_C": answer_scores(primary, answers),
                                                "AH": answer_scores(pd.read_parquet(out / "rank" / name / "humansl_predictions.parquet"), answers),
-                                               "AH_C_allplayers": answer_scores(allplayers, answers)}}
+                                               "AH_C_allplayers": answer_scores(allplayers, answers),
+                                               "AH_C_balanced": answer_scores(balanced.assign(rank_id=balanced["rank"].map(RANKS.index)), answers)}}
         ok &= (same >= SAME_MIN and v2_same and ah_file_matches and complete and result[name]["ahc_file_matches"]
-               and c_match["pass"] and allplayers_ok)
+               and c_match["pass"] and allplayers_ok and balanced_ok)
     result["pass"] = bool(ok)
     print(json.dumps(result, indent=1))
     (out / "rehearsal_check.json").write_text(json.dumps(result, indent=1))
