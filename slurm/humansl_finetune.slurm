@@ -9,16 +9,16 @@
 #SBATCH --mem=200G
 #SBATCH --time=04:00:00
 #SBATCH --chdir=/work/jason1122/go_aicup_2026
-#SBATCH --output=outputs/slurm-%x-%j.out
+#SBATCH --output=outputs/rank/humansl/slurm-%x-%j.out
 
 # C4 HumanSL fine-tuning (A-057). NPROC must equal the GPUs requested.
-#   OUT=outputs/c4_s1 ARGS="--shards 1 --max-positions 2000000" sbatch slurm/humansl_finetune.slurm
-#   NPROC=8 OUT=outputs/c4_s2 ARGS="--epochs 1 --resume" sbatch --gres=gpu:8 --cpus-per-task=96 --mem=800G slurm/humansl_finetune.slurm
+#   OUT=outputs/rank/humansl/c4_s1 ARGS="--shards 1 --max-positions 2000000" sbatch slurm/humansl_finetune.slurm
+#   NPROC=8 OUT=outputs/rank/humansl/c4_s2 ARGS="--epochs 1 --resume" sbatch --gres=gpu:8 --cpus-per-task=96 --mem=800G slurm/humansl_finetune.slurm
 set -euo pipefail
 PROJECT_DIR=/work/jason1122/go_aicup_2026
 PYTHON_BIN="${PYTHON_BIN:-${HOME}/.conda/envs/go/bin/python}"
 NPROC="${NPROC:-1}"
-DATA="${DATA:-outputs/humansl_finetune}"
+DATA="${DATA:-outputs/rank/humansl/humansl_finetune}"
 OUT="${OUT:?OUT required}"
 cd "$PROJECT_DIR"
 export PYTHONPATH="${PROJECT_DIR}/src:${PROJECT_DIR}/data/external/katago-src-v1.18.2/KataGo-1.18.2/python" PYTHONUNBUFFERED=1

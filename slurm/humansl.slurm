@@ -9,14 +9,14 @@
 #SBATCH --mem=150G
 #SBATCH --time=00:20:00
 #SBATCH --chdir=/work/jason1122/go_aicup_2026
-#SBATCH --output=outputs/slurm-%x-%j.out
+#SBATCH --output=outputs/rank/humansl/slurm-%x-%j.out
 
 # HumanSL per-move likelihoods (A-039). NUM_SHARDS engine processes share the GPU.
-#   RUN=outputs/humansl_pilot NUM_SHARDS=4 LIMIT=10 sbatch slurm/humansl.slurm
+#   RUN=outputs/rank/humansl/humansl_pilot NUM_SHARDS=4 LIMIT=10 sbatch slurm/humansl.slurm
 set -euo pipefail
 PROJECT_DIR=/work/jason1122/go_aicup_2026
 PYTHON_BIN="${PYTHON_BIN:-${HOME}/.conda/envs/go/bin/python}"
-RUN="${RUN:-outputs/humansl_pilot}"
+RUN="${RUN:-outputs/rank/humansl/humansl_pilot}"
 NUM_SHARDS="${NUM_SHARDS:-1}"
 EXTRA=()
 [[ -n "${LIMIT:-}" ]] && EXTRA+=(--limit "$LIMIT")

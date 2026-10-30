@@ -3,9 +3,9 @@
 select : train-split players (fold 1-4, seed 2027 split) are split per rank
          (seed 2027) into F (fine-tuning) and B (B2 fitting); 10% of B players
          are Bm (training monitor, never used for B2).
-           outputs/humansl_finetune/games.parquet          every train-split game of F (role learn)
-           outputs/humansl_finetune/monitor/games.parquet  300 train-split games per rank of Bm (role monitor)
-           outputs/humansl_finetune/players.parquet        player_id, rank_id, half (F / B / Bm)
+           outputs/rank/humansl/humansl_finetune/games.parquet          every train-split game of F (role learn)
+           outputs/rank/humansl/humansl_finetune/monitor/games.parquet  300 train-split games per rank of Bm (role monitor)
+           outputs/rank/humansl/humansl_finetune/players.parquet        player_id, rank_id, half (F / B / Bm)
          Valid-U players are in neither half.
 
     python scripts/humansl_finetune.py select
@@ -20,7 +20,7 @@ import pandas as pd
 from go_aicup.paths import PROCESSED, ROOT
 
 DATASET = PROCESSED / "strength_v2" / "seed2027"
-RUN = ROOT / "outputs" / "humansl_finetune"
+RUN = ROOT / "outputs" / "rank" / "humansl" / "humansl_finetune"
 SEED, MONITOR_SHARE, MONITOR_PER_RANK = 2027, 0.1, 300
 COLUMNS = ["game_index", "rank_id", "player_id", "player_color", "length"]
 

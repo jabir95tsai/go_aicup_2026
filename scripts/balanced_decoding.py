@@ -44,11 +44,11 @@ def draw(rng, questions: pd.DataFrame, shares) -> np.ndarray:
 
 
 def main() -> int:
-    data = load(OUT / "humansl_q1000")
+    data = load(OUT / "rank" / "humansl" / "humansl_q1000")
     new_games, new_x = rest_data()
     fit_rows = new_games["role"].isin(["S-fit", "S-extra"]).to_numpy()
     fit = combine(part(data, "S-fit"), (new_games[fit_rows], new_x[fit_rows]))
-    test = load(OUT / "humansl_qsel")
+    test = load(OUT / "rank" / "humansl" / "humansl_qsel")
     probabilities = RankModel("B2").fit(*fit).probabilities(test[2], test[0]["game_index"].to_numpy(), test[1])
     questions, truth = test[1], test[1]["rank_id"].to_numpy()
     rng = np.random.default_rng(SEED)
@@ -69,7 +69,7 @@ def main() -> int:
                                  "gain_p05_p95": [round(float(q), 4) for q in np.quantile(np.array(v) - base, [0.05, 0.95])]}
                         for method, v in totals.items()}
         print(name, json.dumps(result[name]), flush=True)
-    (OUT / "balanced_decoding.json").write_text(json.dumps(result, indent=1))
+    (OUT / "rank" / "decoding" / "balanced_decoding.json").write_text(json.dumps(result, indent=1))
     return 0
 
 

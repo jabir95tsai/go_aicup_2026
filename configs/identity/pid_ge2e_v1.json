@@ -4,8 +4,8 @@
   "precision": "bf16",
   "paths": {
     "cache_dir": "data/processed/boards/strength_v1",
-    "init_model": "outputs/v2_strength/model.pt",
-    "output_dir": "outputs/pid_ge2e_v1"
+    "init_model": "outputs/rank/v2/v2_strength/model.pt",
+    "output_dir": "outputs/pid/ge2e/pid_ge2e_v1"
   },
   "exclude_splits": [
     0,

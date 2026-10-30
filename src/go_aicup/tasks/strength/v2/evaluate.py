@@ -9,7 +9,7 @@ Official question rule: mean per-game probability (each game 1/k), decoded
 with metrics.score_rank. argmax and mean log-probability pooling are reported
 as clearly labelled diagnostics; nothing is selected on validation scores.
 
-    python -m go_aicup.tasks.strength.v2.evaluate --run-dir outputs/v2_strength
+    python -m go_aicup.tasks.strength.v2.evaluate --run-dir outputs/rank/v2/v2_strength
 """
 from __future__ import annotations
 

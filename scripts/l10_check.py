@@ -72,7 +72,7 @@ def main() -> int:
     parser.add_argument("--store-dir", type=Path, required=True)
     parser.add_argument("--names", nargs="+", default=["rank_public", "rank_private"])
     parser.add_argument("--per-k", type=int, default=100, help="reference questions per k")
-    parser.add_argument("--out", type=Path, default=ROOT / "outputs" / "day0_audit" / "l10.json")
+    parser.add_argument("--out", type=Path, default=ROOT / "outputs" / "release" / "day0_audit" / "l10.json")
     args = parser.parse_args()
     params = load_params("d4")
     min_plies = 2 * max(params["moves"], params["slot_moves"]) + 1

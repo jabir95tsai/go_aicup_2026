@@ -45,7 +45,7 @@ def query(game: int, moves, colors, komi: float) -> bytes:
 def run(games, out: Path, *, in_flight: int = 48, komi: float = KOMI, allow_failures: bool = False,
         overrides: str | None = None, katago: Path = KATAGO, model: Path = MODEL, config: Path = CONFIG) -> dict:
     out.mkdir(parents=True, exist_ok=True)
-    (ROOT / "outputs" / "humansl_logs").mkdir(parents=True, exist_ok=True)
+    (ROOT / "outputs" / "rank" / "humansl" / "humansl_logs").mkdir(parents=True, exist_ok=True)
     positions = np.array([len(m) + 1 for m, _ in games], dtype=np.int64)
     offsets = np.r_[0, np.cumsum(positions)]
     score, winrate, logp = (np.full(offsets[-1], np.nan, dtype=np.float32) for _ in range(3))

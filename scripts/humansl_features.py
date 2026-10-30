@@ -42,15 +42,15 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--with-rest", action="store_true")
     args = parser.parse_args()
-    questions = pd.read_parquet(OUT / "humansl_qsel" / "questions.parquet")
+    questions = pd.read_parquet(OUT / "rank" / "humansl" / "humansl_qsel" / "questions.parquet")
     k = questions["k"].to_numpy()
     result = {"fit": "q1000 S-fit" + (" + vs_rest S-fit, S-extra" if args.with_rest else ""), "S-select": {}}
     for label, feature_set in SETS.items():
-        fit = [games_with(OUT / "humansl_q1000", feature_set, ["S-fit"])]
+        fit = [games_with(OUT / "rank" / "humansl" / "humansl_q1000", feature_set, ["S-fit"])]
         if args.with_rest:
-            fit.append(games_with(OUT / "humansl_vs_rest", feature_set, ["S-fit", "S-extra"]))
+            fit.append(games_with(OUT / "rank" / "humansl" / "humansl_vs_rest", feature_set, ["S-fit", "S-extra"]))
         fit = pd.concat(fit, ignore_index=True)
-        test = games_with(OUT / "humansl_qsel", feature_set, ["S-select"])
+        test = games_with(OUT / "rank" / "humansl" / "humansl_qsel", feature_set, ["S-select"])
         columns = [c for c in fit.columns if c.startswith(("own_", "opp_"))]
         model = RankModel("B2").fit(fit, pd.DataFrame(), fit[columns].to_numpy())
         pred = score_rank(model.probabilities(test[columns].to_numpy(), test["game_index"].to_numpy(), questions))
@@ -62,7 +62,7 @@ def main() -> int:
                    "fit_games": int(len(fit)), "fit_players": int(fit["player_id"].nunique())})
     print(json.dumps(result, indent=1))
     name = "humansl_features_rest.json" if args.with_rest else "humansl_features.json"
-    (OUT / name).write_text(json.dumps(result, indent=1))
+    (OUT / "rank" / "humansl" / name).write_text(json.dumps(result, indent=1))
     return 0
 
 

@@ -8,7 +8,7 @@
   "paths": {
     "cache_dir": "data/processed/boards/strength_v1",
     "dataset_dir": "data/processed/strength_v2/seed2027",
-    "output_dir": "outputs/v2_strength_seed2029_cosine"
+    "output_dir": "outputs/rank/v2/v2_strength_seed2029_cosine"
   },
   "split": {
     "policy": "player_disjoint",

@@ -10,7 +10,7 @@ humansl_q1000). Pre-registered:
       any differing class must be a near tie (top-two expected official score
       gap < 0.01 under the reference probabilities).
 
-    python scripts/humansl_rehearsal_check.py [--root outputs/rehearsal]
+    python scripts/humansl_rehearsal_check.py [--root outputs/release/rehearsal]
 """
 from __future__ import annotations
 
@@ -33,9 +33,9 @@ FEATURE_TOL, TIE = 1e-2, 0.01   # p99 tolerance, near-tie gap
 
 
 def training_features() -> pd.DataFrame:
-    a024 = a024_per_game(np.load(ROOT / "outputs" / "v2_strength" / "validation_unseen_category.npy",
+    a024 = a024_per_game(np.load(ROOT / "outputs" / "rank" / "v2" / "v2_strength" / "validation_unseen_category.npy",
                                  allow_pickle=False))
-    human = pd.concat([run_features(ROOT / "outputs" / run) for run in ("humansl_pilot", "humansl_q1000")])
+    human = pd.concat([run_features(ROOT / "outputs" / "rank" / "humansl" / run) for run in ("humansl_pilot", "humansl_q1000")])
     return features(a024, human.drop_duplicates("game_index", keep="last"))
 
 
@@ -87,7 +87,7 @@ def check(root: Path, name: str, reference: pd.DataFrame, model: RankModel) -> b
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--root", type=Path, default=ROOT / "outputs" / "rehearsal")
+    parser.add_argument("--root", type=Path, default=ROOT / "outputs" / "release" / "rehearsal")
     args = parser.parse_args()
     model, info = RankModel.load(MODEL)
     print(f"model: {info['method']} on {info['fit_games']} games")

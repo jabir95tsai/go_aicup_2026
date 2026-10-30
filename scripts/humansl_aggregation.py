@@ -1,8 +1,8 @@
 """HumanSL question aggregation choice (RESULTS A-041), CPU only.
 
 Methods B0 / B1 / B2 are tasks/strength/humansl.RankModel (see its docstring).
-Fitting data = S-fit games and questions of outputs/humansl_q1000; selection =
-S-select questions of outputs/humansl_qsel; Valid-U is scored once, for the
+Fitting data = S-fit games and questions of outputs/rank/humansl/humansl_q1000; selection =
+S-select questions of outputs/rank/humansl/humansl_qsel; Valid-U is scored once, for the
 selected method only (plus B0, which A-040 already reported, as a
 reproduction check).
 
@@ -63,9 +63,9 @@ def score(method: str, fit, test) -> np.ndarray:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--fit-run", type=Path, default=ROOT / "outputs" / "humansl_q1000")
-    parser.add_argument("--select-run", type=Path, default=ROOT / "outputs" / "humansl_qsel")
-    parser.add_argument("--out", type=Path, default=ROOT / "outputs" / "humansl_aggregation.json")
+    parser.add_argument("--fit-run", type=Path, default=ROOT / "outputs" / "rank" / "humansl" / "humansl_q1000")
+    parser.add_argument("--select-run", type=Path, default=ROOT / "outputs" / "rank" / "humansl" / "humansl_qsel")
+    parser.add_argument("--out", type=Path, default=ROOT / "outputs" / "rank" / "humansl" / "humansl_aggregation.json")
     args = parser.parse_args()
     data = load(args.fit_run)
     fit, u = part(data, "S-fit"), part(data, "U")

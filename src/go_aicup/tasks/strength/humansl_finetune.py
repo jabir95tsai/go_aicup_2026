@@ -8,7 +8,7 @@ in eval mode: its one batch norm (trunk end) keeps its running statistics.
 
 Each process keeps its share of the pack_* shards (shard i on rank i % world)
 in GPU memory and draws its own batches; gradients are averaged by DDP.
-Monitor (Bm games, outputs/humansl_finetune/monitor): mean NLL of the played
+Monitor (Bm games, outputs/rank/humansl/humansl_finetune/monitor): mean NLL of the played
 move under the true rank on a fixed position subset, and the single-game official
 score (sum of log p under each rank hypothesis -> softmax -> score_rank). Step 0
 is C2 (A-055) exactly.
@@ -19,7 +19,7 @@ softmax over ranks of log p(played move)). Positions per step are then --batch,
 forward passes --batch x 10.
 
     torchrun --standalone --nproc-per-node=8 -m go_aicup.tasks.strength.humansl_finetune \\
-        --data outputs/humansl_finetune --out outputs/c4_s2 [--max-positions N] [--resume]
+        --data outputs/rank/humansl/humansl_finetune --out outputs/rank/humansl/c4_s2 [--max-positions N] [--resume]
 """
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ from go_aicup.features import humansl_rankvec as rv
 from go_aicup.metrics import score_rank
 from go_aicup.paths import ROOT
 
-VECTORS = ROOT / "outputs" / "humansl_rankvec" / "vectors.pt"
+VECTORS = ROOT / "outputs" / "rank" / "humansl" / "humansl_rankvec" / "vectors.pt"
 TRAINABLE = ("conv_spatial.", "linear_global.", "blocks.", "norm_trunkfinal.", "policy_head.")
 EVAL_POSITIONS = 409   # x RANKS evaluations per compiled monitor batch (as A-055 extract)
 

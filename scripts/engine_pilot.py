@@ -38,9 +38,9 @@ def with_engine(data, engine: pd.DataFrame):
 
 
 def main() -> int:
-    engine = engine_features(OUT / "engine_pilot")
-    fit = with_engine(part(load(OUT / "humansl_q1000"), "S-fit"), engine)
-    test = with_engine(load(OUT / "humansl_qsel"), engine)
+    engine = engine_features(OUT / "rank" / "humansl" / "engine_pilot")
+    fit = with_engine(part(load(OUT / "rank" / "humansl" / "humansl_q1000"), "S-fit"), engine)
+    test = with_engine(load(OUT / "rank" / "humansl" / "humansl_qsel"), engine)
     k = test[1]["k"].to_numpy()
     views = {"AH": lambda d: d[2], "AH_E": lambda d: np.hstack([d[2], d[3]]),
              "H_E": lambda d: np.hstack([d[2][:, 10:], d[3]]), "E": lambda d: d[3]}
@@ -53,7 +53,7 @@ def main() -> int:
     gain = result["S-select"]["AH_E"]["equal_k"] - result["S-select"]["AH"]["equal_k"]
     result["gate"] = {"gain_AH_E_minus_AH": round(gain, 4), "min_gain": MIN_GAIN, "pass": bool(gain >= MIN_GAIN)}
     print(json.dumps(result["gate"]))
-    (OUT / "engine_pilot" / "result.json").write_text(json.dumps(result, indent=1))
+    (OUT / "rank" / "humansl" / "engine_pilot" / "result.json").write_text(json.dumps(result, indent=1))
     return 0
 
 

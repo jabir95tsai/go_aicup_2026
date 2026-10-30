@@ -1,7 +1,7 @@
 """HumanSL fitting data from train-split players (RESULTS A-047), CPU only.
 
 select  : up to 20 random train-split games per player (seed 2027), all 5,767
-          players -> outputs/humansl_train20. HumanSL-only features: A-024 was
+          players -> outputs/rank/humansl/humansl_train20. HumanSL-only features: A-024 was
           trained on these games, so its features would be biased (A-045).
 analyze : B2 on HumanSL mean features (F0), scored on the 1,000 S-select questions:
             (a) H, fit = Valid-S S-fit + S-extra (A-046 F0 setting, 0.7025)
@@ -35,7 +35,7 @@ from go_aicup.tasks.strength.v2.aggregate import official_scores
 
 DATASET = PROCESSED / "strength_v2" / "seed2027"
 OUT = ROOT / "outputs"
-RUN = OUT / "humansl_train20"
+RUN = OUT / "rank" / "humansl" / "humansl_train20"
 PER_PLAYER, MIN_GAIN, BOOTSTRAP = 20, 0.005, 2000
 
 
@@ -78,13 +78,13 @@ def main() -> int:
         return 0
     seen = pd.read_parquet(DATASET / "strength_v2_valid_seen_questions.parquet")
     select_half = set(seen["player_id"].astype(str)) - fit_players(seen)
-    questions = pd.read_parquet(OUT / "humansl_qsel" / "questions.parquet")
+    questions = pd.read_parquet(OUT / "rank" / "humansl" / "humansl_qsel" / "questions.parquet")
     if not set(questions["player_id"].astype(str)) <= select_half:
         raise ValueError("S-select questions outside the S-select half")
     k = questions["k"].to_numpy()
-    test = human_games(OUT / "humansl_qsel", ["S-select"])
-    base = pd.concat([human_games(OUT / "humansl_q1000", ["S-fit"]),
-                      human_games(OUT / "humansl_vs_rest", ["S-fit", "S-extra"])], ignore_index=True)
+    test = human_games(OUT / "rank" / "humansl" / "humansl_qsel", ["S-select"])
+    base = pd.concat([human_games(OUT / "rank" / "humansl" / "humansl_q1000", ["S-fit"]),
+                      human_games(OUT / "rank" / "humansl" / "humansl_vs_rest", ["S-fit", "S-extra"])], ignore_index=True)
     train = human_games(RUN)
     train_out = train[~train["player_id"].astype(str).isin(select_half)]
     scores = {"a_H_valid_s": fit_score(base, test, questions),
@@ -98,16 +98,16 @@ def main() -> int:
     result["data_gain"] = round(eq["b_H_plus_train"] - eq["a_H_valid_s"], 4)
     result["switch_to_H"] = bool(eq["b_H_plus_train"] >= ah + MIN_GAIN)
     if result["switch_to_H"]:
-        data = load(OUT / "humansl_q1000")
+        data = load(OUT / "rank" / "humansl" / "humansl_q1000")
         u = part(data, "U")
-        u_games = human_games(OUT / "humansl_q1000", ["U"])
-        everything = pd.concat([human_games(OUT / "humansl_q1000", ["S-fit"]), test,
-                                human_games(OUT / "humansl_vs_rest"), train], ignore_index=True)
+        u_games = human_games(OUT / "rank" / "humansl" / "humansl_q1000", ["U"])
+        everything = pd.concat([human_games(OUT / "rank" / "humansl" / "humansl_q1000", ["S-fit"]), test,
+                                human_games(OUT / "rank" / "humansl" / "humansl_vs_rest"), train], ignore_index=True)
         u_h = fit_score(everything, u_games, u[1])
         from humansl_aggregation import score as ah_score
         from humansl_more_data import combine, rest_data
         new_games, new_x = rest_data()
-        select_set = load(OUT / "humansl_qsel")
+        select_set = load(OUT / "rank" / "humansl" / "humansl_qsel")
         u_ah = ah_score("B2", combine(part(data, "S-fit"), (select_set[0], select_set[2]), (new_games, new_x)), u)
         u_k = u[1]["k"].to_numpy()
         groups = pd.Series(np.arange(len(u[1]))).groupby(u[1]["player_id"].astype(str).to_numpy()) \

@@ -7,7 +7,7 @@ Valid-U Equal-k >= reference + 0.005, the 95% interval of a player-grouped
 bootstrap of the difference has a lower bound > 0, and the candidate's
 G = Equal-k(S-select) - Equal-k(U) <= 0.08. Valid-U is never used for fitting.
 
-    python scripts/v2_candidate_gate.py --reference outputs/v2_strength --candidate outputs/v2_strength_e14
+    python scripts/v2_candidate_gate.py --reference outputs/rank/v2/v2_strength --candidate outputs/rank/v2/v2_strength_e14
 """
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ def c2_scores(categories: dict, parts: dict) -> tuple[dict, dict]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--reference", type=Path, default=ROOT / "outputs" / "v2_strength")
+    parser.add_argument("--reference", type=Path, default=ROOT / "outputs" / "rank" / "v2" / "v2_strength")
     parser.add_argument("--candidate", type=Path, required=True)
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()

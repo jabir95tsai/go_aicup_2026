@@ -12,7 +12,7 @@ identity/predict.py --insurance-dir fuses them: opening + lambda * w * cosine
 and model.pt).
 
     python -m go_aicup.tasks.identity.insurance --store-dir data/processed --name pool_public \\
-        --work-dir outputs/pid_submit/insurance
+        --work-dir outputs/pid/submit/insurance
 """
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ from go_aicup.paths import ROOT
 from go_aicup.tasks.identity.ge2e import MIN_PLY, IdentityEncoder
 from go_aicup.tasks.strength.shared.runtime import autocast_context
 
-RUN = ROOT / "outputs" / "pid_ge2e_v1_short"   # A-035 choice
+RUN = ROOT / "outputs" / "pid" / "ge2e" / "pid_ge2e_v1_short"   # A-035 choice
 
 
 def load_run(run_dir: Path = RUN) -> tuple[IdentityEncoder, dict, float, float]:

@@ -14,7 +14,7 @@ the 95% interval of a player-grouped bootstrap of the paired difference has a
 lower bound > 0 -> continue to question-level (k buckets) evaluation.
 
     python scripts/humansl_pilot.py select
-    python scripts/humansl_pilot.py analyze --run outputs/humansl_pilot
+    python scripts/humansl_pilot.py analyze --run outputs/rank/humansl/humansl_pilot
 """
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ from go_aicup.paths import PROCESSED, ROOT
 from go_aicup.tasks.strength.v2.aggregate import official_scores
 
 DATASET = PROCESSED / "strength_v2" / "seed2027"
-A024 = ROOT / "outputs" / "v2_strength"
+A024 = ROOT / "outputs" / "rank" / "v2" / "v2_strength"
 SEED, PER_RANK, BOOTSTRAP, MIN_GAIN = 2027, 200, 2000, 0.01
 
 
@@ -119,7 +119,7 @@ def analyze(run: Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("command", choices=("select", "analyze"))
-    parser.add_argument("--run", type=Path, default=ROOT / "outputs" / "humansl_pilot")
+    parser.add_argument("--run", type=Path, default=ROOT / "outputs" / "rank" / "humansl" / "humansl_pilot")
     args = parser.parse_args()
     select(args.run) if args.command == "select" else analyze(args.run)
     return 0

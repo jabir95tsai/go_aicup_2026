@@ -11,7 +11,7 @@ References: competition 2 = C2 on the stored A-024 Valid-U per-game sums
 scorer run directly on the training prefix arrays (split 1 / 2).
 Scores against the answer keys are printed per k as a sanity check.
 
-    python scripts/rehearsal_check.py [--root outputs/rehearsal] [--skip-strength]
+    python scripts/rehearsal_check.py [--root outputs/release/rehearsal] [--skip-strength]
 """
 from __future__ import annotations
 
@@ -74,7 +74,7 @@ def strength(root: Path, train: TrainMoves) -> bool:
     ok = True
     unseen = pd.read_parquet(V2_DIR / "strength_v2_valid_unseen_questions.parquet")
     games = dict(zip(unseen["question_id"], unseen["games"].map(np.asarray)))
-    category = np.load(ROOT / "outputs" / "v2_strength" / "validation_unseen_category.npy")
+    category = np.load(ROOT / "outputs" / "rank" / "v2" / "v2_strength" / "validation_unseen_category.npy")
     temps = temperatures(DEFAULT_CALIBRATION)
     for part in ("public", "private"):
         name = f"rank_{part}"
@@ -145,7 +145,7 @@ def identity(root: Path, train: TrainMoves) -> bool:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--root", type=Path, default=ROOT / "outputs" / "rehearsal")
+    parser.add_argument("--root", type=Path, default=ROOT / "outputs" / "release" / "rehearsal")
     parser.add_argument("--skip-strength", action="store_true")
     parser.add_argument("--skip-identity", action="store_true")
     args = parser.parse_args()

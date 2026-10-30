@@ -19,7 +19,7 @@ and the 95% interval of a player-grouped bootstrap of the paired difference
 has a lower bound > 0.
 
     python scripts/humansl_questions.py select
-    python scripts/humansl_questions.py analyze --run outputs/humansl_q1000
+    python scripts/humansl_questions.py analyze --run outputs/rank/humansl/humansl_q1000
 """
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
 DATASET = PROCESSED / "strength_v2" / "seed2027"
-A024 = ROOT / "outputs" / "v2_strength"
+A024 = ROOT / "outputs" / "rank" / "v2" / "v2_strength"
 SEED, PER_K, BOOTSTRAP, MIN_GAIN = 2027, 250, 2000, 0.005
 
 
@@ -179,7 +179,7 @@ def analyze(run: Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("command", choices=("select", "select-sselect", "analyze"))
-    parser.add_argument("--run", type=Path, default=ROOT / "outputs" / "humansl_q1000")
+    parser.add_argument("--run", type=Path, default=ROOT / "outputs" / "rank" / "humansl" / "humansl_q1000")
     args = parser.parse_args()
     {"select": select, "select-sselect": select_sselect, "analyze": analyze}[args.command](args.run)
     return 0

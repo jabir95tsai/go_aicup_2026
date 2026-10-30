@@ -1,7 +1,7 @@
 """Plot V1 training loss and completed validation evaluation (CPU only).
 
 Example:
-    python scripts/plot_rank_v1.py --run-dir outputs/rank_cnn_v1_seed2026
+    python scripts/plot_rank_v1.py --run-dir outputs/rank/v1/rank_cnn_v1_seed2026
     python scripts/plot_rank_v1.py --run-dir outputs/my_run --loss-only
 """
 

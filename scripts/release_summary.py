@@ -4,7 +4,7 @@ Lists every submission file with its row count and predicted-label spread, the
 competition-2 fallback counts (AH+C primary, AH control), the competition-1 insurance / unscored
 counts, and each job's Slurm state and elapsed time. No answers are read.
 
-    python scripts/release_summary.py --out outputs/release_1104
+    python scripts/release_summary.py --out outputs/release/release_1104
 """
 from __future__ import annotations
 

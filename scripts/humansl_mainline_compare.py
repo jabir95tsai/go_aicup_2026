@@ -35,7 +35,7 @@ def a024_c2(questions: dict) -> dict:
     """A-024 + C2 predictions for each question set, T_k on all S-fit questions (A-025)."""
     seen = pd.read_parquet(DATASET / "strength_v2_valid_seen_questions.parquet")
     s_fit = seen[seen["player_id"].astype(str).isin(fit_players(seen))].reset_index(drop=True)
-    categories = {name: np.load(OUT / "v2_strength" / file, allow_pickle=False) for name, file in
+    categories = {name: np.load(OUT / "rank" / "v2" / "v2_strength" / file, allow_pickle=False) for name, file in
                   (("U", "validation_unseen_category.npy"), ("S", "validation_seen_category.npy"))}
     # c2_scores scores its "S-select" part on Valid-S results and "U" on Valid-U results.
     scores, _ = c2_scores(categories, {"S-fit": s_fit, "S-select": questions["S-select"], "U": questions["U"]})
@@ -60,9 +60,9 @@ def summary(scores: np.ndarray, pred, questions: pd.DataFrame) -> dict:
 
 
 def main() -> int:
-    data = load(OUT / "humansl_q1000")
+    data = load(OUT / "rank" / "humansl" / "humansl_q1000")
     fit, u = part(data, "S-fit"), part(data, "U")
-    select = load(OUT / "humansl_qsel")
+    select = load(OUT / "rank" / "humansl" / "humansl_qsel")
     sets = {"S-select": select, "U": u}
     reference = a024_c2({name: value[1] for name, value in sets.items()})
     all_columns, human_columns = np.arange(fit[2].shape[1]), np.arange(10, fit[2].shape[1])
@@ -78,7 +78,7 @@ def main() -> int:
     for label, value in result.items():
         value["G"] = round(value["S-select"]["equal_k"] - value["U"]["equal_k"], 4)
     print(json.dumps(result, indent=1, default=str))
-    (OUT / "humansl_mainline_compare.json").write_text(json.dumps(result, indent=1, default=str))
+    (OUT / "rank" / "humansl" / "humansl_mainline_compare.json").write_text(json.dumps(result, indent=1, default=str))
     return 0
 
 

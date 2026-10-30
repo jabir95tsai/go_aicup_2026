@@ -1,9 +1,9 @@
 """Competition-2 HumanSL submission path (RESULTS A-041, A-042, A-055).
 
     fit        RankModel on every extracted Valid-S game (A-044: q1000 S-fit,
-               qsel S-select, vs_rest) -> outputs/humansl_model/model.pkl (AH). CPU.
+               qsel S-select, vs_rest) -> outputs/rank/humansl/humansl_model/model.pkl (AH). CPU.
                --rankvec adds the C2 rank-vector features (A-055, columns c_*)
-               -> outputs/humansl_rankvec_model/model.pkl (AH+C, the primary).
+               -> outputs/rank/humansl/humansl_rankvec_model/model.pkl (AH+C, the primary).
     aggregate  for a release work directory already processed by
                v2/predict.py (prepare, infer, aggregate) and by HumanSL
                extraction into <work>/humansl/shard_*: per-game A-024 mean
@@ -15,8 +15,8 @@
                prediction; the AH+C path falls back to the AH predictions).
 
     python -m go_aicup.tasks.strength.humansl_predict fit --method B2 [--rankvec]
-    python -m go_aicup.tasks.strength.humansl_predict aggregate --work outputs/rank_submit/rank_public \\
-        --submission outputs/rank_submit/rank_public/humansl_submission.csv
+    python -m go_aicup.tasks.strength.humansl_predict aggregate --work outputs/rank/submit/rank_public \\
+        --submission outputs/rank/submit/rank_public/humansl_submission.csv
 """
 from __future__ import annotations
 
@@ -35,12 +35,12 @@ from go_aicup.paths import PROCESSED, ROOT
 from go_aicup.tasks.strength.humansl import RankModel
 from go_aicup.tasks.strength.v2.predict import question_table
 
-MODEL = ROOT / "outputs" / "humansl_model" / "model.pkl"
-RANKVEC_MODEL = ROOT / "outputs" / "humansl_rankvec_model" / "model.pkl"
-RANKVEC_RUNS = (ROOT / "outputs" / "humansl_rankvec_feat", ROOT / "outputs" / "humansl_rankvec_feat_vu")
-FIT_RUNS = (ROOT / "outputs" / "humansl_q1000", ROOT / "outputs" / "humansl_qsel", ROOT / "outputs" / "humansl_vs_rest")
+MODEL = ROOT / "outputs" / "rank" / "humansl" / "humansl_model" / "model.pkl"
+RANKVEC_MODEL = ROOT / "outputs" / "rank" / "humansl" / "humansl_rankvec_model" / "model.pkl"
+RANKVEC_RUNS = (ROOT / "outputs" / "rank" / "humansl" / "humansl_rankvec_feat", ROOT / "outputs" / "rank" / "humansl" / "humansl_rankvec_feat_vu")
+FIT_RUNS = (ROOT / "outputs" / "rank" / "humansl" / "humansl_q1000", ROOT / "outputs" / "rank" / "humansl" / "humansl_qsel", ROOT / "outputs" / "rank" / "humansl" / "humansl_vs_rest")
 FIT_ROLES = ("S-fit", "S-select", "S-extra")   # Valid-U is never fitted
-A024 = ROOT / "outputs" / "v2_strength"
+A024 = ROOT / "outputs" / "rank" / "v2" / "v2_strength"
 DATASET = PROCESSED / "strength_v2" / "seed2027"
 
 
@@ -89,7 +89,7 @@ def fit(method: str, out: Path, rankvec: bool = False) -> None:
     table = table.loc[games["game_index"]]
     model = RankModel(method).fit(games, questions, table.to_numpy())
     extra = {"rankvec_runs": [str(r) for r in RANKVEC_RUNS],
-             "rankvec_vectors": str(ROOT / "outputs" / "humansl_rankvec" / "vectors.pt")} if rankvec else {}
+             "rankvec_vectors": str(ROOT / "outputs" / "rank" / "humansl" / "humansl_rankvec" / "vectors.pt")} if rankvec else {}
     model.save(out, method=method, columns=list(table.columns), fit_runs=[str(r) for r in FIT_RUNS],
                fit_games=len(games), fit_questions=len(questions), a024_run=str(A024), **extra)
     print(f"fit: {method} on {len(games):,} games / {len(questions):,} questions -> {out}")

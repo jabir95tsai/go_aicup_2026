@@ -16,7 +16,7 @@ other questions (count printed). `num_games` outside {5,10,15,20} uses the
 nearest calibrated k. No label column of the release file is ever read.
 
     python -m go_aicup.tasks.strength.v2.predict --store-dir data/processed --name rank_public \\
-        --work-dir outputs/rank_submit --run-dir outputs/v2_strength
+        --work-dir outputs/rank/submit --run-dir outputs/rank/v2/v2_strength
 """
 from __future__ import annotations
 
@@ -33,8 +33,8 @@ from go_aicup.metrics import K_BUCKETS
 from go_aicup.paths import ROOT
 from go_aicup.tasks.strength.v2.aggregate import N_RANKS, decode_questions, tempered_probabilities
 
-DEFAULT_RUN = ROOT / "outputs" / "v2_strength"
-DEFAULT_CALIBRATION = ROOT / "outputs" / "v2_agg_calibration" / "result.json"
+DEFAULT_RUN = ROOT / "outputs" / "rank" / "v2" / "v2_strength"
+DEFAULT_CALIBRATION = ROOT / "outputs" / "rank" / "v2" / "v2_agg_calibration" / "result.json"
 PREFIX = "test"
 STEPS = ("prepare", "infer", "aggregate")
 

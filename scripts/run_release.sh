@@ -3,8 +3,8 @@
 # Submits Slurm jobs with dependencies and returns; the last job writes <out>/SUMMARY.md.
 #
 #   bash scripts/run_release.sh <raw-dir> <out-dir>
-#   e.g. bash scripts/run_release.sh data/raw outputs/release_1104
-#        bash scripts/run_release.sh outputs/rehearsal/raw outputs/rehearsal_t3
+#   e.g. bash scripts/run_release.sh data/raw outputs/release/release_1104
+#        bash scripts/run_release.sh outputs/release/rehearsal/raw outputs/release/rehearsal_t3
 #
 # Jobs (all `dev`, account GOV115094):
 #   prep       1 GPU (the dev partition requires one; CPU work) preprocess release -> GameStores
@@ -34,7 +34,7 @@ if [[ -e "$OUT" ]]; then echo "refusing to reuse existing $OUT" >&2; exit 1; fi
 FREE_GB=$(df -BG --output=avail /work/jason1122 | tail -1 | tr -dc '0-9')
 if (( FREE_GB < ${MIN_FREE_GB:-10} )); then
     echo "only ${FREE_GB} GB free under /work/jason1122 (need ${MIN_FREE_GB:-10}); a run writes about 5 GB. Free space first:" >&2
-    du -sh "$PROJECT_DIR"/outputs/* 2>/dev/null | sort -h | tail -8 >&2
+    du -sh "$PROJECT_DIR"/outputs/*/* 2>/dev/null | sort -h | tail -8 >&2
     exit 1
 fi
 mkdir -p "$OUT/logs" "$OUT/submissions"
@@ -100,14 +100,14 @@ FINISH=$(submit finish --dependency=afterany:$DEPS:$PID --gres=gpu:1 -c 8 --mem=
     "for name in rank_public rank_private; do $PY -m go_aicup.tasks.strength.humansl_predict aggregate --work $OUT/rank/\$name \
        --submission $OUT/submissions/\${name}_ah.csv || echo \"HumanSL aggregate failed for \$name\"; \
        $PY -m go_aicup.tasks.strength.humansl_predict aggregate --work $OUT/rank/\$name \
-         --model outputs/humansl_rankvec_model/model.pkl --predictions rankvec_predictions.parquet \
+         --model outputs/rank/humansl/humansl_rankvec_model/model.pkl --predictions rankvec_predictions.parquet \
          --fallback humansl_predictions.parquet --submission $OUT/submissions/\$name.csv \
        || { echo \"AH+C aggregate failed for \$name: primary = AH\"; cp $OUT/submissions/\${name}_ah.csv $OUT/submissions/\$name.csv; } \
        || echo \"no AH submission for \$name\"; \
        $PY -m go_aicup.tasks.strength.balanced --predictions $OUT/rank/\$name/rankvec_predictions.parquet \
          --submission $OUT/submissions/\${name}_balanced.csv || echo \"balanced decoding failed for \$name\"; \
        $PY -m go_aicup.tasks.strength.humansl_predict aggregate --work $OUT/rank/\$name \
-         --model outputs/humansl_allplayers_model/model.pkl --predictions allplayers_predictions.parquet \
+         --model outputs/rank/humansl/humansl_allplayers_model/model.pkl --predictions allplayers_predictions.parquet \
          --fallback humansl_predictions.parquet --submission $OUT/submissions/\${name}_allplayers.csv \
        || echo \"all-player aggregate failed for \$name\"; \
        cp $OUT/rank/\$name/submission.csv $OUT/submissions/\${name}_v2_fallback.csv || echo \"no V2 submission for \$name\"; done; \

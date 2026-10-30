@@ -12,8 +12,8 @@ done.npy bool [games, profiles], meta.json (profiles, settings, throughput).
 Training data is strict (any engine error aborts); release files use
 --allow-failures, which records rejected games as not done and continues.
 
-    python -m go_aicup.features.humansl --games outputs/humansl_pilot/games.parquet \\
-        --out outputs/humansl_pilot/shard_0 --shard 0 --num-shards 1
+    python -m go_aicup.features.humansl --games outputs/rank/humansl/humansl_pilot/games.parquet \\
+        --out outputs/rank/humansl/humansl_pilot/shard_0 --shard 0 --num-shards 1
 """
 from __future__ import annotations
 
@@ -72,7 +72,7 @@ def run(games, profiles, out: Path, *, in_flight: int = 48, max_seconds: float |
         overrides: str | None = None, komi: float = KOMI, allow_failures: bool = False,
         katago: Path = KATAGO, model: Path = MODEL, config: Path = CONFIG) -> dict:
     out.mkdir(parents=True, exist_ok=True)
-    (ROOT / "outputs" / "humansl_logs").mkdir(parents=True, exist_ok=True)
+    (ROOT / "outputs" / "rank" / "humansl" / "humansl_logs").mkdir(parents=True, exist_ok=True)
     lengths = np.array([len(m) for m, _ in games], dtype=np.int64)
     offsets = np.r_[0, np.cumsum(lengths)]
     logp = np.full((offsets[-1], len(profiles)), np.nan, dtype=np.float32)

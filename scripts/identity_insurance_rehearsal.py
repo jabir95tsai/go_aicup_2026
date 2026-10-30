@@ -28,7 +28,7 @@ from go_aicup.tasks.identity import assign, data
 from go_aicup.tasks.identity.insurance import RUN, load_run
 from go_aicup.tasks.identity.predict import load_params, opening_scores, predict, train_prefix
 
-REHEARSAL = ROOT / "outputs" / "rehearsal"
+REHEARSAL = ROOT / "outputs" / "release" / "rehearsal"
 WORK = REHEARSAL / "identity_insurance"
 SPLITS = {"public": 1, "private": 2}
 COS_MIN, SAME_MIN, SCORE_TOL, TIE = 0.999, 398, 0.005, 0.01

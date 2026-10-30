@@ -13,7 +13,7 @@ Items covered (numbers as in the plan):
      pool, between the pool itself (leave-one-out) and outside training players
      -> p_hat; opening-only vs style-only top-1 agreement when both release
      variants are present. Compare with the synthetic table in
-     outputs/pid_drift_robust/result.json ("detector").
+     outputs/pid/robustness/pid_drift_robust/result.json ("detector").
   9  official CSV headers (and sample submission files if any)
 Not covered here: 8 (L10 needs a model run), 10 (judgement from 5-7).
 
@@ -223,7 +223,7 @@ def audit_release(store_dir: Path, raw_dirs: list[Path], identity_dir: Path | No
         out["one_to_one"] = one
 
     out["opening_drift"] = opening_drift(stores, train_meta, identity_dir)
-    print("\n[W1] opening drift (compare outputs/pid_drift_robust/result.json detector)\n"
+    print("\n[W1] opening drift (compare outputs/pid/robustness/pid_drift_robust/result.json detector)\n"
           + json.dumps(out["opening_drift"], indent=1))
 
     headers = {}

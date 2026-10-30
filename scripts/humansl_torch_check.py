@@ -4,7 +4,7 @@ Loads b18c384nbt-humanv0.ckpt with KataGo's own python code (v1.18.2 source in
 data/external), replays games with its Board / Features, builds the humanSL
 metadata row of each profile exactly as cpp/neuralnet/sgfmetadata.cpp
 makeBasicRankProfile does, and compares log p(played move) with the analysis
-engine values of A-039 (outputs/humansl_pilot/shard_0).
+engine values of A-039 (outputs/rank/humansl/humansl_pilot/shard_0).
 
 Pre-registered gate (A-050): over 100 games and 15 profiles, per-move |dlogp|
 mean <= 3e-3 and p99 <= 2e-2, and the per-game feature (own / opp mean) max
@@ -28,7 +28,7 @@ from go_aicup.paths import ROOT
 
 KATAGO_PY = ROOT / "data" / "external" / "katago-src-v1.18.2" / "KataGo-1.18.2" / "python"
 CKPT = ROOT / "data" / "external" / "humansl-v0" / "b18c384nbt-humanv0.ckpt"
-REFERENCE = ROOT / "outputs" / "humansl_pilot" / "shard_0"
+REFERENCE = ROOT / "outputs" / "rank" / "humansl" / "humansl_pilot" / "shard_0"
 sys.path.insert(0, str(KATAGO_PY))
 
 from katago.game.board import Board  # noqa: E402

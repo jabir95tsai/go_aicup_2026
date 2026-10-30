@@ -11,8 +11,8 @@ AND the 95% interval of a player-grouped bootstrap of the difference has a
 lower bound > 0. Valid-U is never used for fitting. Each component alone is
 reported as a diagnostic only.
 
-    python scripts/v2_ensemble_gate.py --runs outputs/v2_strength outputs/v2_strength_seed2028_cosine \\
-        outputs/v2_strength_seed2029_cosine
+    python scripts/v2_ensemble_gate.py --runs outputs/rank/v2/v2_strength outputs/rank/v2/v2_strength_seed2028_cosine \\
+        outputs/rank/v2/v2_strength_seed2029_cosine
 """
 from __future__ import annotations
 
@@ -69,7 +69,7 @@ def by_k(scores, k) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--runs", nargs="+", type=Path, required=True, help="first run = reference (A-024)")
-    parser.add_argument("--out", type=Path, default=ROOT / "outputs" / "v2_ensemble_gate" / "result.json")
+    parser.add_argument("--out", type=Path, default=ROOT / "outputs" / "rank" / "v2" / "v2_ensemble_gate" / "result.json")
     args = parser.parse_args()
 
     seen = pd.read_parquet(DATASET / "strength_v2_valid_seen_questions.parquet")

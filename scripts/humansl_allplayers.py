@@ -1,15 +1,15 @@
 """AH+C fitted on every labelled player (RESULTS A-058), CPU except the extraction jobs.
 
 select  : per Valid-U player up to 20 games (already-extracted q1000 U games first,
-          then random, seed 2027) -> outputs/humansl_allu/fit_games.parquet; the
-          games still lacking HumanSL / C features -> outputs/humansl_allu/games.parquet
+          then random, seed 2027) -> outputs/rank/humansl/humansl_allu/fit_games.parquet; the
+          games still lacking HumanSL / C features -> outputs/rank/humansl/humansl_allu/games.parquet
           (extract with slurm/humansl.slurm and slurm/humansl_rankvec.slurm).
 analyze : Valid-U players split per rank into U1 / U2 (seed 2027). Cross-fit: B2 on
           Valid-S + U1 games scored on the q1000 U questions of U2 players, and
           Valid-S + U2 on those of U1; together the 1,000 Valid-U questions. Reference:
           the production AH+C (Valid-S only, A-055 0.6934) on the same questions.
           Reported, no gate (D-003): gain and player bootstrap. Then the all-player
-          model (Valid-S + every Valid-U fit game) -> outputs/humansl_allplayers_model/model.pkl.
+          model (Valid-S + every Valid-U fit game) -> outputs/rank/humansl/humansl_allplayers_model/model.pkl.
 
     python scripts/humansl_allplayers.py select
     python scripts/humansl_allplayers.py analyze
@@ -32,8 +32,8 @@ from go_aicup.tasks.strength.v2.aggregate import official_scores
 
 DATASET = PROCESSED / "strength_v2" / "seed2027"
 OUT = ROOT / "outputs"
-RUN, MODEL = OUT / "humansl_allu", OUT / "humansl_allplayers_model" / "model.pkl"
-Q1000 = OUT / "humansl_q1000"
+RUN, MODEL = OUT / "rank" / "humansl" / "humansl_allu", OUT / "rank" / "humansl" / "humansl_allplayers_model" / "model.pkl"
+Q1000 = OUT / "rank" / "humansl" / "humansl_q1000"
 PER_PLAYER, BOOTSTRAP = 20, 2000
 COLUMNS = ["game_index", "rank_id", "player_id", "player_color", "length"]
 
@@ -119,7 +119,7 @@ def main() -> int:
     final.save(MODEL, method="B2", columns=columns, fit_runs=[str(r) for r in (*hp.FIT_RUNS, RUN)],
                fit_games=len(s_games) + len(u_games), fit_questions=0, a024_run=str(hp.A024),
                rankvec_runs=[str(r) for r in (*hp.RANKVEC_RUNS, RUN / "rankvec")],
-               rankvec_vectors=str(ROOT / "outputs" / "humansl_rankvec" / "vectors.pt"))
+               rankvec_vectors=str(ROOT / "outputs" / "rank" / "humansl" / "humansl_rankvec" / "vectors.pt"))
     result = {"valid_s_games": len(s_games), "valid_u_fit_games": len(u_games),
               "players": int(pd.concat([s_games, u_games])["player_id"].nunique()),
               "u1_players": len(u1), "questions_u1": int(in_u1.sum()),

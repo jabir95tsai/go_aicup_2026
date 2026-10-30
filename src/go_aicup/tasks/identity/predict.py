@@ -3,7 +3,7 @@
 Public and private are run separately (different 400 players; CLAUDE.md
 section 2). Model = A-029 default: pp+slot with D4 canonicalisation,
 hyper-parameters read from the split-0 selection in
-outputs/pid_opening_v1_d4/summary.json. No L6 assignment by default (questions
+outputs/pid/opening/pid_opening_v1_d4/summary.json. No L6 assignment by default (questions
 are assumed not one-to-one with candidates, D-004); --assign hungarian|sinkhorn
 gives the LB-probe variants.
 
@@ -27,7 +27,7 @@ opening log-likelihoods, fused when --insurance-dir is given), candidates.npy,
 predictions.parquet and a provisional submission CSV (format fixed on 11/04).
 
     python -m go_aicup.tasks.identity.predict --store-dir data/processed --pool pool_public \\
-        --questions pid_public --out-dir outputs/pid_submit/public
+        --questions pid_public --out-dir outputs/pid/submit/public
 """
 from __future__ import annotations
 
@@ -43,8 +43,8 @@ from go_aicup.paths import ROOT
 from go_aicup.tasks.identity import assign, data, drift, opening
 
 PLIES = 60
-SUMMARY = {"d4": ROOT / "outputs" / "pid_opening_v1_d4" / "summary.json",
-           "raw": ROOT / "outputs" / "pid_opening_v1" / "summary.json"}
+SUMMARY = {"d4": ROOT / "outputs" / "pid" / "opening" / "pid_opening_v1_d4" / "summary.json",
+           "raw": ROOT / "outputs" / "pid" / "opening" / "pid_opening_v1" / "summary.json"}
 PAD = np.int16(361)  # never a board point; only sits beyond a short game's end
 
 

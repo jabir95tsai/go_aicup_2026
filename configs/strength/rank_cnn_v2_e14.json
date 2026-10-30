@@ -7,7 +7,7 @@
   "paths": {
     "cache_dir": "/work/jason1122/go_aicup_2026/data/processed/boards/strength_v1",
     "dataset_dir": "/work/jason1122/go_aicup_2026/data/processed/strength_v2/seed2027",
-    "output_dir": "outputs/v2_strength_e14"
+    "output_dir": "outputs/rank/v2/v2_strength_e14"
   },
   "split": {
     "policy": "player_disjoint",

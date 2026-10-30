@@ -9,20 +9,20 @@
 #SBATCH --mem=150G
 #SBATCH --time=00:40:00
 #SBATCH --chdir=/work/jason1122/go_aicup_2026
-#SBATCH --output=outputs/slurm-%x-%j.out
+#SBATCH --output=outputs/rank/slurm-%x-%j.out
 
 # Competition-2 test inference (1 GPU). Override with environment variables:
-#   STORE_DIR (default data/processed), WORK_DIR (default outputs/rank_submit),
-#   NAMES (default "rank_public rank_private"), RUN_DIR (default outputs/v2_strength).
+#   STORE_DIR (default data/processed), WORK_DIR (default outputs/rank/submit),
+#   NAMES (default "rank_public rank_private"), RUN_DIR (default outputs/rank/v2/v2_strength).
 # Example rehearsal:
-#   STORE_DIR=outputs/rehearsal/store WORK_DIR=outputs/rehearsal/strength sbatch slurm/strength_predict.slurm
+#   STORE_DIR=outputs/release/rehearsal/store WORK_DIR=outputs/release/rehearsal/strength sbatch slurm/strength_predict.slurm
 set -euo pipefail
 PROJECT_DIR=/work/jason1122/go_aicup_2026
 PYTHON_BIN="${PYTHON_BIN:-${HOME}/.conda/envs/go/bin/python}"
 STORE_DIR="${STORE_DIR:-data/processed}"
-WORK_DIR="${WORK_DIR:-outputs/rank_submit}"
+WORK_DIR="${WORK_DIR:-outputs/rank/submit}"
 NAMES="${NAMES:-rank_public rank_private}"
-RUN_DIR="${RUN_DIR:-outputs/v2_strength}"
+RUN_DIR="${RUN_DIR:-outputs/rank/v2/v2_strength}"
 cd "$PROJECT_DIR"
 export PYTHONPATH="${PROJECT_DIR}/src" PYTHONUNBUFFERED=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
 

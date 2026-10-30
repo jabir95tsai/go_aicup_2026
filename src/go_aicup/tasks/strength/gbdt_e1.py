@@ -30,7 +30,7 @@ from go_aicup.paths import ROOT
 
 STATS = ROOT / "data" / "processed" / "eda" / "game_stats_train.parquet"
 META = ROOT / "data" / "processed" / "train_meta.parquet"
-OUT = ROOT / "outputs" / "rank_gbdt_e1"
+OUT = ROOT / "outputs" / "rank" / "rank_gbdt_e1"
 SEED = 2026
 PARAMS = dict(objective="multiclass", num_class=10, learning_rate=0.03, num_leaves=31,
               min_child_samples=50, feature_fraction=0.8, bagging_fraction=0.8, bagging_freq=1,

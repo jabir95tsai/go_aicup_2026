@@ -1,8 +1,8 @@
 """Komi downstream test (RESULTS A-043), CPU only.
 
 B2 fitted on S-fit and scored on the 1,000 S-select questions, once with the
-komi-6.5 features (outputs/humansl_q1000, outputs/humansl_qsel) and once with
-komi-0 features of the same games (outputs/humansl_komi0/{fit,sel}). A-024
+komi-6.5 features (outputs/rank/humansl/humansl_q1000, outputs/rank/humansl/humansl_qsel) and once with
+komi-0 features of the same games (outputs/rank/humansl/humansl_komi0/{fit,sel}). A-024
 features are shared. Rule: komi 0 is adopted if its S-select Equal-k beats
 komi 6.5 by >= 0.005. The player-grouped bootstrap interval is informative only.
 
@@ -25,8 +25,8 @@ OUT = ROOT / "outputs"
 
 
 def main() -> int:
-    runs = {"6.5": (part(load(OUT / "humansl_q1000"), "S-fit"), load(OUT / "humansl_qsel")),
-            "0": (load(OUT / "humansl_komi0" / "fit"), load(OUT / "humansl_komi0" / "sel"))}
+    runs = {"6.5": (part(load(OUT / "rank" / "humansl" / "humansl_q1000"), "S-fit"), load(OUT / "rank" / "humansl" / "humansl_qsel")),
+            "0": (load(OUT / "rank" / "humansl" / "humansl_komi0" / "fit"), load(OUT / "rank" / "humansl" / "humansl_komi0" / "sel"))}
     for komi, (fit, select) in runs.items():
         if not fit[0]["game_index"].equals(runs["6.5"][0][0]["game_index"]) or \
                 not select[0]["game_index"].equals(runs["6.5"][1][0]["game_index"]):
@@ -46,7 +46,7 @@ def main() -> int:
               "gain_komi0": round(gain, 4), "bootstrap_95": [round(float(v), 4) for v in np.quantile(draws, [0.025, 0.975])],
               "min_gain": MIN_GAIN, "adopt_komi": "0" if gain >= MIN_GAIN else "6.5"}
     print(json.dumps(result, indent=1))
-    (OUT / "humansl_komi0" / "result.json").write_text(json.dumps(result, indent=1))
+    (OUT / "rank" / "humansl" / "humansl_komi0" / "result.json").write_text(json.dumps(result, indent=1))
     return 0
 
 

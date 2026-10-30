@@ -29,8 +29,8 @@ from go_aicup.tasks.identity import assign, data, drift, opening
 from go_aicup.tasks.identity.predict import load_params, opening_scores, train_prefix
 from identity_ge2e_eval import insurance_scores
 
-RUN = ROOT / "outputs" / "pid_ge2e_v1_short"
-OUT = ROOT / "outputs" / "pid_drift_robust"
+RUN = ROOT / "outputs" / "pid" / "ge2e" / "pid_ge2e_v1_short"
+OUT = ROOT / "outputs" / "pid" / "robustness" / "pid_drift_robust"
 SEED, HOLDOUT, FOREIGN, DRAWS = 2027, 20_000, 5_000, 5
 SPLITS, PS = (0, 1, 2), (0, 30, 60, 100)
 EPS = (0.0, 1e-4, 1e-3, 1e-2, 0.03, 0.1, 0.3)

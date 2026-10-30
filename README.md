@@ -248,10 +248,10 @@ for seed in 2027 2028 2029; do
 done
 
 # 中斷續跑需要相同 config、程式、dataset、world_size。
-python -m torch.distributed.run --standalone --nnodes=1 --nproc-per-node=8 -m go_aicup.tasks.strength.v1.train --config configs/strength/rank_cnn_v1_seed2027.json --resume outputs/rank_cnn_v1_seed2027/last.json
+python -m torch.distributed.run --standalone --nnodes=1 --nproc-per-node=8 -m go_aicup.tasks.strength.v1.train --config configs/strength/rank_cnn_v1_seed2027.json --resume outputs/rank/v1/rank_cnn_v1_seed2027/last.json
 
 # 完成後 CPU 直接讀保存的 scores，不重新推論或擬合切點，不額外寫檔。
-python -m go_aicup.tasks.strength.v1.evaluate --run-dir outputs/rank_cnn_v1_seed2027
+python -m go_aicup.tasks.strength.v1.evaluate --run-dir outputs/rank/v1/rank_cnn_v1_seed2027
 ```
 
 使用同一份 Slurm 腳本分別提交三個獨立的單節點作業（每份獨占 1 節點／8 GPU；不會由腳本替你提交其他作業）：
@@ -288,11 +288,11 @@ sbatch --job-name=rank2029 --export=ALL,SEED=2029 scripts/train_rank_v1.slurm
 ### 棋力 V1 視覺化
 
 ```bash
-python scripts/plot_rank_v1.py --run-dir outputs/rank_cnn_v1_seed2027
+python scripts/plot_rank_v1.py --run-dir outputs/rank/v1/rank_cnn_v1_seed2027
 # 尚未完成時可只讀已完成的完整資料 loss。
-python scripts/plot_rank_v1.py --run-dir outputs/rank_cnn_v1_seed2027 --loss-only
+python scripts/plot_rank_v1.py --run-dir outputs/rank/v1/rank_cnn_v1_seed2027 --loss-only
 # 只畫 loss 與十級每盤平均分數分布（兩張）
-python scripts/plot_rank_v1.py --run-dir outputs/rank_cnn_v1_seed2027 --skip-confusion
+python scripts/plot_rank_v1.py --run-dir outputs/rank/v1/rank_cnn_v1_seed2027 --skip-confusion
 ```
 
 新格式直接讀取 `.npy` 與保存的切點，預設在 `<run-dir>/plots/` 產生 `loss_vs_step.png`、`confusion_matrix.png`、`score_distributions_cutpoints.png`；圖表只在執行此指令時產生。目前 losses.npy 的 train_loss 是當步訓練 batch loss（train mode），valid_loss 是固定抽樣 100,000 手（每級 10,000 手、不放回、由 seed 決定）的 rank-mean loss（eval mode）；舊版 legacy_full_losses.json 定義不同，不混接。混淆矩陣分 k 桶，每盤分布由指定玩家的逐手 score 先取盤內平均，每盤等權。切點由 training 每盤平均分數擬合。可用 `--output-dir`、`--bins`，或搬移資料時用 `--dataset-dir`／`--cache-dir`。新格式需 CPU PyTorch 讀取 `model.pt`，不使用 GPU。
@@ -306,7 +306,7 @@ python scripts/plot_rank_v1.py --run-dir outputs/rank_cnn_v1_seed2027 --skip-con
 **11/04 正式用一鍵流程**（A-054；送出全部 Slurm 作業後返回，約 35 分鐘，結果看 `<out>/SUMMARY.md`）：
 
 ```bash
-bash scripts/run_release.sh data/raw outputs/release_1104
+bash scripts/run_release.sh data/raw outputs/release/release_1104
 ```
 
 產生的提交檔（皆在 `<out>/submissions/`）：競賽一 `pid_<part>.csv`（首選：開局＋保險、不指派）與探針 `_hungarian`、`_sinkhorn`、`_opening_only`、`_style_only`、`_robust`；競賽二 `rank_<part>.csv`（首選 AH＋C）與 `_ah`、`_allplayers`、`_v2_fallback`。各檔用途與切換規則見 RESULTS A-056、A-058～A-062。下面是一鍵流程內部的分步指令，只在除錯或單獨重跑某一步時使用。
@@ -315,21 +315,21 @@ bash scripts/run_release.sh data/raw outputs/release_1104
 # 0. 官方 CSV 放 data/raw/ → GameStore（寬鬆解析：pass、setup 石、奇怪 header 只計數不中斷）
 python -m go_aicup.data.preprocess release --raw-dir data/raw --out-dir data/processed
 # 1. Day-0 稽核（EXECUTION_PLAN §5 的 1–7、9；L10 另跑）
-python scripts/day0_audit.py --store-dir data/processed --raw-dir data/raw --out outputs/day0_audit/report.json
+python scripts/day0_audit.py --store-dir data/processed --raw-dir data/raw --out outputs/release/day0_audit/report.json
 # 2. 競賽一：GE2E 保險向量（1 張 GPU，4 個 store 約 10 分鐘，A-053）→ public／private 各自獨立（CPU，每個池約 40 秒）
 python -m go_aicup.tasks.identity.insurance --store-dir data/processed \
-    --name pid_public pid_private pool_public pool_private --work-dir outputs/pid_submit/insurance
+    --name pid_public pid_private pool_public pool_private --work-dir outputs/pid/submit/insurance
 python -m go_aicup.tasks.identity.predict --store-dir data/processed --pool pool_public --questions pid_public \
-    --insurance-dir outputs/pid_submit/insurance --out-dir outputs/pid_submit/public --submission submissions/pid/public.csv
+    --insurance-dir outputs/pid/submit/insurance --out-dir outputs/pid/submit/public --submission submissions/pid/public.csv
 python -m go_aicup.tasks.identity.predict --store-dir data/processed --pool pool_private --questions pid_private \
-    --insurance-dir outputs/pid_submit/insurance --out-dir outputs/pid_submit/private --submission submissions/pid/private.csv
+    --insurance-dir outputs/pid/submit/insurance --out-dir outputs/pid/submit/private --submission submissions/pid/private.csv
 # 3. 競賽二：prepare（CPU）→ infer（1 張 GPU，Slurm dev）→ aggregate（C2＋score_rank）
-sbatch slurm/strength_predict.slurm   # 預設 data/processed → outputs/rank_submit/<name>/submission.csv
+sbatch slurm/strength_predict.slurm   # 預設 data/processed → outputs/rank/submit/<name>/submission.csv
 ```
 
 - 競賽一預設 D4 正規化＋pp+slot＋GE2E 保險（λ＝8，A-035、A-053），**不做 L6 指派**（D-004：在確認題目與候選人一對一之前，假設不是一對一）；不加 `--insurance-dir` 即為只用開局；`--assign hungarian|sinkhorn`、`--orient raw` 只作 LB 探針或留給 11/04 稽核後切換（判讀規則見 EXECUTION_PLAN §5 第 7 項）。每盤要有 ≥16 手且前 16 手黑白交替才用於開局分數；無可用盤的題目所有候選人同分（有計數）。
-- 競賽二使用 `outputs/v2_strength/model.pt`（A-024）與 `outputs/v2_agg_calibration/result.json` 的 T_k；`num_games` 不在 5／10／15／20 時用最近的 k；整題無可用盤時用其他題的平均機率（有計數）。
-- **彩排：** `python scripts/make_fake_release.py` 把 Valid-U 題目與合成候選庫 split 1／2 轉成官方寬格式（`outputs/rehearsal/raw/`），跑完上面 0–3 步（`--raw-dir outputs/rehearsal/raw --out-dir outputs/rehearsal/store` 等）後，`python scripts/rehearsal_check.py` 檢查 T1 gate。
+- 競賽二使用 `outputs/rank/v2/v2_strength/model.pt`（A-024）與 `outputs/rank/v2/v2_agg_calibration/result.json` 的 T_k；`num_games` 不在 5／10／15／20 時用最近的 k；整題無可用盤時用其他題的平均機率（有計數）。
+- **彩排：** `python scripts/make_fake_release.py` 把 Valid-U 題目與合成候選庫 split 1／2 轉成官方寬格式（`outputs/release/rehearsal/raw/`），跑完上面 0–3 步（`--raw-dir outputs/release/rehearsal/raw --out-dir outputs/release/rehearsal/store` 等）後，`python scripts/rehearsal_check.py` 檢查 T1 gate。
 
 ### 競賽二 HumanSL 路徑（A-039～A-042）
 
@@ -337,7 +337,7 @@ sbatch slurm/strength_predict.slurm   # 預設 data/processed → outputs/rank_s
 
 ```bash
 # 每個 release 檔拆 4 個 1-GPU 作業（每卡每秒約 3,500–5,500 盤面；5,000 盤約 20 分鐘）
-W=outputs/rank_submit/rank_public
+W=outputs/rank/submit/rank_public
 for i in 0 1 2 3; do
   RUN=$W/humansl GAMES=$W/cache/games.parquet CACHE=$W/cache NUM_SHARDS=4 SHARD=$i ALLOW_FAILURES=1 \
       sbatch --export=ALL slurm/humansl.slurm
@@ -346,7 +346,7 @@ done
 python -m go_aicup.tasks.strength.humansl_predict aggregate --work $W --submission $W/humansl_submission.csv
 ```
 
-- 模型 `outputs/humansl_model/model.pkl` 由 `python -m go_aicup.tasks.strength.humansl_predict fit --method B2` 產生（S-fit＋S-select 驗證盤）。
+- 模型 `outputs/rank/humansl/humansl_model/model.pkl` 由 `python -m go_aicup.tasks.strength.humansl_predict fit --method B2` 產生（S-fit＋S-select 驗證盤）。
 - 每節點每位使用者最多 2,048 個執行緒，KataGo 每個引擎約用 analysis threads × 2；`configs/strength/humansl_analysis.cfg` 設 120，8 個作業擠在同一節點也不會超過。
 - 彩排檢查：`python scripts/humansl_rehearsal_check.py`。
 
@@ -373,5 +373,5 @@ python -m go_aicup.tasks.strength.humansl_predict aggregate --work $W --submissi
 既有 run 改以 training 每盤平均分數重新擬合切點（只更新 model.pt 的切點，保留模型權重與保存的 score）：
 
 ```bash
-python -m go_aicup.tasks.strength.v1.evaluate --run-dir outputs/rank_cnn_v1_seed2027 --refit-cutpoints
+python -m go_aicup.tasks.strength.v1.evaluate --run-dir outputs/rank/v1/rank_cnn_v1_seed2027 --refit-cutpoints
 ```

@@ -29,7 +29,7 @@ from go_aicup.paths import ROOT
 from go_aicup.tasks.identity import assign, data
 from go_aicup.tasks.identity.predict import load_params, opening_scores, train_prefix
 
-OUT = ROOT / "outputs" / "pid_worstcase"
+OUT = ROOT / "outputs" / "pid" / "robustness" / "pid_worstcase"
 SEED, BANK, REPS, SPLITS = 2027, 3, 30, (1, 2)
 KS = (5, 10, 15, 20)
 TARGETS = (None, 0.7, 0.5, 0.3)   # None: no noise

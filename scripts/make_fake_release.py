@@ -12,7 +12,7 @@ SGF strings are copied byte-for-byte from the training CSVs, so the rehearsal
 exercises the same parser path as 11/04. Question order is shuffled; IDs are
 fresh. Answer keys keep the source question ids for the gate comparison.
 
-    python scripts/make_fake_release.py [--out outputs/rehearsal]
+    python scripts/make_fake_release.py [--out outputs/release/rehearsal]
 """
 from __future__ import annotations
 
@@ -72,7 +72,7 @@ def pick_balanced(questions: pd.DataFrame, rng, parts: int) -> list[pd.DataFrame
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--out", type=Path, default=ROOT / "outputs" / "rehearsal")
+    parser.add_argument("--out", type=Path, default=ROOT / "outputs" / "release" / "rehearsal")
     args = parser.parse_args()
     raw, answers = args.out / "raw", args.out / "answers"
     raw.mkdir(parents=True, exist_ok=True)

@@ -68,7 +68,7 @@ $$
 
 ### 全部訓練結束（使用者已確認）
 
-上述 50,000 盤是訓練中監控子集，不改變每級 20,000 盤、共 200,000 盤的原 validation split。完成所有設定 steps 後，以最終模型完整推論這 200,000 盤 validation，將所有 validation 棋局的分類結果保存為 `outputs/v2_strength/validation_category.npy`。每盤記錄 game_index、真實 rank_id、指定玩家手數、十類 confidence 總和與預測 rank_id，對齊 validation 棋局清單；單盤類別依第 5 節的 confidence 總和 argmax 決定。不能只保存最後一個 batch 或中途抽樣集合的結果。
+上述 50,000 盤是訓練中監控子集，不改變每級 20,000 盤、共 200,000 盤的原 validation split。完成所有設定 steps 後，以最終模型完整推論這 200,000 盤 validation，將所有 validation 棋局的分類結果保存為 `outputs/rank/v2/v2_strength/validation_category.npy`。每盤記錄 game_index、真實 rank_id、指定玩家手數、十類 confidence 總和與預測 rank_id，對齊 validation 棋局清單；單盤類別依第 5 節的 confidence 總和 argmax 決定。不能只保存最後一個 batch 或中途抽樣集合的結果。
 
 V2 不需用 training 推論擬合切點，因此不要求最終完整推論 training，也不要求另存 train／valid 逐手機率。推論時可按棋局累加 confidence 與手數，保留每盤十類資訊供後續多盤等權聚合。
 
@@ -122,7 +122,7 @@ V2 不進行 V1／V2 比較，不安排 V1 對照訓練、比較圖或相對增�
 
 ### 已確認的輸出位置與檔案
 
-正式輸出目錄為 `outputs/v2_strength/`，成功完成後保留：
+正式輸出目錄為 `outputs/rank/v2/v2_strength/`，成功完成後保留：
 
 | 檔案 | 內容與格式 |
 |---|---|
@@ -143,7 +143,7 @@ V2 不進行 V1／V2 比較，不安排 V1 對照訓練、比較圖或相對增�
 新增獨立入口 `src/go_aicup/tasks/strength/evaluate_rank_v2.py`，規劃命令：
 
 ```bash
-python -m go_aicup.tasks.strength.evaluate_rank_v2 --run-dir outputs/v2_strength
+python -m go_aicup.tasks.strength.evaluate_rank_v2 --run-dir outputs/rank/v2/v2_strength
 ```
 
 這是預定介面，目前尚無此程式。預設 CPU 評估，不啟動訓練、不重新解析 SGF、不重新產生盤面，也不重新執行模型 forward。輸入為三個正式產物，加上對應 seed 已保存的 metadata、validation 棋局清單與 `strength_v1_validation_questions.parquet`；資料位置由 `model.pt` 內嵌 config 取得，允許以命令列覆寫搬移後的資料目錄。評估直接讀取保存結果與既有索引，不另執行棋局覆蓋、手數、confidence 或資料雜湊的完整性檢查。
@@ -219,10 +219,10 @@ CPU 運算量小，metadata 載入、檔案讀取與 PNG 繪圖另計；實際�
 
 ### 9.3 預定使用介面與輸出
 
-評估完成後自動建立 `output-dir/plot/` 並保存所有圖表；此處 output-dir 為模型與結果所在的 run 目錄，預設為 `outputs/v2_strength/`，因此圖表位置為 `outputs/v2_strength/plot/`。沿用評估入口的 `--run-dir` 指定目錄，不另設 `--show` 或 `--export-dir`：
+評估完成後自動建立 `output-dir/plot/` 並保存所有圖表；此處 output-dir 為模型與結果所在的 run 目錄，預設為 `outputs/rank/v2/v2_strength/`，因此圖表位置為 `outputs/rank/v2/v2_strength/plot/`。沿用評估入口的 `--run-dir` 指定目錄，不另設 `--show` 或 `--export-dir`：
 
 ```bash
-python -m go_aicup.tasks.strength.evaluate_rank_v2 --run-dir outputs/v2_strength
+python -m go_aicup.tasks.strength.evaluate_rank_v2 --run-dir outputs/rank/v2/v2_strength
 ```
 
 使用 Matplotlib 非互動 backend，透過 `savefig` 直接保存每張圖的 PNG（200 dpi，副檔名 `.png`）；不呼叫 `plt.show()`、不開視窗。存檔後關閉 figure，釋放資源。檔名使用第 9.1 節名稱，兩種題目解碼加上 `_argmax`／`_score_rank` 後綴。CPU 即可執行，適用本機與無 GUI 的 Nano4。
@@ -230,7 +230,7 @@ python -m go_aicup.tasks.strength.evaluate_rank_v2 --run-dir outputs/v2_strength
 輸出結構為：
 
 ```text
-outputs/v2_strength/
+outputs/rank/v2/v2_strength/
 ├── model.pt
 ├── losses.npy
 ├── validation_category.npy

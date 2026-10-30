@@ -25,7 +25,7 @@ from go_aicup.metrics import pid_report
 from go_aicup.paths import ROOT
 
 PLIES = np.arange(0, 8, 2)  # black's first 4 moves
-OUT = ROOT / "outputs" / "pid_e0_robustness"
+OUT = ROOT / "outputs" / "pid" / "robustness" / "pid_e0_robustness"
 SEED = 2026
 
 

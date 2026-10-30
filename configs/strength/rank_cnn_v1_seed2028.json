@@ -7,7 +7,7 @@
   "paths": {
     "cache_dir": "data/processed/boards/strength_v1",
     "dataset_dir": "data/processed/strength_v1/seed2028",
-    "output_dir": "outputs/rank_cnn_v1_seed2028"
+    "output_dir": "outputs/rank/v1/rank_cnn_v1_seed2028"
   },
   "split": {
     "expected_games_per_rank": 100000,

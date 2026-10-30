@@ -3,7 +3,7 @@
 select  : every Valid-S game not yet extracted (pilot, q1000, qsel), tagged
           S-fit / S-select by the A-025 player draw, or S-extra for players in
           no Valid-S question (fewer than 5 held-out games; in neither half)
-          -> outputs/humansl_vs_rest.
+          -> outputs/rank/humansl/humansl_vs_rest.
 analyze : (i)  B2 fitted on old S-fit + new S-fit and S-extra games (players
                disjoint from S-select) vs old S-fit only,
                both scored on the 1,000 S-select questions (A-041);
@@ -34,7 +34,7 @@ from go_aicup.tasks.strength.humansl import SEED
 
 DATASET = PROCESSED / "strength_v2" / "seed2027"
 OUT = ROOT / "outputs"
-REST = OUT / "humansl_vs_rest"
+REST = OUT / "rank" / "humansl" / "humansl_vs_rest"
 BOOTSTRAP = 2000
 
 
@@ -43,7 +43,7 @@ def select() -> None:
     seen = pd.read_parquet(DATASET / "strength_v2_valid_seen_questions.parquet")
     done = set()
     for run in ("humansl_pilot", "humansl_q1000", "humansl_qsel"):
-        for shard in (OUT / run).glob("shard_*"):
+        for shard in (OUT / "rank" / "humansl" / run).glob("shard_*"):
             if shard.is_dir():
                 done |= set(pd.read_parquet(shard / "games.parquet")["game_index"].astype(int))
     rest = games[(games["split"] == "valid_seen") & ~games["game_index"].isin(done)]
@@ -76,9 +76,9 @@ def main() -> int:
     if args.command == "select":
         select()
         return 0
-    data = load(OUT / "humansl_q1000")
+    data = load(OUT / "rank" / "humansl" / "humansl_q1000")
     old_fit, u = part(data, "S-fit"), part(data, "U")
-    select_set = load(OUT / "humansl_qsel")
+    select_set = load(OUT / "rank" / "humansl" / "humansl_qsel")
     new_games, new_x = rest_data()
     new_fit = new_games["role"].isin(["S-fit", "S-extra"]).to_numpy()
     s_k, u_k = select_set[1]["k"].to_numpy(), u[1]["k"].to_numpy()

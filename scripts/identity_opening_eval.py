@@ -24,7 +24,7 @@ from go_aicup.metrics import pid_report
 from go_aicup.paths import ROOT
 from go_aicup.tasks.identity import assign, data, opening
 
-OUT = {"raw": ROOT / "outputs" / "pid_opening_v1", "d4": ROOT / "outputs" / "pid_opening_v1_d4"}
+OUT = {"raw": ROOT / "outputs" / "pid" / "opening" / "pid_opening_v1", "d4": ROOT / "outputs" / "pid" / "opening" / "pid_opening_v1_d4"}
 TUNE_SPLIT, REPORT_SPLITS = 0, (1, 2)
 PLIES = 60
 

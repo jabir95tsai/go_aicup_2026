@@ -66,11 +66,11 @@ def evaluate(train, test, questions, embedding, human, view, dims, c) -> float:
 
 
 def main() -> int:
-    fit = pd.concat([table(OUT / "humansl_q1000", ["S-fit"]), table(OUT / "humansl_vs_rest", ["S-fit", "S-extra"])],
+    fit = pd.concat([table(OUT / "rank" / "humansl" / "humansl_q1000", ["S-fit"]), table(OUT / "rank" / "humansl" / "humansl_vs_rest", ["S-fit", "S-extra"])],
                     ignore_index=True)
-    test = table(OUT / "humansl_qsel", ["S-select"])
-    s_questions = pd.read_parquet(OUT / "humansl_qsel" / "questions.parquet")
-    frame = run_embeddings(OUT / "emb_stage1")
+    test = table(OUT / "rank" / "humansl" / "humansl_qsel", ["S-select"])
+    s_questions = pd.read_parquet(OUT / "rank" / "humansl" / "humansl_qsel" / "questions.parquet")
+    frame = run_embeddings(OUT / "rank" / "humansl" / "emb_stage1")
     embedding = (frame.drop(columns="game_index").to_numpy(np.float32),
                  pd.Series(np.arange(len(frame)), index=frame["game_index"].to_numpy()))
     del frame
@@ -104,7 +104,7 @@ def main() -> int:
     gain = result["S-select"]["AH_Emb"]["equal_k"] - result["S-select"]["AH"]["equal_k"]
     result["gate"] = {"gain_AH_Emb_minus_AH": round(gain, 4), "min_gain": MIN_GAIN, "pass": bool(gain >= MIN_GAIN)}
     print(json.dumps(result["gate"]))
-    (OUT / "emb_regularization.json").write_text(json.dumps(result, indent=1))
+    (OUT / "rank" / "humansl" / "emb_regularization.json").write_text(json.dumps(result, indent=1))
     return 0
 
 

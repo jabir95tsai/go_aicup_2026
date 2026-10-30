@@ -4,7 +4,7 @@ Compares scripts/run_release.sh output on the fake release with the rehearsal
 outputs that already passed their gates (same raw files):
   - eight submission files (pid x2, rank AH+C x2, AH x2, V2 x2), 400 rows each;
   - competition 1: top-5 identical to identity/predict.py (no L6 assignment, the
-    A-059 default) with the A-053 insurance vectors (outputs/rehearsal/identity_insurance);
+    A-059 default) with the A-053 insurance vectors (outputs/release/rehearsal/identity_insurance);
   - competition 2: HumanSL classes identical to the A-042 extraction path under
     the current model on >= 398/400 questions per file; V2 fallback files
     identical to the A-030 rehearsal submissions;
@@ -20,7 +20,7 @@ competition-1 file's official score against the rehearsal answers.
 A-064 adds rank_<part>_balanced: exactly 40 questions per rank. Diagnostic only:
 its score against the (unbalanced) rehearsal answers.
 
-    python scripts/release_rehearsal_check.py --out outputs/rehearsal_t3_1025
+    python scripts/release_rehearsal_check.py --out outputs/release/rehearsal_t3_1025
 """
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ from go_aicup.tasks.identity.predict import predict
 from go_aicup.tasks.strength.humansl_predict import MODEL, RANKVEC_RUNS, aggregate, rankvec_features
 from go_aicup.tasks.strength.v2.aggregate import official_scores
 
-REHEARSAL = ROOT / "outputs" / "rehearsal"
+REHEARSAL = ROOT / "outputs" / "release" / "rehearsal"
 SAME_MIN, C_DIFF_P99 = 398, 2e-3
 # Competition-1 files: suffix -> predict() flags as run_release.sh passes them (A-059, A-060, A-062).
 PID_VARIANTS = {"": {"method": "none"},

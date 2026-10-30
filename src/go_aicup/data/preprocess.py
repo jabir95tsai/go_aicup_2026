@@ -24,7 +24,7 @@ Usage:
     python -m go_aicup.data.preprocess train              # convert + combine + verify
     python -m go_aicup.data.preprocess train --verify-only
     python -m go_aicup.data.preprocess release            # pools / questions present on disk
-    python -m go_aicup.data.preprocess release --raw-dir outputs/rehearsal/raw --out-dir outputs/rehearsal/store
+    python -m go_aicup.data.preprocess release --raw-dir outputs/release/rehearsal/raw --out-dir outputs/release/rehearsal/store
 """
 
 from __future__ import annotations

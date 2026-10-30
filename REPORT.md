@@ -85,14 +85,14 @@ AH＋C 相對 AH +0.0102，玩家 bootstrap 95% 區間 [−0.0003, +0.0211]，�
 
 | 檔案 | 內容 |
 |---|---|
-| `outputs/v2_strength/model.pt` | V2 ResNet 權重與 config（A-024） |
-| `outputs/v2_agg_calibration/result.json` | C2 每 k 溫度（A-025） |
-| `outputs/humansl_rankvec/vectors.pt` | 幽玄級別條件向量（10 級 × 2 × 384，A-055） |
-| `outputs/humansl_rankvec_model/model.pkl` | B2 AH＋C 首選模型（65,223 盤 Valid-S 擬合，A-056） |
-| `outputs/humansl_model/model.pkl` | B2 AH 對照模型（65,223 盤 Valid-S 擬合，A-044） |
-| `outputs/humansl_allplayers_model/model.pkl` | B2 AH＋C 全玩家版（91,917 盤、6,442 人，A-058，LB 探針） |
-| `outputs/pid_ge2e_v1_short/model.pt`、`eval_summary.json` | GE2E 權重、w 與 λ（A-035、A-053） |
-| `outputs/pid_opening_v1_d4/summary.json` | 開局模型超參（A-029） |
+| `outputs/rank/v2/v2_strength/model.pt` | V2 ResNet 權重與 config（A-024） |
+| `outputs/rank/v2/v2_agg_calibration/result.json` | C2 每 k 溫度（A-025） |
+| `outputs/rank/humansl/humansl_rankvec/vectors.pt` | 幽玄級別條件向量（10 級 × 2 × 384，A-055） |
+| `outputs/rank/humansl/humansl_rankvec_model/model.pkl` | B2 AH＋C 首選模型（65,223 盤 Valid-S 擬合，A-056） |
+| `outputs/rank/humansl/humansl_model/model.pkl` | B2 AH 對照模型（65,223 盤 Valid-S 擬合，A-044） |
+| `outputs/rank/humansl/humansl_allplayers_model/model.pkl` | B2 AH＋C 全玩家版（91,917 盤、6,442 人，A-058，LB 探針） |
+| `outputs/pid/ge2e/pid_ge2e_v1_short/model.pt`、`eval_summary.json` | GE2E 權重、w 與 λ（A-035、A-053） |
+| `outputs/pid/opening/pid_opening_v1_d4/summary.json` | 開局模型超參（A-029） |
 
 〔待補：最終提交實際使用的檔案 sha256〕
 

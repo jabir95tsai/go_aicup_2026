@@ -32,8 +32,8 @@ from go_aicup.tasks.identity import assign
 from go_aicup.tasks.identity.insurance import fused_scores
 from go_aicup.tasks.identity.predict import load_params, opening_scores, store_prefix, train_prefix
 
-REHEARSAL = ROOT / "outputs" / "rehearsal"
-OUT = ROOT / "outputs" / "pid_stress_s1"
+REHEARSAL = ROOT / "outputs" / "release" / "rehearsal"
+OUT = ROOT / "outputs" / "pid" / "robustness" / "pid_stress_s1"
 SEED, HOLDOUT, DRAWS = 2027, 20_000, 5
 PS = (30, 60, 100)
 PARTS = {"public": 1, "private": 2}

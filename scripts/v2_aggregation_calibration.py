@@ -13,7 +13,7 @@ Candidates
 Gate: adopt the best S-select candidate only if it beats C0 on S-select
 Equal-k by >= 0.01 and none of its temperatures sits on the grid edge.
 
-    python scripts/v2_aggregation_calibration.py --run-dir outputs/v2_strength
+    python scripts/v2_aggregation_calibration.py --run-dir outputs/rank/v2/v2_strength
 """
 from __future__ import annotations
 
@@ -50,8 +50,8 @@ def tempered_by_k(logits, questions, temperatures) -> np.ndarray:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--run-dir", type=Path, default=Path("outputs/v2_strength"))
-    parser.add_argument("--output", type=Path, default=Path("outputs/v2_agg_calibration/result.json"))
+    parser.add_argument("--run-dir", type=Path, default=Path("outputs/rank/v2/v2_strength"))
+    parser.add_argument("--output", type=Path, default=Path("outputs/rank/v2/v2_agg_calibration/result.json"))
     parser.add_argument("--seed", type=int, default=2027)
     args = parser.parse_args(argv)
     run = load_run(args.run_dir)

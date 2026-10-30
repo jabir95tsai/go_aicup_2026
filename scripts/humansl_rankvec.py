@@ -1,9 +1,9 @@
 """C2: HumanSL vectors learned per Yugen rank (RESULTS A-055).
 
-select  : learning games from the A-047 train-split draw (outputs/humansl_train20),
+select  : learning games from the A-047 train-split draw (outputs/rank/humansl/humansl_train20),
           players of the S-select half excluded. Per rank, 10% of players (seed
           2027) are monitor players; 1,350 learn games and 150 monitor games per
-          rank -> outputs/humansl_rankvec/games.parquet (role learn / monitor).
+          rank -> outputs/rank/humansl/humansl_rankvec/games.parquet (role learn / monitor).
 check   : (GPU) with every vector at its rank_1d initial value, per-move log p
           must equal the unmodified network with the rank_1d metadata row
           (A-050 path, Board.would_be_legal mask), max |diff| <= 1e-3 on 2 games,
@@ -11,13 +11,13 @@ check   : (GPU) with every vector at its rank_1d initial value, per-move log p
 analyze : B2 fitted on the Valid-S fitting games (q1000 S-fit + vs_rest S-fit /
           S-extra, 38,589 games, as A-044 (i)), scored on the 1,000 S-select
           questions; C = own_r* / opp_r* means from humansl_rankvec extract
-          (outputs/humansl_rankvec_feat, games of outputs/emb_stage1).
+          (outputs/rank/humansl/humansl_rankvec_feat, games of outputs/rank/humansl/emb_stage1).
             AH (reference, A-044 (i) 0.7101), AH_C, A_C, H_C, C
 Pre-registered gate: AH_C - AH >= +0.01.
 valid_u : (after the gate passed) B2 fitted on every Valid-S game (65,223, as
           A-044 (ii)), scored once on the 1,000 Valid-U questions: AH (reference,
           0.6833) vs AH_C, player-grouped bootstrap of the gain. C of the games
-          outside emb_stage1 comes from outputs/humansl_rankvec_feat_vu.
+          outside emb_stage1 comes from outputs/rank/humansl/humansl_rankvec_feat_vu.
 
     python scripts/humansl_rankvec.py select
     python scripts/humansl_rankvec.py check
@@ -43,7 +43,7 @@ from go_aicup.tasks.strength.v2.aggregate import official_scores
 
 DATASET = PROCESSED / "strength_v2" / "seed2027"
 OUT = ROOT / "outputs"
-RUN, FEAT, FEAT_VU = OUT / "humansl_rankvec", OUT / "humansl_rankvec_feat", OUT / "humansl_rankvec_feat_vu"
+RUN, FEAT, FEAT_VU = OUT / "rank" / "humansl" / "humansl_rankvec", OUT / "rank" / "humansl" / "humansl_rankvec_feat", OUT / "rank" / "humansl" / "humansl_rankvec_feat_vu"
 LEARN, MONITOR, MONITOR_PLAYERS, MIN_GAIN, BOOTSTRAP = 1350, 150, 0.1, 0.01, 2000
 
 
@@ -53,7 +53,7 @@ def select_half() -> set[str]:
 
 
 def select() -> None:
-    pool = pd.read_parquet(OUT / "humansl_train20" / "games.parquet")
+    pool = pd.read_parquet(OUT / "rank" / "humansl" / "humansl_train20" / "games.parquet")
     pool = pool[~pool["player_id"].astype(str).isin(select_half())]
     rng = np.random.default_rng(rv.SEED)
     picks = []
@@ -99,10 +99,10 @@ def check() -> None:
 
 
 def analyze() -> None:
-    fit = pd.concat([table(OUT / "humansl_q1000", ["S-fit"]), table(OUT / "humansl_vs_rest", ["S-fit", "S-extra"])],
+    fit = pd.concat([table(OUT / "rank" / "humansl" / "humansl_q1000", ["S-fit"]), table(OUT / "rank" / "humansl" / "humansl_vs_rest", ["S-fit", "S-extra"])],
                     ignore_index=True)
-    test = table(OUT / "humansl_qsel", ["S-select"])
-    questions = pd.read_parquet(OUT / "humansl_qsel" / "questions.parquet")
+    test = table(OUT / "rank" / "humansl" / "humansl_qsel", ["S-select"])
+    questions = pd.read_parquet(OUT / "rank" / "humansl" / "humansl_qsel" / "questions.parquet")
     c = rv.run_features(FEAT).set_index("game_index")
     for frame, name in ((fit, "fit"), (test, "S-select")):
         missing = set(frame["game_index"]) - set(c.index)
@@ -132,10 +132,10 @@ def analyze() -> None:
 
 def valid_u() -> None:
     # Row order as A-044 (ii): B2 draws synthetic questions by row index.
-    fit = pd.concat([table(OUT / "humansl_q1000", ["S-fit"]), table(OUT / "humansl_qsel", ["S-select"]),
-                     table(OUT / "humansl_vs_rest", ["S-fit", "S-extra", "S-select"])], ignore_index=True)
-    test = table(OUT / "humansl_q1000", ["U"])
-    questions = pd.read_parquet(OUT / "humansl_q1000" / "questions.parquet")
+    fit = pd.concat([table(OUT / "rank" / "humansl" / "humansl_q1000", ["S-fit"]), table(OUT / "rank" / "humansl" / "humansl_qsel", ["S-select"]),
+                     table(OUT / "rank" / "humansl" / "humansl_vs_rest", ["S-fit", "S-extra", "S-select"])], ignore_index=True)
+    test = table(OUT / "rank" / "humansl" / "humansl_q1000", ["U"])
+    questions = pd.read_parquet(OUT / "rank" / "humansl" / "humansl_q1000" / "questions.parquet")
     questions = questions[questions["role"] == "U"].reset_index(drop=True)
     c = pd.concat([rv.run_features(FEAT), rv.run_features(FEAT_VU)]).drop_duplicates("game_index") \
         .set_index("game_index")

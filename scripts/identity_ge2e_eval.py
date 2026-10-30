@@ -11,7 +11,7 @@ split 0 only (official score, plain top-5); splits 1-2 are only reported.
 Gate (D-002): insurance alone, mean of splits 1-2 >= 0.2845; fused score with
 the opening intact not below the opening alone (plain top-5 and Hungarian).
 
-    python scripts/identity_ge2e_eval.py --run-dir outputs/pid_ge2e_v1_short
+    python scripts/identity_ge2e_eval.py --run-dir outputs/pid/ge2e/pid_ge2e_v1_short
 """
 from __future__ import annotations
 
