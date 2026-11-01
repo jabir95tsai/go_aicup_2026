@@ -12,6 +12,7 @@ import numpy as np
 from go_aicup.artifacts import file_hash
 from go_aicup.data.board_cache import BoardCache, _close_mmap, assemble_inputs
 from go_aicup.tasks.strength.shared.dataset import apply_d4, d4_id
+from .config import DEFAULT_TRAINING_SEED, SPLIT_SEED
 
 
 def transform_policy(action, transform):
@@ -84,7 +85,9 @@ class PaperDataset:
         self.directory = Path(directory).resolve()
         self.record = json.loads((self.directory / 'manifest.json').read_text())
         self.split, self.augment = split, augment
-        self.seed = self.record['identity']['seed'] if seed is None else operator.index(seed)
+        if self.record['identity'].get('split_seed') != SPLIT_SEED:
+            raise ValueError('SE dataset requires a shared split with split_seed=2026')
+        self.seed = DEFAULT_TRAINING_SEED if seed is None else operator.index(seed)
         self.cache_dir = Path(cache_dir or self.record['cache_dir']).resolve()
         self.max_open_shards = max_open_shards
         self._length = self.record['splits'][split]['positions']

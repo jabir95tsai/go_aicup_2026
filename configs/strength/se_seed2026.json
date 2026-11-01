@@ -1,6 +1,7 @@
 {
   "format_version": 1,
   "seed": 2026,
+  "split_seed": 2026,
   "paths": {
     "cache_dir": "data/processed/boards/strength_v1",
     "dataset_dir": "data/processed/reproduce_paper/seed2026",
@@ -42,5 +43,8 @@
     "rules": "japanese",
     "komi": 6.5,
     "visits": null
+  },
+  "questions": {
+    "validation": 10000
   }
 }

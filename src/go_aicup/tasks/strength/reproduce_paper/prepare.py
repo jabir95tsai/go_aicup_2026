@@ -1,6 +1,8 @@
 """Build game-disjoint splits and compact per-game effective-ply indices.
 
 Only reads existing packed cache; never parses raw data or decompresses boards.
+Split seed is fixed at 2026; training seed and model settings do not determine
+the shared data identity. Repeated runs validate and reuse existing files.
 """
 import argparse
 import json
@@ -19,7 +21,7 @@ def prepare(config):
     cache = BoardCache(Path(config["paths"]["cache_dir"]),
                        max_open_shards=config["loader"]["max_open_shards"])
     try:
-        identity = {"format_version": 1, "seed": config["seed"],
+        identity = {"format_version": 2, "split_seed": config["split_seed"],
                     "cache_build_id": cache.manifest["build_id"],
                     "cache_manifest_sha256": file_hash(cache.directory / "manifest.json"),
                     "split": config["split"], "positions": config["positions"],
@@ -33,12 +35,18 @@ def prepare(config):
             record = json.loads(manifest_path.read_text())
             if record["identity"] != identity:
                 raise ValueError("preparation identity changed; choose a new dataset directory")
+            expected_files = {"games.parquet"} | {
+                f"{split}_{suffix}.npy" for split in ("train", "valid")
+                for suffix in ("game", "offsets", "ply")}
+            if (set(record["files"]) != expected_files
+                    or record["build_id"] != object_hash(identity)):
+                raise ValueError("invalid prepared manifest files or build identity")
             for name, digest in record["files"].items():
-                if file_hash(directory / name) != digest:
+                if not (directory / name).is_file() or file_hash(directory / name) != digest:
                     raise ValueError(f"prepared file checksum mismatch: {name}")
             return manifest_path
         meta = pd.read_parquet(cache.directory / "games.parquet")
-        table = make_strength_v1_split(meta, config["seed"], **config["split"])
+        table = make_strength_v1_split(meta, config["split_seed"], **config["split"])
         if not np.array_equal(table.game_index, np.arange(len(cache))):
             raise ValueError("metadata must have contiguous game indices")
         directory.mkdir(parents=True, exist_ok=True)

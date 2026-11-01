@@ -29,7 +29,7 @@ Adam、AdamW、Muon 或其他 optimizer 的比較不列入目前重現範圍。�
 |---|---|
 | Policy head | 本版加入，使用 strength／policy／value 三頭；實作前核對固定版本 MiniZero 的輸入與 target 時點，驗證無目標落子洩漏 |
 | Centroid 資料 | 使用全部 800,000 盤 training 棋局的指定玩家有效位置（`ply >= 30`），按位置等權計算各級平均，不抽一小部分棋局或每盤只取七手 |
-| 80/20 split | 每級按棋局隨機切分為 80,000／20,000 盤，固定 split seed=2026；沿用 `data.cv.make_strength_v1_split`，記錄玩家重疊 |
+| 80/20 split | 每級按棋局隨機切分為 80,000／20,000 盤，split seed 固定為 2026，首次沿用 `data.cv.make_strength_v1_split` 產生；所有本目錄訓練 run 共用同一份切分表，記錄玩家重疊 |
 | KataGo 規則／貼目 | 日本規則、貼目 6.5；是 teacher 分析假設，不是原局規則已知值 |
 | 本次範圍 | 僅基本 SE 三頭模型、末盤 soft value 偽標籤與對應評估；不實作／訓練 SLsum、SLvote，也不建立 SL 對照 gate |
 
@@ -246,7 +246,9 @@ Global 128 組，8 張卡各分配 16 個完整組；競賽版 SE 每卡 `16 × 
 
 ## 第一、二步操作與驗收（2026-11-01）
 
-依使用者最新指定，本版所有隨機設定預設 seed=2026（包含 split），取代先前本文件的 2027；V1／V2 的設定不受此更新影響。
+依使用者最新指定，`reproduce_paper` 所有訓練共用同一份 training／validation 切分，split seed 固定為 2026；初始化／抽樣 seed 預設 2026，後續可獨立修改，但不得重新切分資料。共用切分表為 `data/processed/reproduce_paper/seed2026/games.parquet`，各 run 應記錄相同的切分雜湊並重用固定 validation 題組。詳細規則與新增驗收見 [plan.md](plan.md)。V1／V2 等其他訓練流程不受此規則影響。
+
+資料準備第二步的固定切分已實作：`split_seed` 固定 2026，與可獨立調整的訓練 `seed` 分開。`prepare.py` 首次使用 split_seed 建立資料，後續驗證並重用同一份 manifest、切分表及位置索引，不重抽或覆寫；初始化 seed、模型 channels、run 輸出目錄與 loader 設定不進入共用資料身分。固定題組由 `questions.py` 讀取同一資料目錄。已驗證初次建置、跨訓練 seed 重用及不同訓練 seed 下獨立重建的切分完全一致。
 
 已建立 `config.py`、`configs/strength/se_seed2026.json`（專案根目錄下）、`prepare.py` 與 `dataset.py`。正式資料準備入口：
 
@@ -262,7 +264,7 @@ python -m go_aicup.tasks.strength.reproduce_paper.prepare --config path/to/confi
 - `{train,valid}_game.npy`：各集合的棋局索引（uint32）。
 - `{train,valid}_offsets.npy`：每盤在位置陣列中的起訖範圍（int64，長度為盤數加一）。
 - `{train,valid}_ply.npy`：指定玩家且 `ply >= 30` 的全部有效位置（uint16）；不只保存七手。
-- `manifest.json`：seed、cache 身分、程式／產物雜湊、每級盤數／位置數與玩家重疊。相同設定可重跑驗證並重用；設定不同、產物損壞或未完成的目錄會明確拒絕覆寫。
+- `manifest.json`：固定 split_seed、cache 身分、程式／產物雜湊、每級盤數／位置數與玩家重疊。相同設定可重跑驗證並重用；設定不同、產物損壞或未完成的目錄會明確拒絕覆寫。
 
 每盤少於七個有效位置會報錯，不能靜默重複抽樣。資料準備僅讀取 metadata／顏色，不解壓全量盤面；不建立另一套 parser 或 split。
 
@@ -271,7 +273,8 @@ from go_aicup.tasks.strength.reproduce_paper.config import read_config
 from go_aicup.tasks.strength.reproduce_paper.dataset import PaperDataset
 
 config = read_config()
-dataset = PaperDataset(config['paths']['dataset_dir'], split='train', augment=True)
+dataset = PaperDataset(config['paths']['dataset_dir'], split='train', augment=True,
+                       seed=config['seed'])
 try:
     sample = dataset[(0, 0)]  # (有效位置序號, augmentation round)
     # planes: uint8[18,19,19]; policy_target: int in 0..361
@@ -299,3 +302,61 @@ PYTHONPATH=src python -m pytest tests/test_reproduce_paper_data.py -q
 ```
 
 本次結果：**7 passed in 6.80s**（CPU、合成資料）。涵蓋十級精確 split／玩家重疊、全部有效位置、重用與設定衝突、有效位置不足報錯、提子／落子前歷史／白方通道／padding、八種 D4 的全部 361 個座標與 pass、soft value 視角與非法值、pickle／spawn DataLoader 一致性。未啟動 teacher、GPU 作業、訓練或正式 centroid 推論。
+
+
+## 資料準備第五步：固定 validation 題組（已實作）
+
+此處的「第五步」是資料準備流程的固定題組，不是 plan.md 八階段中的第五步三頭模型／loss。
+
+先完成基本資料準備，再以獨立入口生成題組：
+
+```bash
+python -m go_aicup.tasks.strength.reproduce_paper.prepare
+python -m go_aicup.tasks.strength.reproduce_paper.questions
+# 自訂資料目錄／題數時，兩者使用同一 config
+python -m go_aicup.tasks.strength.reproduce_paper.questions --config path/to/config.json
+```
+
+新增 `questions.py`，只讀取 `dataset_dir/games.parquet` 與既有 manifest，確認來源切分 seed=2026 及棋局表雜湊，再呼叫唯一 CV 模組的 `make_strength_v1_questions`；不讀盤面、不重新切分、不啟動 GPU。
+
+設定 `questions.validation` 預設 **10,000**，必須是 40 的正整數倍。固定題組 seed=2026，與 config 的訓練 `seed` 無關。四個 k 桶各 2,500 題，各 k／rank cell 各 250 題；每題同玩家、同色、k 盤互異，全部來自 validation，與 training 棋局零重疊。不同題目可以重用棋局／玩家，不能將所有題目視為獨立樣本。
+
+同一 prepared 資料目錄新增：
+
+- `validation_questions.parquet`：`question_id`、`player_id`、`rank_id`、`k`、`color`、`games`；games 為既有 cache 的 game_index。
+- `validation_eligibility.parquet`：各 k／rank 的可用玩家顏色組與玩家數。任一級別缺少可組成 k 盤的玩家顏色組，直接報錯，不以重複棋局補足。
+- `questions_manifest.json`：來源棋局表與生成程式雜湊、固定 seed、題數、各 k／rank 數量、涉及的不同棋局／玩家數與兩個產物的雜湊。
+
+後續所有 run 直接讀取同一份題組，記錄 questions manifest 的 build_id。重跑入口會驗證並重用產物；訓練 seed 改變不重抽題組。題數／來源／程式身分改變、檔案損壞或輸出不完整會報錯，不靜默覆寫。
+
+合成驗收：
+
+```bash
+PYTHONPATH=src python -m pytest tests/test_reproduce_paper_questions.py tests/test_reproduce_paper_data.py -q
+```
+
+結果 **17 passed in 6.38s**：包含既有七項資料測試，以及題組平衡、train／valid 隔離、同玩家同色、題內不重複、跨訓練 seed 重用、獨立生成結果一致、題數衝突、損壞偵測、來源 seed 拒絕與 eligibility 不足。尚未對官方全量資料實際產生題組。
+
+
+## 資料準備第二步：固定共用切分（已實作）
+
+```json
+{
+  "seed": 3030,
+  "split_seed": 2026
+}
+```
+
+以上是更換訓練 seed 的設定片段：保留同一 `paths.dataset_dir`，完整 config 的其他設定照舊。所有 reproduce_paper 訓練共用預設 `data/processed/reproduce_paper/seed2026/`，run 權重與 log 放各自的 output_dir。`split_seed` 只接受整數 2026；訓練 `seed` 不再決定 split 或共用資料 build_id。
+
+執行 `python -m go_aicup.tasks.strength.reproduce_paper.prepare --config path/to/config.json`：首次依固定 split seed 產生每級 80/20 切分與有效位置索引；已存在時驗證資料身分、必要檔案集合與雜湊後直接重用。改變訓練 seed 不重算 split，也不改寫資料檔。資料來源、切分盤數或有效位置規則不同，必須另建明確版本；缺檔、損壞或身分不符會報錯。
+
+Dataset manifest identity 格式更新為 version 2，以 `split_seed` 取代原本混用的 `seed`。舊版 manifest 不會自動覆寫／遷移，須保留原產物並在新版本資料目錄重新準備。`PaperDataset` 的 D4 seed 預設 2026，也可明確傳入訓練 seed；它不從切分 seed 推導訓練隨機性。
+
+第二步與第五步整合驗收：
+
+```bash
+PYTHONPATH=src python -m pytest tests/test_reproduce_paper_data.py tests/test_reproduce_paper_questions.py -q
+```
+
+結果 **24 passed in 7.17s**。新增驗證包含：更改訓練 seed／模型 channels／output_dir／loader 後不重抽且資料雜湊與修改時間不變；不同訓練 seed 初次建置結果一致；非法 split_seed 拒絕；共用索引損壞偵測；完整 synthetic cache → prepare → questions 在 seed 3030／4040 下共用完全相同產物。未執行官方全量準備或訓練。

@@ -32,9 +32,9 @@
 
 | 項目 | 已確認設定 |
 |---|---|
-| 預設 seed | **2026**，包含 split、抽樣與初始化；其他實驗的 seed 不受影響 |
+| Seed | Split seed 固定為 **2026**；模型初始化／訓練抽樣 seed 預設 2026，可獨立調整，不改變切分 |
 | 級別 | `D < C < B < A < 1D < 2D < 3D < 4D < 5D < 6D`，編碼 0..9 |
-| Split | 每級 100,000 盤，80,000 train／20,000 valid；呼叫 `data.cv.make_strength_v1_split` |
+| Split | 每級 100,000 盤，80,000 train／20,000 valid；首次以 `data.cv.make_strength_v1_split(seed=2026)` 產生，所有 reproduce_paper 訓練共用同一份切分 |
 | 分離單位 | 按棋局切分、棋局零重疊；記錄玩家重疊，不宣稱未見玩家泛化 |
 | 有效位置 | 指定玩家落子且零起算 `ply >= 30`；training、validation、centroid 使用相同規則 |
 | 歷史 | 落子前八步盤面、最新優先，每對為當手方／對手；不足補零，另加黑白回合兩層 |
@@ -52,6 +52,19 @@
 
 唯一棋局鍵為 `(rank, game_id)`，另以 `game_index` 對齊快取；不能只用 `game_id` join。ID 與檔名不得成為模型特徵。排除前 30 手只限制樣本位置，不裁切歷史，也不裁切 teacher 重播。
 
+### 共用切分規則（2026-11-01）
+
+此規則僅適用於 `reproduce_paper`，不調整 V1／V2、HumanSL 或玩家辨識的既有切分。
+
+- 本目錄所有模型、初始化 seed、超參數設定與續跑，共用一份固定 training／validation 棋局名單；不按 run、模型或訓練 seed 各自重新切分。
+- Split seed 永遠固定為 **2026**，維持每級 80,000／20,000 盤。首次由唯一 CV 模組產生並保存，後續直接讀取與驗證同一產物。
+- 共用切分表使用 `data/processed/reproduce_paper/seed2026/games.parquet`，對應 manifest 記錄來源與切分身分；各 run 記錄相同切分表的雜湊。
+- 模型初始化、分組抽樣與 D4 的訓練 seed 預設 2026，後續可以獨立改變，但不得變更 training／validation 成員或重新生成共用切分。
+- Teacher 標籤、training centroid 與固定 validation 題組都依同一切分表判定角色；各 run 重用固定 validation 題組，不因訓練 seed 更換題目。
+- 原始資料或切分規格真的變更時，須另建明確版本並記錄原因，不覆寫既有共用切分；不同切分版本的成績不可當成同一 holdout 比較。
+
+驗收已完成：不同訓練 seed 的 run 具有完全相同的 train／valid 名單、切分雜湊與固定 validation 題組；重跑不改寫產物。`prepare.py` 使用獨立且固定為 2026 的 `split_seed`，資料 identity 不包含訓練 seed；初次建置與共用讀取皆已驗證。模型、訓練器及實際 checkpoint 續跑仍屬後續階段。
+
 ### 128 組與四倍 LR 的最新決策
 
 2026-11-01 使用者指定以 128 組／update、LR ×4 為實作計畫，取代 512 組／10,000 updates。以作者 32 組／130,000 updates 為參考：
@@ -65,11 +78,13 @@
 
 ### 第一步：設定、split 與有效位置索引
 
-**狀態：程式已完成，合成資料驗收通過；官方全量資料尚未準備。**
+**狀態：設定／索引、獨立固定 split_seed 與跨 run 共用切分已實作並通過合成驗收；官方全量資料尚未準備。**
 
 實作範圍：`config.py`、根目錄 `configs/strength/se_seed2026.json`、`prepare.py`。沿用 packed cache metadata／實際顏色，產生 split、每盤有效位置及 manifest；不重新 parse 官方 CSV／SGF，不複製全量盤面。
 
 交付：`games.parquet`、`{train,valid}_{game,offsets,ply}.npy`、`manifest.json`。
+
+資料準備流程第五步「固定 validation 題組」已另由 `questions.py` 完成：讀取共用切分表，呼叫唯一 CV 模組產生題組與 eligibility，預設 10,000 題、固定 seed=2026，不受訓練 seed 影響。產物為 `validation_questions.parquet`、`validation_eligibility.parquet`、`questions_manifest.json`；題數須為 40 的正整數倍，四個 k／十級 cell 等量，題內同玩家同色且不重複，與 train 棋局零重疊。來源或題組損壞／設定衝突明確拒絕覆寫。操作入口見 README；官方全量題組尚未生成。
 
 驗收目標：
 
@@ -77,6 +92,7 @@
 - 索引完整包含指定玩家且 `ply >= 30` 的位置，每盤至少七個不同位置；不足即報錯。
 - seed、來源 cache、程式與產物雜湊、各級盤數／位置數均可追溯。
 - 相同設定可驗證並重用；設定衝突、資料損壞或未完成目錄不得靜默覆寫。
+- 所有訓練 run 讀取同一份 seed=2026 切分；改變模型初始化／抽樣 seed，train／valid 名單、切分雜湊及固定驗證題組不變。
 
 ### 第二步：樣本組裝與 state/action 對齊
 
@@ -193,11 +209,11 @@
 |---|---|
 | 專用程式與本計畫 | `src/go_aicup/tasks/strength/reproduce_paper/` |
 | 預設設定 | `configs/strength/se_seed2026.json` |
-| 已有合成測試 | `tests/test_reproduce_paper_data.py` |
+| 已有合成測試 | `tests/test_reproduce_paper_data.py`、`tests/test_reproduce_paper_questions.py` |
 | 預設 prepared 資料 | `data/processed/reproduce_paper/seed2026/` |
 | 預設 run 輸出 | `outputs/rank/reproduce_paper/se_seed2026/` |
 | 實驗與外部資源紀錄 | `RESULTS.md`、`EXTERNAL_RESOURCES.md` |
 
-第一、二步已完成程式與七項合成測試；第三至八步尚未完成。Teacher visits／品質門檻、精度、BN／SyncBN、microbatch、監控與 checkpoint 頻率、正式成本，依後續查核與短測回填。既有官方全量資料準備、teacher 分析及正式訓練均尚未執行。
+第一、二步原有程式、資料準備第二步的固定 split_seed／跨 run 共用切分，以及資料準備第五步的固定 validation 題組皆已完成，合計 24 項合成測試通過（7.17s）；八階段計畫的第三至八步尚未完成。Teacher visits／品質門檻、精度、BN／SyncBN、microbatch、監控與 checkpoint 頻率、正式成本，依後續查核與短測回填。既有官方全量資料準備、teacher 分析及正式訓練均尚未執行。
 
-目前下一個交付為第三步的「末盤分析入口＋固定 training 小樣本短測」，先確立標籤契約與成本，再安排全量分析。
+下一個工程交付為第三步的 teacher 分析入口與固定 training 小樣本短測；末盤或逐位置 target 的方案仍依已確認規格與後續決策處理，先確立標籤契約與成本後安排全量分析。

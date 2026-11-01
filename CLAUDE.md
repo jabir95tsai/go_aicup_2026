@@ -121,6 +121,12 @@ H200 佇列限制**每張 GPU 最多 12 CPU 核心、200GB 主記憶體**；200G
 
 **SE 幽玄十級訓練預算更新（2026-11-01，使用者決定）：** `reproduce_paper` 改為 global 128 組／update、32,500 optimizer updates；初始 LR=0.04，完成第 25,000 次更新後降為 0.02。以作者 32 組／130,000 updates 為參考，組數放大四倍、updates 除四、LR 乘四；取代先前 512 組／10,000 updates。十級七手共 291,200,000 次位置使用，8×H200 各 16 組／1,120 個位置。Loss 維持平均，SGD momentum=0.9、weight_decay=0.0001、seed=2026 不變，未加入 warmup。這是近似方案，收斂與加速比未知；正式長作業仍依 §9 回報估時。設定及驗收見 `configs/strength/se_seed2026.json`、`src/go_aicup/tasks/strength/reproduce_paper/plan.md`；未啟動訓練。
 
+**reproduce_paper 共用切分規則（2026-11-01，使用者限定範圍）：** 僅本目錄所有訓練 run 共用同一份每級 80,000／20,000 棋局切分，split seed 固定 2026。初始化／抽樣 seed 預設 2026、可獨立修改，但不重新切分；各 run 記錄相同切分雜湊、重用固定 validation 題組。共用表為 `data/processed/reproduce_paper/seed2026/games.parquet`。本次僅更新規則，`prepare.py` 的 split seed 解耦與跨 run 共用驗收待實作；不改 V1／V2、HumanSL 或玩家辨識流程。細節見 `src/go_aicup/tasks/strength/reproduce_paper/plan.md`。
+
+**reproduce_paper 固定題組實作（2026-11-01）：** 最新資料準備流程第五步已實作 `questions.py`，從既有 seed=2026 切分表生成共用 validation 題組；固定 question seed=2026、預設 10,000 題，各 k／rank cell 等量，題內同玩家同色且棋局互異、與 train 零重疊。保存題組／eligibility／獨立 manifest，跨訓練 seed 重用與完整性驗證通過；合計 17 項 CPU 合成測試通過。此項不代表八階段計畫第五步的模型／loss 已實作；`prepare.py` 的 split seed 解耦仍待完成。操作見本目錄 README，未對官方全量生成題組。
+
+**reproduce_paper 資料準備第二步已完成（2026-11-01）：** `split_seed` 固定整數 2026，與訓練 `seed` 分開；首次 prepare 及後續跨 seed 共用皆已驗證，已存在時驗證並重用同一切分／位置索引，不重抽或覆寫。Dataset manifest identity version 2 使用 split_seed，舊版本拒絕靜默遷移；`PaperDataset` 明確接受獨立訓練 seed，`questions.py` 綁定相同固定切分。合計 24 項 CPU 合成測試通過（7.17s），含不同訓練 seed 初建一致、重用不呼叫切分器、產物雜湊與修改時間不變、損壞拒絕及 cache→prepare→questions 整合驗收。此更新完成上方所列 split seed 解耦待辦；官方全量資料尚未準備，未啟動 GPU 作業。
+
 ### 仍待確認 ⏳
 
 | 項目 | 為什麼重要 | 何時／去哪查 |

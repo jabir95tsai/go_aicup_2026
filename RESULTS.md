@@ -1461,3 +1461,27 @@ split 1／2 分開：保險單獨 0.9385／0.9343，融合 0.9865／0.9828，融
 - 取代先前 512 組／10,000 updates 計畫；global groups=128、updates=32,500，LR=0.04，完成第 25,000 次更新後降為 0.02。SGD momentum=0.9、weight_decay=0.0001、loss 平均與 seed=2026 維持不變，未加入 warmup。
 - 依作者 32 組／130,000 updates 線性縮放，總排序組數同為 4,160,000；幽玄十級七手共 291,200,000 次位置使用。8×H200 各 16 組、1,120 個位置。這是近似方案，未證明與四個小步等效；BN、momentum 與更新時點差異須短測。
 - 已同步 config、README、plan 與 CLAUDE.md；新增局部更新近似診斷至計畫。未啟動模型實作後續階段、全量資料準備或訓練；k=5/10/15/20 分數、增益與實測成本未知。
+
+
+### 2026-11-01：reproduce_paper 固定共用 training／validation 切分（規則更新）
+
+- 使用者限定只修改 reproduce_paper：所有訓練 run 共用一份每級 80,000／20,000 棋局切分，split seed 固定 2026；模型初始化／抽樣 seed 可獨立調整，不重新切分。共用表為 `data/processed/reproduce_paper/seed2026/games.parquet`，各 run 應記錄同一切分雜湊並重用固定 validation 題組。
+- 已同步 plan、README 與 CLAUDE.md 的本實驗規則。僅文件修改；既有 prepare 仍用 config seed，split seed 解耦、共用切分讀取及跨 seed 驗收待實作。V1／V2、HumanSL 與玩家辨識流程不變。
+- 未生成切分、未執行訓練；新增規則無模型分數，k=5/10/15/20 增益未知。
+
+
+### 2026-11-01：reproduce_paper 資料準備第五步——固定 validation 題組
+
+- 使用者要求完成最近資料準備流程的第五步；本次範圍為固定題組，不是八階段計畫第五步的三頭模型／loss。
+- 新增 `src/go_aicup/tasks/strength/reproduce_paper/questions.py`，讀取既有共用棋局表及 manifest，要求 split seed=2026 並驗證來源雜湊。沿用唯一 `data.cv.make_strength_v1_questions`，固定 question seed=2026，訓練 seed 不影響題組。config 新增 `questions.validation=10000`，需為 40 的正整數倍；四個 k 桶各 2,500 題，每 k／rank cell 各 250 題。
+- 保存 `validation_questions.parquet`、`validation_eligibility.parquet`、`questions_manifest.json`。題內同玩家同色、棋局互異，與 train 棋局零重疊；跨題允許重用。來源、生成程式、題數與檔案雜湊綁定；重跑驗證重用，衝突／損壞／不完整資料不靜默覆寫。任一級別 eligibility 不足直接報錯。
+- 驗證：`PYTHONPATH=src /home/jason1122/.conda/envs/go/bin/python -m pytest tests/test_reproduce_paper_questions.py tests/test_reproduce_paper_data.py -q` → **17 passed in 6.38s**，含原有七項測試及題組隔離、平衡、跨 seed 重用、獨立生成一致、衝突／損壞／來源 seed／資格不足／題數設定驗證。CLI `questions --help` 另檢查。
+- 未執行官方全量準備、題組生成或 GPU 作業；分 k 模型分數與增益未知。split seed 與訓練 seed 在 prepare.py 的解耦仍待實作。
+
+
+### 2026-11-01：reproduce_paper 資料準備第二步——固定共用切分實作完成
+
+- 使用者要求完成最新資料準備流程第二步。config 新增固定整數 `split_seed=2026`，訓練 `seed` 可獨立改變；首次 `prepare` 呼叫唯一 CV API 使用 split_seed，後續驗證同一資料身分與必要產物集合／雜湊後直接重用，不重新呼叫切分器。
+- Manifest identity 更新為 version 2、欄位 split_seed，不包含訓練 seed、模型 channels、run output_dir、loader 或題數；共用切分及位置索引檔不因這些訓練設定改寫。舊 manifest 以身分衝突明確拒絕，不靜默覆寫或遷移。題組與 PaperDataset 接上新格式；D4 可使用獨立傳入的訓練 seed。
+- 驗證：`PYTHONPATH=src /home/jason1122/.conda/envs/go/bin/python -m pytest tests/test_reproduce_paper_data.py tests/test_reproduce_paper_questions.py -q` → **24 passed in 7.17s**。新增跨 seed 不呼叫切分器且檔案雜湊／修改時間不變、不同 seed 初次建置結果一致、非法 split_seed 拒絕、損壞索引拒絕，以及 800 盤合成 cache→prepare→questions 在 seed 3030／4040 下共用相同產物的整合驗收。
+- 僅 reproduce_paper 程式與文件修改；官方全量資料準備、teacher、訓練、模型 checkpoint 續跑尚未執行。k=5/10/15/20 成績與增益未知。

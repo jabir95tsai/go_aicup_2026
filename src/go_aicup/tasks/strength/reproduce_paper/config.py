@@ -3,6 +3,9 @@ import json
 from pathlib import Path
 from go_aicup.paths import ROOT
 
+SPLIT_SEED = 2026
+DEFAULT_TRAINING_SEED = 2026
+
 DEFAULT_CONFIG = ROOT / "configs" / "strength" / "se_seed2026.json"
 
 
@@ -20,6 +23,8 @@ def validate_config(config):
         raise ValueError("unsupported SE config")
     if type(config["seed"]) is not int or config["seed"] < 0:
         raise ValueError("seed must be a nonnegative integer")
+    if type(config["split_seed"]) is not int or config["split_seed"] != SPLIT_SEED:
+        raise ValueError("reproduce_paper split_seed must be fixed at 2026")
     for key in ("expected_games_per_rank", "train_games_per_rank"):
         if type(config["split"][key]) is not int or config["split"][key] < 1:
             raise ValueError("split counts must be positive integers")
@@ -34,3 +39,7 @@ def validate_config(config):
         raise ValueError("max_open_shards must be positive")
     if config["model"]["input_encoding"] != "pre_action_own_opponent" or config["model"]["policy_size"] != 362:
         raise ValueError("SE requires pre-action own/opponent inputs and 362 policy classes")
+
+    count = config["questions"]["validation"]
+    if type(count) is not int or count < 40 or count % 40:
+        raise ValueError("validation questions must be a positive multiple of 40")
