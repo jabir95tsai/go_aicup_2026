@@ -119,6 +119,8 @@ H200 佇列限制**每張 GPU 最多 12 CPU 核心、200GB 主記憶體**；200G
 
 **SE 幽玄十級移植第一、二步（2026-11-01）：** 使用者指定本版預設 seed=2026，包含 game-level 80/20 split，取代 reproduce_paper 舊計畫的 2027；不改主線 V2 的 seed。已新增獨立 config、沿用唯一 CV 模組的資料準備與有效位置索引、落子前本人／對手八步歷史及同步 D4 policy 樣本組裝；操作與驗收見 `src/go_aicup/tasks/strength/reproduce_paper/README.md`。未處理官方全量資料、未生成 teacher 標籤、未啟動訓練。
 
+**SE 幽玄十級訓練預算更新（2026-11-01，使用者決定）：** `reproduce_paper` 改為 global 128 組／update、32,500 optimizer updates；初始 LR=0.04，完成第 25,000 次更新後降為 0.02。以作者 32 組／130,000 updates 為參考，組數放大四倍、updates 除四、LR 乘四；取代先前 512 組／10,000 updates。十級七手共 291,200,000 次位置使用，8×H200 各 16 組／1,120 個位置。Loss 維持平均，SGD momentum=0.9、weight_decay=0.0001、seed=2026 不變，未加入 warmup。這是近似方案，收斂與加速比未知；正式長作業仍依 §9 回報估時。設定及驗收見 `configs/strength/se_seed2026.json`、`src/go_aicup/tasks/strength/reproduce_paper/plan.md`；未啟動訓練。
+
 ### 仍待確認 ⏳
 
 | 項目 | 為什麼重要 | 何時／去哪查 |

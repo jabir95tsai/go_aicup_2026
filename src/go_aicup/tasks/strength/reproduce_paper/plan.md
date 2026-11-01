@@ -40,17 +40,26 @@
 | 歷史 | 落子前八步盤面、最新優先，每對為當手方／對手；不足補零，另加黑白回合兩層 |
 | Policy | 預測所選當手，row-major 0..360；361 為 pass，盤面與 target 同步 D4 |
 | 取樣 | 每組十級，各級均勻抽一盤，再抽同盤指定玩家七個不同有效位置；跨組／step 可重複 |
-| Global batch | 512 組 × 10 級 × 7 位置 = 35,840 個位置／update |
+| Global batch | 128 組 × 10 級 × 7 位置 = 8,960 個位置／update |
 | 模型 | 256 channels、20 residual blocks、三頭；block／head 細節依作者固定版本查核 |
 | Loss | `L_BT + L_policy + L_value`，初始權重皆為 1 |
 | Optimizer | SGD，momentum=0.9、weight_decay=0.0001 |
-| Schedule | 10,000 optimizer updates；完成第 7,692 次後，LR 由 0.01 降至 0.005 |
+| Schedule | 32,500 optimizer updates；完成第 25,000 次後，LR 由 0.04 降至 0.02 |
 | Teacher | 既有 KataGo 強網路、日本規則／6.5；visits 由固定 training 小樣本短測決定 |
 | Value | 黑方 `2*p_black-1`，白方取相反數；不將 soft target 硬分類 |
 | Centroid | 全部 800,000 盤 training 的全部有效位置，按位置等權；不使用 validation 擬合 |
 | 題目解碼 | 題內所有有效位置的 scalar score 平均後取最近 rank centroid |
 
 唯一棋局鍵為 `(rank, game_id)`，另以 `game_index` 對齊快取；不能只用 `game_id` join。ID 與檔名不得成為模型特徵。排除前 30 手只限制樣本位置，不裁切歷史，也不裁切 teacher 重播。
+
+### 128 組與四倍 LR 的最新決策
+
+2026-11-01 使用者指定以 128 組／update、LR ×4 為實作計畫，取代 512 組／10,000 updates。以作者 32 組／130,000 updates 為參考：
+
+- 128 組／update，32,500 updates，共 4,160,000 組；十級七手共 291,200,000 次位置使用。
+- 初始 LR=0.04；完成第 25,000 次更新後降為 0.02，保持原 schedule 的總組數與切換比例。
+- 8×H200 各 16 個完整組、1,120 個位置；三項 loss 維持平均，SGD momentum=0.9、weight_decay=0.0001 不變，未加入 warmup。
+- 此為接近四個小步的線性縮放近似，並非已證明等效；BN、momentum、更新時點與精度影響須短測。分 k 增益與正式加速比未知。
 
 ## 3. 實作順序與驗收
 
@@ -115,7 +124,7 @@
 - 級內按棋局均勻抽樣，不因棋局較長而提高該盤被選中的機率。
 - 同盤不同位置共用同一末盤 teacher 機率，依視角轉換；標籤錯配明確報錯。
 - 同 seed 與消費端 step 可重建抽樣與增強，不受 worker 數、prefetch 或續跑影響。
-- DDP 依全域組編號分配完整組；8 卡時各 64 組，無額外補齊組；保留未來跨 step 重抽同盤的合法行為。
+- DDP 依全域組編號分配完整組；8 卡時各 16 組（1,120 個位置），無額外補齊組；保留未來跨 step 重抽同盤的合法行為。
 
 ### 第五步：三頭模型與分組 loss
 
@@ -139,10 +148,11 @@
 
 驗收目標：
 
-- 一次 optimizer update 對應 512 個完整組；訓練停止條件為 10,000 updates，與 epoch／讀過多少不同棋局無關。
-- LR 在完成第 7,692 次更新後切換；checkpoint 保存模型、optimizer、scheduler、RNG、消費端 step、抽樣身分及 config／資料來源。
+- 一次 optimizer update 對應 128 個完整組；訓練停止條件為 32,500 updates，與 epoch／讀過多少不同棋局無關。
+- LR 在完成第 25,000 次更新後切換；checkpoint 保存模型、optimizer、scheduler、RNG、消費端 step、抽樣身分及 config／資料來源。
 - 固定 seed 的中斷續跑與連續執行具有相同抽樣、增強、optimizer steps 及 LR；在固定 FP32／確定性短測條件下比較 loss 與參數差異。
 - 普通 BN／SyncBN、BF16 與必要 microbatch 的行為另行查核、記錄；不可把 BN 差異誤判為分組 loss 錯誤或宣稱跨硬體逐值一致。
+- 短測須檢查 LR=0.04 的三項 loss、梯度及參數更新是否有限且穩定；以相同 128 組資料比較四個 32 組／LR=0.01 小步與一個 128 組／LR=0.04 大步的參數更新方向及幅度，先控制 BN 再檢查正式設定。這是近似誤差診斷，不以單卡／DDP 正確性容差要求兩種優化軌跡相同。
 - H200 dev 單卡 100–500 steps 短測通過後，再測所需 DDP 配置，記錄 steps/s、峰值顯存、RAM、GPU-hours、I/O 與 checkpoint 成本。
 - 依實測選定監控與保存頻率；不得假定 8 卡可線性加速八倍。
 
@@ -167,13 +177,13 @@
 
 **狀態：待啟動。依賴：前七步工程驗收、所需全量標籤及長作業確認。**
 
-實作範圍：完成官方資料準備與 training teacher 標籤，執行正式 10,000 updates，使用最終模型完成全量 training centroid 與 validation 評估。
+實作範圍：完成官方資料準備與 training teacher 標籤，執行正式 32,500 updates，使用最終模型完成全量 training centroid 與 validation 評估。
 
 驗收目標：
 
 - 啟動前分開回報資料準備、teacher、訓練、training centroid 推論、validation 推論的估時與磁碟需求；總 GPU-hours 依實測估算，不套用論文 A5000 成本。
 - 每項長作業依 CLAUDE.md §9 回報並確認啟動；開始與完成後紀錄實際硬體、版本、耗時與失敗狀態。
-- 完成 10,000 次 optimizer updates；最終權重、有效 config、資料／teacher 身分、checkpoint 及訓練紀錄可以支援續跑與重建。
+- 完成 32,500 次 optimizer updates；最終權重、有效 config、資料／teacher 身分、checkpoint 及訓練紀錄可以支援續跑與重建。
 - 全量 training centroid 和固定 validation 報表可從保存產物重建；結果無論高低都寫入根目錄 `RESULTS.md`，來源及貢獻寫入 `EXTERNAL_RESOURCES.md`。
 - 分數解讀明記 game-disjoint、玩家可能重疊，以及 teacher 偽標籤等偏離；不能直接和主線 player-disjoint 成績宣稱優劣。
 

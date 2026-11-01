@@ -24,14 +24,14 @@
     "input_encoding": "pre_action_own_opponent"
   },
   "training": {
-    "groups_per_update": 512,
-    "updates": 10000,
+    "groups_per_update": 128,
+    "updates": 32500,
     "optimizer": "sgd",
-    "lr": 0.01,
+    "lr": 0.04,
     "momentum": 0.9,
     "weight_decay": 0.0001,
-    "lr_drop_after_updates": 7692,
-    "final_lr": 0.005
+    "lr_drop_after_updates": 25000,
+    "final_lr": 0.02
   },
   "loss_weights": {
     "bt": 1.0,
