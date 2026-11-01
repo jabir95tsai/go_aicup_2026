@@ -1,5 +1,7 @@
 # Strength Estimator paper reproduction
 
+分階段實作範圍、進度與驗收目標見 [plan.md](plan.md)。
+
 本目錄專用於 Chen、Shih、Wu，*Strength Estimation and Human-Like Strength Adjustment in Games*（ICLR 2025，arXiv:2502.17109v2）的重現。
 
 - 分支：`reproduce/2502.17109v2`
@@ -25,7 +27,7 @@ Adam、AdamW、Muon 或其他 optimizer 的比較不列入目前重現範圍；�
 |---|---|
 | Policy head | 本版加入，使用 strength／policy／value 三頭；實作前核對固定版本 MiniZero 的輸入與 target 時點，驗證無目標落子洩漏 |
 | Centroid 資料 | 使用全部 800,000 盤 training 棋局的指定玩家有效位置（`ply >= 30`），按位置等權計算各級平均，不抽一小部分棋局或每盤只取七手 |
-| 80/20 split | 每級按棋局隨機切分為 80,000／20,000 盤，固定 split seed=2027；沿用 `data.cv.make_strength_v1_split`，記錄玩家重疊 |
+| 80/20 split | 每級按棋局隨機切分為 80,000／20,000 盤，固定 split seed=2026；沿用 `data.cv.make_strength_v1_split`，記錄玩家重疊 |
 | KataGo 規則／貼目 | 日本規則、貼目 6.5；是 teacher 分析假設，不是原局規則已知值 |
 | 本次範圍 | 僅基本 SE 三頭模型、末盤 soft value 偽標籤與對應評估；不實作／訓練 SLsum、SLvote，也不建立 SL 對照 gate |
 
@@ -50,7 +52,7 @@ Adam、AdamW、Muon 或其他 optimizer 的比較不列入目前重現範圍；�
 
 ## 訓練流程：論文原版與競賽資料版本
 
-本節分開說明論文原版，以及使用者先前指定的競賽資料改動。取消 epoch 已確認；十級、每級十萬盤、80/20 與排除前 30 手保留為既有資料要求，不能稱為原論文資料規格。以下是計畫，尚未實作或訓練。
+本節分開說明論文原版，以及使用者先前指定的競賽資料改動。取消 epoch 已確認；十級、每級十萬盤、80/20 與排除前 30 手保留為既有資料要求，不能稱為原論文資料規格。設定、split／有效位置索引與樣本組裝已實作；模型與訓練尚未實作。
 
 ### 一次 optimizer update 如何產生
 
@@ -59,7 +61,7 @@ Adam、AdamW、Muon 或其他 optimizer 的比較不列入目前重現範圍；�
 1. 建立 32 個獨立排序組。每組包含全部 11 個人類級別，由弱到強排列供程式計算；論文公式則以強到弱表示，兩者等價。
 2. 每組每級，從該級訓練棋局均勻隨機選一盤。不同組或不同 step 可重複抽到同一盤，不追蹤「本輪尚未抽過」的棋局清單。
 3. 作者程式隨機選黑或白，列出該顏色在這盤的著手位置，打亂後取 7 個。因此同一個七手集合內不重複；跨組／跨 step 可重複。論文文字只說每級抽七個 state-action pairs，同盤同色是作者設定補充。
-4. 組合 18-plane 歷史輸入並做空間對稱增強。論文附錄 A 指八步黑白盤面與兩個顏色層；實作仍須對照 MiniZero 的輸入時點、padding 與 policy target，不能直接假定 V1 的編碼等價。
+4. 組合 18-plane 歷史輸入並做空間對稱增強。論文附錄 A 指八步歷史與兩個顏色層；已查核固定版本 MiniZero，實際歷史通道為當手方／對手，輸入位於當手落下前，policy target 為當手落點。
 5. 整批 forward 產生逐位置 strength score、policy 與 value。SE 每步位置數為 `32 × 11 × 7 = 2,464`。
 6. 每組每級先平均七個 score，分組算排序 loss，再平均全部 32 組；與 policy/value loss 相加，做一次 backward、一次 SGD update，最後推進 scheduler。
 7. 重新抽取下一 step 的樣本，持續到 130,000 次 updates。沒有 epoch，也沒有全資料不放回的逐輪 shuffle；步內選位置時的 shuffle 仍保留。
@@ -103,7 +105,7 @@ SGD：momentum=0.9、weight_decay=0.0001。第 1–100,000 次更新用 LR=0.01�
 ### 競賽版目前資料要求與偏離
 
 - 十個人類級別：`D < C < B < A < 1D < 2D < 3D < 4D < 5D < 6D`，內部編碼 0..9。
-- 每級 100,000 盤，training 80,000、validation 20,000；總計 training 800,000、validation 200,000 盤。已確認按棋局分層隨機切分、split seed=2027，使用 `data.cv.make_strength_v1_split`；玩家可能跨集合，須記錄重疊，不能把結果解讀為未見玩家泛化。
+- 每級 100,000 盤，training 80,000、validation 20,000；總計 training 800,000、validation 200,000 盤。已確認按棋局分層隨機切分、split seed=2026，使用 `data.cv.make_strength_v1_split`；玩家可能跨集合，須記錄重疊，不能把結果解讀為未見玩家泛化。
 - **已確認位置規則（2026-10-30）：training、validation 與 centroid 計算均排除全局第 1–30 手**，零起算 `ply >= 30`，並且須屬於指定玩家。八步歷史保留真實盤面，不把歷史中較早的盤面清空。Training 每次抽七個不同位置前先確認有足夠有效位置，否則報告資料問題，不靜默改成重複抽樣。Validation 與 centroid 按相同有效位置規則推論、聚合，不限每盤七手。
 - 本版每步 SE：`512 × 10 × 7 = 35,840` 個位置，10,000 steps 共 `358,400,000` 次位置使用（含重複）。這不是 800,000 盤資料被完整讀取的次數保證。
 - 十級、盤數、切分、前 30 手排除及指定玩家取樣均為競賽版差異。原論文用 Fox 十一級，未設定排除前 30 手；完全原版結果重現需撤回這些差異並準備原始資料。
@@ -148,7 +150,7 @@ Global 512 組，8 張卡各分配 64 個完整組；競賽版 SE 每卡 `64 × 
 | `data/sgf.py`：`parse`、座標轉換 | 官方純落手資料解析 | strict parser 僅接受官方簡化格式；`parse_lenient` 會丟棄 pass，不能直接用於完整 Fox 重現 |
 | `data/preprocess.py`、`data/store.py`：`GameStore` | 一次轉檔、memmap 著手序列與 metadata | 不能把官方十級當成 Fox 十一級；外部資料格式擴充仍須留在唯一 parser／資料管線 |
 | `features/sgf_planes.py`：`moves_to_planes` | 盤面重播、提子及既有合法性稽核 | 僅有 immediate-ko 稽核，不能直接作為作者 positional-superko 下的隨機合法著手生成器 |
-| `data/board_cache.py`：`BoardCache`、`history_batch`、`assemble_inputs` | 壓縮盤面、八步黑白歷史、18-plane 輸入 | 快取包含著手後盤面，顏色層為被選著手的顏色；必須和 MiniZero 的 state/action 時點及色層逐項對齊；現有 rank metadata 固定十級 |
+| `data/board_cache.py`：`BoardCache`、`history_batch`、`assemble_inputs` | 壓縮盤面、八步黑白歷史、18-plane 輸入 | 快取包含著手後盤面；本版已在 dataset 讀取前一手歷史、轉為當手方／對手，保留實際當手顏色；rank metadata 固定十級 |
 | `data/cv.py`：`make_rank_folds`、`assert_player_disjoint`、`make_rank_questions` | 官方資料的玩家互斥驗證與 k=5/10/15/20 題目 | 所有 split 仍由此模組產生；論文 candidate/query protocol 如需新增，也集中於此，不能在本目錄另造 split |
 | `tasks/strength/shared/dataset.py`：`PackedBoardDataset`、`apply_d4` | lazy 讀取、D4 變換、worker 開檔處理 | 新增按 rank/game 抽樣；已確認加入 policy head，policy target 須同步變換；既有 epoch sampler 不符合作者分組抽樣 |
 | `tasks/strength/shared/model.py`：`ResidualBlock`、`StrengthResNetBackbone` | 20 blocks、256 channels 與 scalar head 的結構參考 | 目前 block 回傳 residual sum 後沒有 ReLU；需比對作者固定版本及 MiniZero，不能僅因深度／寬度相同便宣稱等價；policy/value heads 尚缺 |
@@ -167,7 +169,7 @@ Global 512 組，8 張卡各分配 64 個完整組；競賽版 SE 每卡 `64 × 
 |---|---|---|
 | Go 資料 | Fox，11 級：9d 到 1d、1–2k、3–5k | 幽玄，10 級：D 到 6D；不可逐級等同 |
 | 訓練／候選／查詢 | 每級 45,000／100／900 盤，共 495,000／1,100／9,900 | 官方一百萬盤與既有 player-disjoint split |
-| 輸入 | 附錄 A：18 planes，八步黑白歷史與兩個顏色層 | 尺寸一致；時點、色層、padding 須比對 MiniZero |
+| 輸入 | 18 planes；固定版 MiniZero 為八步當手方／對手歷史與兩個顏色層 | 本版 dataset 已對齊落子前時點、通道及零 padding；未執行作者二進位比對 |
 | 網路 | 20 residual blocks、256 channels，policy/value/strength 輸出 | V1 僅 strength，V2 為十類分類 |
 | 每步 SE 樣本 | 作者 config：32 組 × 11 級 × 7 手 = 2,464 | V1 以全域級別平均計一次排序 loss |
 | 每步 SE-infinity 樣本 | 32 組 × 12 級 × 7 手 = 2,688，含隨機合法著手的最低級 | 目前沒有合成最低級 |
@@ -190,7 +192,7 @@ Global 512 組，8 張卡各分配 64 個完整組；競賽版 SE 每卡 `64 × 
 
 ### 本目錄的程式配置
 
-計畫已確認，專用程式集中於本目錄；以下是預定檔案，尚未建立執行入口：
+計畫已確認，專用程式集中於本目錄；檔案狀態如下；目前已建立 config／prepare／dataset，其餘為後續實作：
 
 - `config.py`：資料模式、級別順序、模型、分組抽樣、loss 規則、schedule 與 paths。
 - `dataset.py`：包裝既有 store/cache，提供每組各級同盤指定玩家的 7 個不同位置，並讀取對齊的每盤 soft value target。
@@ -201,7 +203,7 @@ Global 512 組，8 張卡各分配 64 個完整組；競賽版 SE 每卡 `64 × 
 - `train.py`：512 組／step、10,000-step SGD、單卡／DDP、checkpoint、續跑與成本紀錄。
 - `infer.py`：保存逐手 score、各盤 score_sum 與 position_count，支援位置加權平均。
 - `evaluate.py`：全量 training centroid、nearest-centroid、固定 validation 題組評估及圖表重建；論文式重複抽樣與題組結果需標明各自 protocol。
-- `configs/`：每個模型與資料模式各自的可重建設定。
+- 專案根目錄 `configs/strength/`：每個模型與資料模式各自的可重建設定。
 
 專用 processed 與 run 目錄建議為 `data/processed/reproduce_paper/`、`outputs/rank/reproduce_paper/<run-id>/`，路徑皆走 config；完整盤面沿用既有壓縮快取，避免複製全量資料。
 
@@ -210,7 +212,7 @@ Global 512 組，8 張卡各分配 64 個完整組；競賽版 SE 每卡 `64 × 
 假設：跨多位置的排序 supervision 比逐手分類更能辨識棋力順序；本版幽玄資料的分 k 桶分數與對競賽主線的增益均未知；不再安排同規模 SL 對照。
 
 1. 正確性 gate：分組 loss 與直接公式在 FP32 的絕對差 <=1e-6；單卡與兩程序 loss／參數梯度相對差 <=1e-5；固定 seed 續跑的抽樣與 optimizer steps 一致。容差是本計畫提案，並非論文數字。
-2. 資料 gate：train/candidate/query 棋局零重疊；本次每級精確 80/20 已確認按棋局切分（seed 2027）並記錄玩家重疊，不要求本模式玩家互斥。記錄來源、級別映射、每級盤數、實際顏色與指定玩家位置；不將 ID 作輸入。
+2. 資料 gate：train/candidate/query 棋局零重疊；本次每級精確 80/20 已確認按棋局切分（seed 2026）並記錄玩家重疊，不要求本模式玩家互斥。記錄來源、級別映射、每級盤數、實際顏色與指定玩家位置；不將 ID 作輸入。
 3. 原論文指標目標：N=15 exact accuracy >0.80、N=100 約 0.975；within-one 在 N=6 >0.99（§4.2）。這些是原文目標，尚無本地測量，不承諾移植版達標。圖中非明文數字不編造。
 4. 幽玄模式：固定 validation 題目，完整回報 k=5/10/15/20 的 exact、within-one、官方 score 與四桶等權平均。棋局切分結果不能和主線 player-disjoint 分數直接比較；原先相對 SL 至少 +0.01 的 gate 隨 SL 對照移除，不另訓練 baseline 來驗收本次 SE。分數結果仍需如實記錄，不能只憑 training loss 宣稱泛化改善。
 5. 正式數字重現的容差、95% CI 算法、原始抽樣 seed 與資料清單尚待查核／確認，不能只達到第 3 點便宣稱原始實驗完全重現。
@@ -238,3 +240,60 @@ Global 512 組，8 張卡各分配 64 個完整組；競賽版 SE 每卡 `64 × 
 - [作者 README（固定版本）](https://github.com/rlglab/strength-estimator/blob/d9498964e2ba84b5798c40e3f5b8a91a8791d66c/README.md)。
 - [SE config](https://github.com/rlglab/strength-estimator/blob/d9498964e2ba84b5798c40e3f5b8a91a8791d66c/cfg/se_go.cfg)、[SE-infinity config](https://github.com/rlglab/strength-estimator/blob/d9498964e2ba84b5798c40e3f5b8a91a8791d66c/cfg/se_infty_go.cfg)。
 - [網路](https://github.com/rlglab/strength-estimator/blob/d9498964e2ba84b5798c40e3f5b8a91a8791d66c/strength/trainer/bt_network.py)、[訓練與 loss](https://github.com/rlglab/strength-estimator/blob/d9498964e2ba84b5798c40e3f5b8a91a8791d66c/strength/trainer/train.py)、[抽樣](https://github.com/rlglab/strength-estimator/blob/d9498964e2ba84b5798c40e3f5b8a91a8791d66c/strength/trainer/st_data_loader.cpp)、[評估](https://github.com/rlglab/strength-estimator/blob/d9498964e2ba84b5798c40e3f5b8a91a8791d66c/strength/misc/evaluator.cpp)。
+
+
+## 第一、二步操作與驗收（2026-11-01）
+
+依使用者最新指定，本版所有隨機設定預設 seed=2026（包含 split），取代先前本文件的 2027；V1／V2 的設定不受此更新影響。
+
+已建立 `config.py`、`configs/strength/se_seed2026.json`（專案根目錄下）、`prepare.py` 與 `dataset.py`。正式資料準備入口：
+
+```bash
+python -m go_aicup.tasks.strength.reproduce_paper.prepare
+# 或指定獨立 config
+python -m go_aicup.tasks.strength.reproduce_paper.prepare --config path/to/config.json
+```
+
+此命令會讀取既有 packed cache；本次尚未對官方全量資料執行。預設輸出為 `data/processed/reproduce_paper/seed2026/`：
+
+- `games.parquet`：唯一 CV 模組產生的 split、原棋局 metadata 及有效位置數。
+- `{train,valid}_game.npy`：各集合的棋局索引（uint32）。
+- `{train,valid}_offsets.npy`：每盤在位置陣列中的起訖範圍（int64，長度為盤數加一）。
+- `{train,valid}_ply.npy`：指定玩家且 `ply >= 30` 的全部有效位置（uint16）；不只保存七手。
+- `manifest.json`：seed、cache 身分、程式／產物雜湊、每級盤數／位置數與玩家重疊。相同設定可重跑驗證並重用；設定不同、產物損壞或未完成的目錄會明確拒絕覆寫。
+
+每盤少於七個有效位置會報錯，不能靜默重複抽樣。資料準備僅讀取 metadata／顏色，不解壓全量盤面；不建立另一套 parser 或 split。
+
+```python
+from go_aicup.tasks.strength.reproduce_paper.config import read_config
+from go_aicup.tasks.strength.reproduce_paper.dataset import PaperDataset
+
+config = read_config()
+dataset = PaperDataset(config['paths']['dataset_dir'], split='train', augment=True)
+try:
+    sample = dataset[(0, 0)]  # (有效位置序號, augmentation round)
+    # planes: uint8[18,19,19]; policy_target: int in 0..361
+    # rank_id, player_color, game_index, ply, sample_index, d4: metadata
+finally:
+    dataset.close()
+```
+
+`PaperDataset` 支援批次 `__getitems__`、process-local memmap、LRU 及 spawn workers；增強由 seed／round／sample index 決定。第 4 步的分組 sampler 尚未加入。識別資訊不進入模型通道；teacher 尚未生成，樣本不提供虛構 value label。`soft_value_target(p_black, player_color)` 已提供有限值／範圍檢查及黑白視角轉換，供後續 teacher 接入。
+
+### 已查核的 state/action 契約
+
+固定作者版本 `d9498964e2ba84b5798c40e3f5b8a91a8791d66c`：
+
+- [`strength/misc/game_wrapper.cpp`](https://github.com/rlglab/strength-estimator/blob/d9498964e2ba84b5798c40e3f5b8a91a8791d66c/strength/misc/game_wrapper.cpp) 的 `calculateFeatures` 直接呼叫 loader。
+- [`minizero/minizero/environment/base/base_env.h`](https://github.com/rlglab/strength-estimator/blob/d9498964e2ba84b5798c40e3f5b8a91a8791d66c/minizero/minizero/environment/base/base_env.h) 的 `getFeatures(pos)` 只重播索引小於 pos 的著手，`getPolicy(pos)` 使用 pos 的 action。
+- [`minizero/minizero/environment/go/go.cpp`](https://github.com/rlglab/strength-estimator/blob/d9498964e2ba84b5798c40e3f5b8a91a8791d66c/minizero/minizero/environment/go/go.cpp) 的 `getFeatures` 以最新歷史優先，每對通道為當手方／對手；不足八步補零，最後兩層為黑／白回合。
+
+因此本版對選中的 ply 讀取 cache 的 `ply-1` 及更早盤面，白方交換黑白歷史通道；policy 使用所選 ply 的著手。`ply=0` 歷史全零；`ply >= 30` 不會清空前 30 手的歷史。盤面及 policy 共用相同 D4；本 repo 維持自身 row-major 座標，pass 類別為 361（官方訓練資料無 pass）。此為來源閱讀與合成棋局對照，未執行作者 C++ 二進位逐值比對。
+
+針對本次功能的 CPU 合成測試：
+
+```bash
+PYTHONPATH=src python -m pytest tests/test_reproduce_paper_data.py -q
+```
+
+本次結果：**7 passed in 6.80s**（CPU、合成資料）。涵蓋十級精確 split／玩家重疊、全部有效位置、重用與設定衝突、有效位置不足報錯、提子／落子前歷史／白方通道／padding、八種 D4 的全部 361 個座標與 pass、soft value 視角與非法值、pickle／spawn DataLoader 一致性。未啟動 teacher、GPU 作業、訓練或正式 centroid 推論。

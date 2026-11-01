@@ -1443,3 +1443,14 @@ split 1／2 分開：保險單獨 0.9385／0.9343，融合 0.9865／0.9828，融
 - L1：rank 條件的下一手預測（競賽二）；L1′：KataGo 人類 SL 模型當外部特徵（授權與格式未查證，重開 A-026 已砍的項目）；L2：玩家條件的落子模型或 metric learning 風格 embedding（競賽一保險）；L3：多 seed 集成。
 - 各條增益都未知，GPU 估時未實測；L1 須在 10/27 前決定才趕得上 11/04。
 - **現況（2026-10-28 合併時補記）：** C2（A-025）已於 10/22 採用（D-002）；L1′ HumanSL 成為主線（A-039～A-047）；L1 以 C2 級別向量實現並成為首選（A-055／A-056），全網路微調未過（A-057）；L2 以 GE2E 實現（A-035）；L3 未過（A-033）。逐項對照見 EXECUTION_PLAN §9.1。
+
+
+### 2026-11-01：SE 幽玄十級移植第一、二步工程驗收
+
+- 使用者授權實作設定／資料 split 與有效位置索引、樣本時點對齊；最新指定預設 seed=2026（含 split），取代此實驗原定 2027。V1／V2 主線設定不變。
+- 新增 `tasks/strength/reproduce_paper/{config,prepare,dataset}.py`、`configs/se_seed2026.json`。沿用唯一 CV API 與 packed cache；每級 80/20、指定玩家 `ply >= 30`，保存全部有效位置的 compact offsets／ply 索引。每盤不足七手明確報錯；manifest 記錄來源、split、玩家重疊與產物雜湊。
+- 作者固定版本查核確認輸入為落子前、最新歷史優先、當手方／對手通道及黑白回合層；policy target 為所選當手，D4 與盤面同步。value 僅提供合法機率到樣本視角的轉換函式，未補造標籤。作者 C++ 二進位逐值比對未執行。
+- 驗證：`PYTHONPATH=src /home/jason1122/.conda/envs/go/bin/python -m pytest tests/test_reproduce_paper_data.py -q` → **7 passed in 6.80s**。涵蓋合成十級 split／有效位置、重用與衝突、位置不足、提子／歷史／padding／白方、八種 D4 × 361 座標及 pass、value 視角與非法值、pickle 與兩個 spawn workers 一致性。CLI `prepare --help` 通過。
+- 未執行官方全量準備、KataGo 分析、GPU 訓練或 centroid 推論。k=5/10/15/20 分數與增益均未知；本次為工程正確性驗收。操作與來源見 `src/go_aicup/tasks/strength/reproduce_paper/README.md`。
+
+- 2026-11-01 路徑調整：依使用者要求，SE 設定檔移至專案根目錄 `configs/strength/se_seed2026.json`，預設載入路徑與操作文件同步更新。

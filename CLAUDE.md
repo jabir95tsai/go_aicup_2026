@@ -117,6 +117,8 @@ H200 佇列限制**每張 GPU 最多 12 CPU 核心、200GB 主記憶體**；200G
 
 **棋力首選改為 AH＋C（2026-10-26，使用者決定，`RESULTS.md` A-055、A-056）：** C2：凍結 HumanSL，為每個幽玄級別學兩個 384 維條件向量（本人／對手，取代 metadata 編碼器輸出），每盤 C＝10 個級別假設下本人／對手的平均 log p（20 維）。B2 以全部 Valid-S 擬合 AH＋C（`outputs/humansl_rankvec_model/model.pkl`）：S-select 0.7209 vs AH 0.7101，Valid-U 0.6934 vs 0.6833（+0.0102，玩家 bootstrap 95% [−0.0003, +0.0211]）。AH 保留為對照提交。提交流程輸出 `rank_<part>.csv`（AH＋C）、`rank_<part>_ah.csv`（AH）、`rank_<part>_allplayers.csv`（AH＋C 以 Valid-S＋Valid-U 6,442 人擬合，LB 探針候選，A-058；本地交叉擬合增益 +0.0017，量不出來）、`rank_<part>_v2_fallback.csv`。C4／C4b（全網路微調 HumanSL）試跑都未過 gate（A-057），原因推測是可施力的是玩家數而非算力。
 
+**SE 幽玄十級移植第一、二步（2026-11-01）：** 使用者指定本版預設 seed=2026，包含 game-level 80/20 split，取代 reproduce_paper 舊計畫的 2027；不改主線 V2 的 seed。已新增獨立 config、沿用唯一 CV 模組的資料準備與有效位置索引、落子前本人／對手八步歷史及同步 D4 policy 樣本組裝；操作與驗收見 `src/go_aicup/tasks/strength/reproduce_paper/README.md`。未處理官方全量資料、未生成 teacher 標籤、未啟動訓練。
+
 ### 仍待確認 ⏳
 
 | 項目 | 為什麼重要 | 何時／去哪查 |

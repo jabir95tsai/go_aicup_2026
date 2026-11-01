@@ -59,3 +59,7 @@
 - 作者程式：[rlglab/strength-estimator](https://github.com/rlglab/strength-estimator/tree/d9498964e2ba84b5798c40e3f5b8a91a8791d66c)，`iclr2025`／commit `d9498964e2ba84b5798c40e3f5b8a91a8791d66c`，GPL-3.0；僅閱讀 README、Go configs、網路、訓練、抽樣與評估邏輯，未複製或納入程式。
 - 用途：盤點現有 V1／shared 管線可重用處，辨識資料、分組 loss、auxiliary heads 與 centroid 解碼差異。產物：`src/go_aicup/tasks/strength/reproduce_paper/README.md`。
 - 狀態：候選／計畫待確認；未新增外部訓練資料、未訓練、無分數貢獻。OpenAI Codex 協助閱讀與撰寫本次盤點文件。
+
+## 2026-11-01：SE 第一、二步實作查核
+
+沿用上列作者固定版本，補閱 `strength/misc/game_wrapper.cpp`、`strength/trainer/st_data_loader.cpp` 及內嵌 MiniZero 的 `minizero/minizero/environment/{base/base_env.h,go/go.cpp}`，確認落子前輸入、當手 policy target、本人／對手歷史順序與零 padding。僅閱讀參考，未複製或納入作者程式碼；本專案沿用既有 packed cache，自行撰寫設定、索引準備、樣本轉換與合成驗證。沒有外部訓練資料或新模型分數。OpenAI Codex 協助本次實作與驗證。來源連結與契約見 `src/go_aicup/tasks/strength/reproduce_paper/README.md`。
