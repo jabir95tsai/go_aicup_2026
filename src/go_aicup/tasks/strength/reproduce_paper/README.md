@@ -392,3 +392,26 @@ samples = PaperDataset(
 匯出失敗時保留續跑資料；清理中斷時重跑相同 `--export` 接續清理。完成後重跑 export 只檢查既有 v 的長度、dtype 與數值範圍，不重新啟動引擎；原標籤生成命令會拒絕重新建立分片。Dataset 僅讀取 value.npy，檢查形狀／dtype 及讀取樣本值。因最終不保留 manifest，無法再驗證同長度檔案的來源或 teacher 身分，須將 label_dir 指向正確的 split／資料版本。
 
 本次僅修改程式、文件與未執行的驗收案例，沒有執行計算、測試或刪除現有產物。
+
+### Nano4 Slurm 執行
+
+腳本：`slurm/label_value.slurm`。預設 `8gpus` partition、單節點 8 張 H200、8 tasks（每 task 1 GPU／12 CPU）、總 RAM 128GB、時限 48 小時。這是資源申請上限，並非實測完成時間；未量測 GPU-hours。執行前須已有 prepare 產物，腳本不自動重新準備資料。
+
+從 repo 根目錄提交，第一個參數必須是已選定的正整數 visits：
+
+```bash
+# 先設定 VISITS；此處不替正式預算選值。
+sbatch slurm/label_value.slurm "$VISITS"
+
+# 也可指定輸出位置與單一 split。
+sbatch slurm/label_value.slurm "$VISITS" \
+  data/processed/reproduce_paper/value_v1 train
+```
+
+預設依序執行 train、valid，各 split 內啟動八個分片；所有分片成功才執行 `--export`，完成後各目錄只留 `value.npy`。任一分片失敗即停止，保留續跑資料；修正問題後以相同 visits、task 數、設定、輸出目錄重提。遭 Slurm 強制終止時，先確認所有原作業程序停止，再移除殘留 `.writer.lock` 才能續跑。已完成的 split 只重新檢查匯出檔，不啟動 teacher。
+
+預設使用 `$HOME/.conda/envs/go/bin/python`，可透過 `PYTHON_BIN`、`CONFIG` 環境變數覆寫；工作目錄沿用既有腳本固定為 `/work/jason1122/go_aicup_2026`；Slurm 負責每個 task 的 GPU 綁定，不手動覆寫 `CUDA_VISIBLE_DEVICES`。account 預設 `GOV115094`，需變更時用 `sbatch --account=你的account ...` 覆寫。KataGo 的 `LD_LIBRARY_PATH` 沿用 `slurm/humansl.slurm` 的 `data/external/cuda-libs-12.8/{lib,stdcxx}`。若改為單卡，可加 `--ntasks=1 --mem=16G`，但既有分片數不得改變，須使用新輸出目錄。Slurm 自己的 stdout／stderr 合併至 `outputs/slurm-se-value-JOBID.out`（提交前確保 outputs 目錄存在），不混入 label 目錄。
+
+本次僅撰寫 `.slurm`，未提交作業、執行計算或測試。
+
+腳本亦沿用既有環境變數寫法：`VISITS="$VISITS" RUN=data/processed/reproduce_paper/value_v1 SPLIT=both sbatch slurm/label_value.slurm`。位置參數仍可使用且優先於環境變數。`slurm/` 依既有 `.gitignore` 規則為本機腳本目錄，本次未變更忽略規則。
