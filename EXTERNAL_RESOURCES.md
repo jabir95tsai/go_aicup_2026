@@ -52,3 +52,10 @@
 | PyTorch 官方安裝與分散式文件 | [歷史版本安裝](https://docs.pytorch.org/get-started/previous-versions/)、[Distributed](https://docs.pytorch.org/docs/2.6/distributed.html)、[torchrun](https://docs.pytorch.org/docs/2.6/elastic/run.html)；2026-10-11 | Windows／Linux CUDA 12.4 依賴來源與單節點 NCCL／DDP 環境檢查 | 使用中（文件引用與 API 使用） | 環境相容性設定，非模型增益；Nano4 尚未實測 |
 | PyTorch 2.6 DataLoader／可微 collective／SyncBN 官方文件與原始碼 | [DataLoader](https://docs.pytorch.org/docs/2.6/data.html)、[可微 all-reduce](https://raw.githubusercontent.com/pytorch/pytorch/v2.6.0/torch/distributed/nn/functional.py)、[DDP](https://github.com/pytorch/pytorch/blob/v2.6.0/torch/nn/parallel/distributed.py)、[SyncBN](https://github.com/pytorch/pytorch/blob/v2.6.0/torch/nn/modules/_functions.py)；2026-10-11；2026-10-12 補閱 DataLoader／可微 SUM API | STRENGTH_V1_IMPLEMENTATION.md 與 V1 程式：批量讀取、全域級別平均梯度尺度與尾批 BN；閱讀 API，未複製外部程式碼 | 使用中（程式已撰寫，未驗證） | 無模型分數或 Nano4 效能增益數字；梯度、SyncBN 與續跑待實測驗收 |
 | NVIDIA CUDA 12.4 Release Notes | [driver 相容表](https://docs.nvidia.com/cuda/archive/12.4.0/cuda-toolkit-release-notes/index.html)；2026-10-11 | 查核 Linux CUDA 12.4 driver 基準與 minor compatibility 限制 | 使用中（文件引用） | 環境參考，非效能實測 |
+
+## 2026-10-30：Strength Estimator 重現前置查核
+
+- 論文：本機 `reference/2502.17109v2.pdf`（ICLR 2025，含附錄 A–C）；既有方法參考列的延伸查核。
+- 作者程式：[rlglab/strength-estimator](https://github.com/rlglab/strength-estimator/tree/d9498964e2ba84b5798c40e3f5b8a91a8791d66c)，`iclr2025`／commit `d9498964e2ba84b5798c40e3f5b8a91a8791d66c`，GPL-3.0；僅閱讀 README、Go configs、網路、訓練、抽樣與評估邏輯，未複製或納入程式。
+- 用途：盤點現有 V1／shared 管線可重用處，辨識資料、分組 loss、auxiliary heads 與 centroid 解碼差異。產物：`src/go_aicup/tasks/strength/reproduce_paper/README.md`。
+- 狀態：候選／計畫待確認；未新增外部訓練資料、未訓練、無分數貢獻。OpenAI Codex 協助閱讀與撰寫本次盤點文件。
