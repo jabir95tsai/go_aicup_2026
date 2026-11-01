@@ -2,6 +2,8 @@
 
 分階段實作範圍、進度與驗收目標見 [plan.md](plan.md)。
 
+**2026-11-01 最新決策：逐有效落子前盤面各自分析並取得 v，取代先前末盤共用 target。第三步 script 已撰寫，依要求未執行計算或測試。**
+
 本目錄專用於 Chen、Shih、Wu，*Strength Estimation and Human-Like Strength Adjustment in Games*（ICLR 2025，arXiv:2502.17109v2）的重現。
 
 - 分支：`reproduce/2502.17109v2`
@@ -31,7 +33,7 @@ Adam、AdamW、Muon 或其他 optimizer 的比較不列入目前重現範圍。�
 | Centroid 資料 | 使用全部 800,000 盤 training 棋局的指定玩家有效位置（`ply >= 30`），按位置等權計算各級平均，不抽一小部分棋局或每盤只取七手 |
 | 80/20 split | 每級按棋局隨機切分為 80,000／20,000 盤，split seed 固定為 2026，首次沿用 `data.cv.make_strength_v1_split` 產生；所有本目錄訓練 run 共用同一份切分表，記錄玩家重疊 |
 | KataGo 規則／貼目 | 日本規則、貼目 6.5；是 teacher 分析假設，不是原局規則已知值 |
-| 本次範圍 | 僅基本 SE 三頭模型、末盤 soft value 偽標籤與對應評估；不實作／訓練 SLsum、SLvote，也不建立 SL 對照 gate |
+| 本次範圍 | 僅基本 SE 三頭模型、逐有效盤面 soft value 偽標籤與對應評估；不實作／訓練 SLsum、SLvote，也不建立 SL 對照 gate |
 
 本版總 loss 採 `L_BT + L_policy + L_value`，各項初始權重為 1。SE-infinity 維持排除。BF16、BN 行為、teacher visits 與監控頻率等屬原始碼查核／短測項目，並非以上五項決策尚待確認。
 
@@ -111,36 +113,15 @@ SGD：momentum=0.9、weight_decay=0.0001。第 1–100,000 次更新用 LR=0.01�
 - **已確認位置規則（2026-10-30）：training、validation 與 centroid 計算均排除全局第 1–30 手**，零起算 `ply >= 30`，並且須屬於指定玩家。八步歷史保留真實盤面，不把歷史中較早的盤面清空。Training 每次抽七個不同位置前先確認有足夠有效位置，否則報告資料問題，不靜默改成重複抽樣。Validation 與 centroid 按相同有效位置規則推論、聚合，不限每盤七手。
 - 本版每步 SE：`128 × 10 × 7 = 8,960` 個位置，32,500 steps 共 `291,200,000` 次位置使用（含重複）。這不是 800,000 盤資料被完整讀取的次數保證。
 - 十級、盤數、切分、前 30 手排除及指定玩家取樣均為競賽版差異。原論文用 Fox 十一級，未設定排除前 30 手；完全原版結果重現需撤回這些差異並準備原始資料。
-- 已確認使用既有 KataGo 強引擎分析各盤末盤，產生 soft value 偽標籤監督 value head；不再以 scalar-only 作為本版預設方向。此監督不同於論文的真實勝負，仍須明記為偏離；policy head 的輸入時點與 target 對齊另行驗證。
-- Centroid 僅由 training 資料計算，使用相同的 `ply >= 30` 與指定玩家位置規則；已確認使用全部 800,000 盤 training 棋局的有效位置，按位置等權。Validation 不用於抽訓練樣本、擬合 centroid 或選切點。末盤 teacher 分析仍使用完整棋譜，位置篩選不裁切重播歷史。
+- 已確認使用既有 KataGo 強引擎分析每個有效落子前盤面，產生 soft value 偽標籤監督 value head；不再以 scalar-only 作為本版預設方向。此監督不同於論文的真實勝負，仍須明記為偏離；policy head 的輸入時點與 target 對齊另行驗證。
+- Centroid 僅由 training 資料計算，使用相同的 `ply >= 30` 與指定玩家位置規則；已確認使用全部 800,000 盤 training 棋局的有效位置，按位置等權。Validation 不用於抽訓練樣本、擬合 centroid 或選切點。逐位置 teacher 使用該位置之前的完整歷史，不裁切開局。
 
-### 從末盤盤面重建勝負的可行性（2026-10-30）
+### 逐有效盤面 soft value（2026-11-01 最新決策）
 
-使用者提出從棋盤重建勝負。本次唯讀抽查十個 CSV 各前 100 盤，共 1,000 盤，SGF 非落子 property 只有 SZ，pass 紀錄為零；與 CLAUDE.md 既有全量稽核一致。這不能證明所有棋局都尚未終局，也不能證明棋譜從未移除 pass；只能確認現有資料無法藉這些欄位辨識終局與結束原因。
+原末盤共用 target 方案由使用者明確改為逐盤面分析。每個有效 `ply` 對應落子前盤面，由強 KataGo 在日本規則／6.5 貼目下各自估計 `p_black`。黑方 v=`2*p_black-1`，白方取負；不硬分類、不當成原局真實勝負、不寫入 RE。同局不同位置不再共用末盤 v。
 
-逐手重播可以還原最後盤面與提子歷史，但末盤盤面不唯一決定實際結果：認輸、超時等結束原因已缺失；規則與貼目未知；死活、雙活與尚未完成的官子不能用單純棋子數或空區連通塊保證判定。SGF 的 RE 本來可分別記錄點數勝、認輸勝、超時勝等（[SGF 規格](https://www.red-bean.com/sgf/properties.html#RE)）。
+原資料無勝負結果，這仍是 teacher 偽標籤，與論文 outcome supervision 不同。規則／貼目是分析假設，visits、品質門檻與成本待 training 小樣本短測，不能依 validation rank 挑選。
 
-**已確認方向（2026-10-30）：** 用既有 KataGo 強引擎，在明確固定規則／貼目下分析末盤，保存黑方 win probability、score estimate、信心與來源，再轉為適當視角的 soft value target。這是引擎偽標籤，不是恢復的原局勝負，也不是論文的真實 outcome target；不得將其寫入 RE 或冒充官方 truth。接近勝負邊界或對設定敏感的盤面需另行處理。原始紀錄維持唯讀。
-
-目前已確認採用末盤 soft value 偽標籤；尚未生成標籤或啟動分析作業。規則／貼目已確認為日本規則／6.5；分析預算與品質處理細節由短測制定。偽標籤生成不依賴 validation rank，也不能用 validation 成績反覆挑選生成規則。
-
-### 已確認的末盤 soft value 計畫
-
-1. **固定 teacher 與分析設定。** 沿用已登記的 KataGo 強網路與 analysis engine（不使用 HumanSL 作為末盤 teacher）。記錄引擎／網路 SHA-256、分析 config、規則、貼目、visits 與勝率視角。規則／貼目已確認為日本規則／6.5，屬分析假設，並非原棋局已知條件；visits 由短測決定。
-2. **逐盤重播完整棋譜，只查詢末盤。** 保留全部落子歷史與實際顏色，不截掉開局、不加虛構 pass、不自動續弈。每盤輸出一筆末盤分析；不能直接呼叫既有逐位置抽特徵流程，造成整盤所有位置都被查詢。沿用 `features/katago_engine.py` 的引擎啟動、JSON 協定與結果解析概念，另建專用末盤入口。
-3. **保存獨立偽標籤表。** 以 `game_index` 及 `(rank, game_id)` 對齊，保存黑方 `p_black`、黑方 score estimate、實際 visits、可取得的不確定性欄位、成功／失敗狀態與來源 manifest。引擎失敗、非有限值或勝率越界不能填成 0.5 或硬勝負；重試後仍失敗者必須標記並在正式訓練前處理。
-4. **轉為 value target。** 先存標準化的黑方勝率；若 value head 輸出 [-1,1]，黑方 soft target 為 `2*p_black-1`，白方為其相反數。樣本採哪方視角，須依模型輸入時點／顏色定義一致轉換。該盤不同被抽位置使用同一個末盤 teacher target，再依視角取正負，不重新分析每個訓練位置；不對 p 做 0.5 門檻硬分類。
-5. **訓練監督。** Value head 使用 MSE 監督 soft target，初始 loss 權重規劃沿用論文的 1。與分組 ranking loss 及對齊後的人類著手 policy CE 等權相加；三頭模型已確認納入本版。末盤 teacher 的目數只作診斷，不混成另一個 value 目標。Validation 的 value MSE 代表對 teacher 的一致程度，不代表預測原局勝負的準確率。
-6. **品質與成本短測。** 固定 training 小樣本，檢查黑白視角、末盤位置與 teacher 輸出；在已確認的日本規則／6.5 下，比較少量不同 visits 的穩定性，再確定正式分析 visits 與品質處理。高勝率不等於標籤正確；接近 0.5 可保留為 soft target，不能僅為了得到更多硬標籤而強制分類。若設定品質 gate，只遮罩／加權 value loss，不靜默刪掉該盤的 ranking 樣本或破壞十級分組。
-7. **分片產生並可續跑。** 以 GPU 分片處理各盤，定期落盤、記錄失敗與吞吐；先完成 training 所需的 800,000 盤標籤。Validation 的 200,000 盤如需報告 value MSE，再以相同凍結 teacher 設定獨立生成；不擬合生成規則，也不進入訓練。正式大規模分析前回報估時、GPU-hours 與磁碟需求。
-
-實作順序調整為：config／資料 split 與有效位置索引 → 末盤分析入口與短測 → teacher 偽標籤分片準備 → 分組 sampler → strength/policy/value 三頭模型與 loss → 單卡／DDP 短測與續跑 → centroid 推論評估 → 正式訓練。Policy head 已確認同版加入；輸入與 target 時點屬實作前查核／驗證項目。SE-infinity 維持排除。
-
-### 8×H200 的訓練配置規劃
-
-Global 128 組，8 張卡各分配 16 個完整組；競賽版 SE 每卡 `16 × 10 × 7 = 1,120` 個位置。每卡平均自己的 16 組 loss，DDP 再平均梯度，得到全域 128 組平均的排序目標，不能像現有 V1 那樣先合併全域各級平均再計 loss。
-
-卡數不改變已確認的 LR 0.04／0.02 或全域 32,500 次更新；普通 BN／SyncBN 與精度差異另行核對作者行為。先量測吞吐與數值一致性，再估正式訓練成本；對齊更新數不代表跨硬體 wall time、GPU-hours 或數值軌跡相同。
 
 ## 先盤點目前可以沿用的程式
 
@@ -186,11 +167,11 @@ Global 128 組，8 張卡各分配 16 個完整組；競賽版 SE 每卡 `16 × 
 
 ### 範圍與資料選擇
 
-本次實作 Go strength estimation：基本 SE 三頭模型、末盤 soft value 偽標籤與 §4.2 的對應棋力評估。SLsum／SLvote 已明確移出範圍。§4.4 的 2-rank／3-rank、附錄 B 的位置消融、SE-MCTS 與 chess 均非本次必要實作，整篇尚不能宣告重現完成。
+本次實作 Go strength estimation：基本 SE 三頭模型、逐有效盤面 soft value 偽標籤與 §4.2 的對應棋力評估。SLsum／SLvote 已明確移出範圍。§4.4 的 2-rank／3-rank、附錄 B 的位置消融、SE-MCTS 與 chess 均非本次必要實作，整篇尚不能宣告重現完成。
 
 原始結果重現需要 Fox 原始資料、十一級標註、勝負結果與 candidate/query 清單。作者 README 要求自行準備 Fox SGF，未提供可直接視為同一份實驗資料的固定清單。原始切分與玩家是否互斥仍待確認；不能從本文的 separate dataset 推定 player-disjoint。
 
-使用者已選擇現有官方資料，明確命名為「幽玄十級方法移植」。官方資料沒有勝負結果，無法忠實監督 value head；不得補造勝負或以另一模型的估值冒充論文標籤。本版使用基本 SE 加末盤 teacher soft value supervision，不安排 SL 對照；teacher 偽標籤取代真實勝負、資料來源與十級設定全部記為偏離。SE-infinity 及其合法著手生成與驗收皆不在本次範圍。
+使用者已選擇現有官方資料，明確命名為「幽玄十級方法移植」。官方資料沒有勝負結果，無法忠實監督 value head；不得補造勝負或以另一模型的估值冒充論文標籤。本版使用基本 SE 加逐有效盤面 teacher soft value supervision，不安排 SL 對照；teacher 偽標籤取代真實勝負、資料來源與十級設定全部記為偏離。SE-infinity 及其合法著手生成與驗收皆不在本次範圍。
 
 ### 本目錄的程式配置
 
@@ -198,9 +179,9 @@ Global 128 組，8 張卡各分配 16 個完整組；競賽版 SE 每卡 `16 × 
 
 - `config.py`：資料模式、級別順序、模型、分組抽樣、loss 規則、schedule 與 paths。
 - `dataset.py`：包裝既有 store/cache，提供每組各級同盤指定玩家的 7 個不同位置，並讀取對齊的每盤 soft value target。
-- `label_value.py`：KataGo 強引擎末盤分析、分片、續跑與偽標籤 manifest；不覆寫原始棋譜或 RE。
+- `label_value.py`：KataGo 強引擎逐有效盤面分析、分片、續跑與偽標籤 manifest；不覆寫原始棋譜或 RE。
 - `model.py`：與作者固定版本對齊的 backbone、strength/policy/value 三個 heads。
-- `losses.py`：`[groups, ranks, 7]` 分組平均與排序 loss；加入末盤 soft target 的 value MSE；policy auxiliary loss 於輸入／target 對齊後處理。
+- `losses.py`：`[groups, ranks, 7]` 分組平均與排序 loss；加入逐有效盤面 soft target 的 value MSE；policy auxiliary loss 於輸入／target 對齊後處理。
 - `prepare.py`：呼叫唯一資料與 split 模組，保存本實驗 manifest，不重寫 parser 或 split。
 - `train.py`：128 組／step、32,500-step SGD、單卡／DDP、checkpoint、續跑與成本紀錄。
 - `infer.py`：保存逐手 score、各盤 score_sum 與 position_count，支援位置加權平均。
@@ -360,3 +341,54 @@ PYTHONPATH=src python -m pytest tests/test_reproduce_paper_data.py tests/test_re
 ```
 
 結果 **24 passed in 7.17s**。新增驗證包含：更改訓練 seed／模型 channels／output_dir／loader 後不重抽且資料雜湊與修改時間不變；不同訓練 seed 初次建置結果一致；非法 split_seed 拒絕；共用索引損壞偵測；完整 synthetic cache → prepare → questions 在 seed 3030／4040 下共用完全相同產物。未執行官方全量準備或訓練。
+
+
+## 第三步：準備每個有效盤面的 v（程式已撰寫，未執行）
+
+先具備 `prepare.py` 產物。本次沒有啟動 prepare、teacher、測試、GPU 或訓練。
+以下命令供之後使用，`VISITS` 必須先由 training 短測決定；不提供預設正式預算。
+
+```bash
+# 固定 training 前 100 局；同一小樣本比較不同 visits 時必須換 out。
+python -m go_aicup.tasks.strength.reproduce_paper.label_value \
+  --out outputs/rank/reproduce_paper/value_pilot_v32 --split train \
+  --visits 32 --limit-games 100
+
+# 正式分片範例：每個 worker 各自使用 shard 0..7，指定自己的 GPU。
+python -m go_aicup.tasks.strength.reproduce_paper.label_value \
+  --out data/processed/reproduce_paper/value_v1 --split train \
+  --visits "$VISITS" --num-shards 8 --shard 0
+
+# 全部分片成功後匯出一個 sample_index 對齊的 v 向量（此命令不啟動引擎）。
+python -m go_aicup.tasks.strength.reproduce_paper.label_value \
+  --out data/processed/reproduce_paper/value_v1 --split train --export
+```
+
+上例 32 visits 僅示範小樣本呼叫，不是已通過品質 gate。完整 valid 也要取得 v 時，用同一組 teacher 設定改 `--split valid` 分片執行與匯出。以 `CUDA_VISIBLE_DEVICES` 配置各 worker；不會自動提交 Slurm 或啟動多 GPU。`--engine-config` 可指定執行配置，變更後須使用新輸出版本。
+
+每個 `<out>/<split>/shard_XXXXX/` 保存與該分片有效位置同序的 `value.npy`、`p_black.npy`、`score_black.npy`、`score_stdev.npy`、`visits.npy`、`status.npy` 及來源 manifest。分片按共用 game array 的 row modulo 分配，局內按原有效 ply 排序。狀態 0=未完成、1=成功、2=失敗；缺失值為 NaN。每局完成先 flush 數值再提交 status，`--retries` 預設 2 次；重跑相同命令只處理非成功位置。錯誤見 `failures.jsonl`／`katago_stderr.log`。硬中斷留下 `.writer.lock` 時先確認原程序已停止再移除鎖。
+
+`--export` 要求每個有效位置成功、分片完整、來源與 teacher 身分一致，才發布 `<out>/<split>/value.npy` ，成功後自動刪除該 split 的所有分片、續跑狀態、log、暫存檔及 manifest，只留 `value.npy`。其 shape 為 `(有效位置數,)`，dtype=float32，與 `{split}_ply.npy`、`PaperDataset` 的 sample_index 完全同序。透過原 game／offsets／ply 索引和已綁定雜湊的 games.parquet 回溯 `(rank, game_id, ply)`，不重複儲存大量字串。生成及匯出驗證期間以 SHA-256 綁定來源、引擎、強網路、設定及程式，完成清理後不保留這些追溯檔；只接受已登記 kata1 強網路，不使用 HumanSL。
+
+```python
+from go_aicup.tasks.strength.reproduce_paper.dataset import PaperDataset
+samples = PaperDataset(
+    'data/processed/reproduce_paper/seed2026', split='train',
+    label_dir='data/processed/reproduce_paper/value_v1/train',
+)
+# samples[i]['value_target']: 此盤面、指定玩家視角的 v
+# samples[i]['value_weight']: 1.0；未提供 label_dir 時不輸出虛構 v。
+```
+
+目前只提供完整標籤模式，失敗位置須重試成功才可匯出；不刪除 ranking 樣本。scoreStdev 如引擎未提供則為 NaN，不能冒充信心。品質遮罩／權重政策仍待短測。
+
+成本以「有效位置數／實測 positions/s」估算；各分片每位置 21 bytes 數值陣列，匯出 v 額外 4 bytes（尚不含來源、log 與暫存匯出檔）。全量磁碟、RAM 與 GPU-hours 未實測。新增 `tests/test_reproduce_paper_value.py` 僅供後續驗收，本次未執行。
+
+
+### 完成後只保留 value.npy（2026-11-01）
+
+`--export` 完成完整性檢查並原子發布後，自動清除該 split 的 `shard_*`、status、log、暫存檔與 manifest。最終輸出僅為 `<out>/train/value.npy`、`<out>/valid/value.npy`（依實際完成的 split）。原始 cache／prepared 索引與其他 split 不受影響。
+
+匯出失敗時保留續跑資料；清理中斷時重跑相同 `--export` 接續清理。完成後重跑 export 只檢查既有 v 的長度、dtype 與數值範圍，不重新啟動引擎；原標籤生成命令會拒絕重新建立分片。Dataset 僅讀取 value.npy，檢查形狀／dtype 及讀取樣本值。因最終不保留 manifest，無法再驗證同長度檔案的來源或 teacher 身分，須將 label_dir 指向正確的 split／資料版本。
+
+本次僅修改程式、文件與未執行的驗收案例，沒有執行計算、測試或刪除現有產物。

@@ -1485,3 +1485,15 @@ split 1／2 分開：保險單獨 0.9385／0.9343，融合 0.9865／0.9828，融
 - Manifest identity 更新為 version 2、欄位 split_seed，不包含訓練 seed、模型 channels、run output_dir、loader 或題數；共用切分及位置索引檔不因這些訓練設定改寫。舊 manifest 以身分衝突明確拒絕，不靜默覆寫或遷移。題組與 PaperDataset 接上新格式；D4 可使用獨立傳入的訓練 seed。
 - 驗證：`PYTHONPATH=src /home/jason1122/.conda/envs/go/bin/python -m pytest tests/test_reproduce_paper_data.py tests/test_reproduce_paper_questions.py -q` → **24 passed in 7.17s**。新增跨 seed 不呼叫切分器且檔案雜湊／修改時間不變、不同 seed 初次建置結果一致、非法 split_seed 拒絕、損壞索引拒絕，以及 800 盤合成 cache→prepare→questions 在 seed 3030／4040 下共用相同產物的整合驗收。
 - 僅 reproduce_paper 程式與文件修改；官方全量資料準備、teacher、訓練、模型 checkpoint 續跑尚未執行。k=5/10/15/20 成績與增益未知。
+
+
+### 2026-11-01：reproduce_paper 第三步逐有效盤面 v script
+
+- 使用者明確指定逐有效落子前盤面各自分析，取代末盤共用 teacher target；有效位置仍為指定玩家且 ply >= 30。
+- 新增 `src/go_aicup/tasks/strength/reproduce_paper/label_value.py`、`configs/strength/se_value_analysis.cfg`，並接入 `PaperDataset(label_dir=...)`。分片逐位置紀錄勝率、v、目數、不確定性（如有）、visits 與狀態，支援重試／續跑、來源與 teacher 身分檢查及完整匯出。每個 split 的 value.npy 與原有效位置索引一對一對齊。
+- 依使用者「不要執行計算」要求，僅撰寫程式／文件／測試，未執行任何測試、資料準備、標籤生成或訓練；不宣稱驗收通過。visits／品質政策與全量成本仍待短測；k=5/10/15/20 模型分數與增益未知。操作見 reproduce_paper README。
+
+
+### 2026-11-01：逐盤面 value 完成後只留 value.npy
+
+依使用者要求，reproduce_paper 的 `label_value --export` 在驗證全部位置並原子發布後，自動清除該 split 的分片、續跑狀態、log、暫存檔與 manifest，只留下 value.npy。未成功匯出保留續跑資料；清理中斷可重跑 export 接續。Dataset 改為單檔讀取，保留 shape／dtype／樣本值檢查；完成後不再保留來源或 teacher 雜湊驗證能力。僅修改程式與文件、補寫未執行的測試；沒有計算、測試或刪除既有產物。

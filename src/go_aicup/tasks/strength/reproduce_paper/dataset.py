@@ -73,11 +73,11 @@ class PaperDataset:
 
     Tasks may be (sample_index, augmentation_round); round is carried in each
     task for deterministic persistent-worker use. This is not a group sampler.
-    Value supervision is attached by the later teacher stage; missing labels
-    are intentionally absent from these samples.
+    Optional exported teacher labels follow the same sample_index ordering.
+    Without label_dir, value supervision remains absent.
     """
     def __init__(self, directory, split='train', *, augment=False, seed=None,
-                 max_open_shards=8, cache_dir=None):
+                 max_open_shards=8, cache_dir=None, label_dir=None):
         if split not in ('train', 'valid'):
             raise ValueError("split must be train or valid")
         if max_open_shards < 1:
@@ -95,11 +95,16 @@ class PaperDataset:
         self._indices = None
         self._moves = OrderedDict()
         self._pid = None
+        self.label_dir = Path(label_dir).resolve() if label_dir is not None else None
+        self._values = None
 
     def __len__(self):
         return self._length
 
     def close(self):
+        if self._values is not None:
+            _close_mmap(self._values)
+            self._values = None
         if self._cache is not None:
             self._cache.close()
         if self._indices is not None:
@@ -112,7 +117,7 @@ class PaperDataset:
 
     def __getstate__(self):
         state = self.__dict__.copy()
-        state.update(_cache=None, _indices=None, _moves=OrderedDict(), _pid=None)
+        state.update(_cache=None, _indices=None, _moves=OrderedDict(), _pid=None, _values=None)
         return state
 
     def _ensure_open(self):
@@ -135,6 +140,11 @@ class PaperDataset:
                     or offsets[-1] != len(plies) or len(plies) != len(self)
                     or np.any(np.diff(offsets) < 7)):
                 raise ValueError("invalid compact sample indices")
+            if self.label_dir is not None:
+                path = self.label_dir / 'value.npy'
+                self._values = np.load(path, mmap_mode='r', allow_pickle=False)
+                if self._values.dtype != np.float32 or self._values.shape != (len(self),):
+                    raise ValueError('invalid teacher value shape/dtype')
             self._pid = os.getpid()
         except Exception:
             self.close()
@@ -183,6 +193,12 @@ class PaperDataset:
                 'rank_id': int(self._cache.rank_ids[games[row]]),
                 'player_color': int(colors[row]), 'game_index': int(games[row]),
                 'ply': int(plies[row]), 'sample_index': int(index), 'd4': transform})
+            if self._values is not None:
+                value = float(self._values[index])
+                if not np.isfinite(value) or abs(value) > 1:
+                    raise ValueError('invalid teacher value')
+                output[-1]['value_target'] = value
+                output[-1]['value_weight'] = 1.0
         return output
 
     def __getitem__(self, task):

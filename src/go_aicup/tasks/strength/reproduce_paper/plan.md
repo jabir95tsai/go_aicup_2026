@@ -11,7 +11,7 @@
 - 使用官方幽玄十級資料移植基本 SE 方法，建立 strength／policy／value 三頭模型。
 - 沿用唯一 parser、既有 packed board cache，以及 `data.cv` 的資料切分與題組產生介面。
 - 按級別抽棋局、同盤指定玩家抽七個不同有效位置，分組計算 Bradley–Terry 排序 loss。
-- 使用既有 KataGo 強引擎分析完整棋譜的末盤，產生 soft value 偽標籤並保存來源。
+- 使用既有 KataGo 強引擎分析每個有效落子前盤面，產生 soft value 偽標籤並保存來源。
 - 單卡與單節點 DDP 訓練、固定更新數的 SGD schedule、checkpoint 與可重現續跑。
 - 全量 training centroid、nearest-centroid 解碼及固定 validation 題組的分 k 評估。
 - 對應論文 §4.2 的評估流程；與競賽題組流程分開列報，明記資料與 protocol 差異。
@@ -110,35 +110,37 @@
 
 現有第一、二步測試：`tests/test_reproduce_paper_data.py`，七項測試已通過。這僅代表合成資料工程驗收，不代表官方全量資料或 GPU 訓練已驗收。
 
-### 第三步：末盤 teacher 入口、品質短測與標籤準備
+### 第三步：逐有效盤面 teacher 與標籤準備
 
-**狀態：待實作。依賴：第一、二步。**
+**狀態：script 與 dataset 接線已撰寫；依使用者要求不執行計算或測試，工程驗收及品質短測待執行。**
 
-實作範圍：新增 `label_value.py`；沿用既有引擎協定，逐盤重播完整棋譜，只分析末盤。保存每盤 `p_black`、黑方 score estimate、實際 visits、可用的不確定性、狀態與來源 manifest；支援分片、重試、續跑，將標籤接入 dataset。
+2026-11-01 使用者明確改為「逐有效盤面分析，各自取得 v」，取代原末盤共用標籤。有效位置維持指定玩家且 `ply >= 30`，每個落子前盤面各自分析。Teacher 只收到所需歷史 prefix，不加入虛構 pass、不續弈、不改寫 RE。
 
-驗收目標：
+交付：`label_value.py`、`configs/strength/se_value_analysis.cfg`、`PaperDataset(label_dir=...)`。逐位置保存 `p_black`、指定玩家視角 `value`、黑方 `score_black`、可用的 `score_stdev`、實際 visits 與 status；缺少 scoreStdev 保存 NaN，並不視為已知信心。依固定 game rows 分片，失敗重試與續跑保留成功位置，來源／teacher／分片設定不同拒絕混用。棋局來源表及索引雜湊綁定 `game_index`、`(rank, game_id)` 與 ply。
 
-- 每個成功輸出的棋局只有一筆有效末盤結果，以 `game_index` 與 `(rank, game_id)` 雙重對齊。
-- 記錄引擎／網路 SHA-256、規則、貼目、分析設定與勝率視角；不使用 HumanSL 作為強 teacher。
-- 不加虛構 pass、不自動續弈、不覆寫 SGF／RE；失敗不補成 0.5 或硬勝負。
-- 在固定 training 小樣本比較 visits，量測勝率穩定性、失敗率與 games/s，凍結 visits／品質處理，數值門檻由短測結果明列，不能事後依 validation rank 調整。
-- 續跑不重複已成功資料，來源不同的分片不能混合。
-- 品質遮罩／權重只影響 value loss，不刪掉 ranking 樣本或破壞十級分組；正式訓練前每盤標籤都有明確處理狀態。
-- 全量前回報 800,000 盤 training 的時間、GPU-hours、RAM 與磁碟需求，依 CLAUDE.md §9 確認長作業。Validation 若要報 value MSE，另用同一凍結設定生成 200,000 盤標籤。
+`--export` 只接受全量完整分片，輸出 `{train,valid}/value.npy`：一維 float32，與既有 `{split}_ply.npy`／dataset sample_index 精確同序，每個有效盤面恰有一個 v；完成完整性檢查及原子發布後，自動清除該 split 的分片、續跑狀態、log、暫存檔與 manifest，最終只留 `value.npy`（2026-11-01 使用者決定）。Dataset 讀取後提供 `value_target` 與 `value_weight=1`，D4 不改變 v。失敗不補 0.5／硬勝負，不刪 ranking 樣本；當前採嚴格完整標籤，尚未決定品質遮罩政策。
 
-標籤格式及小樣本流程完成後，可繼續開發第四至七步；正式訓練前須完成所需全量標籤。
+待執行驗收與正式執行 gate：
+
+- 使用已登記強網路，記錄引擎／網路／config／程式 SHA-256、規則／貼目、visits、BLACK 視角；拒絕 HumanSL。
+- 合成測試涵蓋落子前時點、完整歷史、黑白轉換、失敗與續跑、分片混用拒絕、匯出及 dataset 對齊。包含完成清理、清理中斷續作及重複匯出；目前只新增測試程式，尚未執行，未宣稱通過。
+- 固定 training 小樣本用 `--limit-games`，不同 visits 使用不同輸出目錄比較相同盤面；量測穩定性、失敗率、positions/s，凍結 visits／品質政策。`teacher.visits=null` 保留未知，執行時須明確提供正整數。
+- 全量成本須按全部有效位置數估算，不能沿用每局一次末盤的估時。短測後回報時間、GPU-hours、RAM、磁碟再啟動長作業。
+- train 與 valid 各自執行／匯出，同一 teacher 設定；valid 不用於選 visits 或品質門檻。
+
+操作見 README。本次只完成準備所有有效盤面 v 的程式，未產生任何實際 label。
 
 ### 第四步：分組 sampler 與 teacher 標籤讀取整合
 
 **狀態：待實作。依賴：有效位置索引、樣本介面及第三步標籤格式。**
 
-實作範圍：擴充 `dataset.py`，按 step 產生完整排序組，保留 `[groups, 10, 7, ...]` 結構；將已對齊的每盤 teacher target 依樣本視角接入。抽樣使用 training，不以全資料 epoch shuffle 取代分組抽樣。
+實作範圍：擴充 `dataset.py`，按 step 產生完整排序組，保留 `[groups, 10, 7, ...]` 結構；將已對齊的逐位置 teacher target 接入。抽樣使用 training，不以全資料 epoch shuffle 取代分組抽樣。
 
 驗收目標：
 
 - 每組十級各出現一次；每級七手來自同盤同一指定玩家，七手互異且都符合有效位置規則。
 - 級內按棋局均勻抽樣，不因棋局較長而提高該盤被選中的機率。
-- 同盤不同位置共用同一末盤 teacher 機率，依視角轉換；標籤錯配明確報錯。
+- 同盤不同位置各自使用該落子前盤面的 teacher 機率，依視角轉換；標籤錯配明確報錯。
 - 同 seed 與消費端 step 可重建抽樣與增強，不受 worker 數、prefetch 或續跑影響。
 - DDP 依全域組編號分配完整組；8 卡時各 16 組（1,120 個位置），無額外補齊組；保留未來跨 step 重抽同盤的合法行為。
 
@@ -214,6 +216,6 @@
 | 預設 run 輸出 | `outputs/rank/reproduce_paper/se_seed2026/` |
 | 實驗與外部資源紀錄 | `RESULTS.md`、`EXTERNAL_RESOURCES.md` |
 
-第一、二步原有程式、資料準備第二步的固定 split_seed／跨 run 共用切分，以及資料準備第五步的固定 validation 題組皆已完成，合計 24 項合成測試通過（7.17s）；八階段計畫的第三至八步尚未完成。Teacher visits／品質門檻、精度、BN／SyncBN、microbatch、監控與 checkpoint 頻率、正式成本，依後續查核與短測回填。既有官方全量資料準備、teacher 分析及正式訓練均尚未執行。
+第一、二步原有程式、資料準備第二步的固定 split_seed／跨 run 共用切分，以及資料準備第五步的固定 validation 題組皆已完成，合計 24 項合成測試通過（7.17s）；第三步 script 與 dataset 接線已撰寫但未執行驗收，第四至八步尚未完成。Teacher visits／品質門檻、精度、BN／SyncBN、microbatch、監控與 checkpoint 頻率、正式成本，依後續查核與短測回填。既有官方全量資料準備、teacher 分析及正式訓練均尚未執行。
 
-下一個工程交付為第三步的 teacher 分析入口與固定 training 小樣本短測；末盤或逐位置 target 的方案仍依已確認規格與後續決策處理，先確立標籤契約與成本後安排全量分析。
+下一步為第三步程式驗收與固定 training 小樣本短測（本次依指示不執行）；target 已確認為逐有效盤面，取得成本後再安排全量分析。
