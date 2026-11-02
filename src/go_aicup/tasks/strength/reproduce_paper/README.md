@@ -2,6 +2,8 @@
 
 分階段實作範圍、進度與驗收目標見 [plan.md](plan.md)。
 
+**目前選定（2026-11-02）：訓練預設 `channels_last=true`、`cudnn_benchmark=false`。** `se_seed2026.json` 與 `se_smoke100.json` 已同步；預設短測寫入 `outputs/rank/reproduce_paper/se_smoke100_default_8gpu/`，保留既有對照產物。下方 2×2 config 僅保留作對照，正式 35,000 步入口仍待完成。
+
 **2026-11-01 實作紀錄：** 資料準備、樣本組裝與固定題組已通過合成驗收；逐有效盤面 teacher script、dataset 標籤接線與 Slurm 腳本已撰寫，當時未執行 teacher 測試、標籤生成、GPU 或訓練作業。以下為該日的程式與驗收紀錄，不代表目前作業狀態。
 
 本目錄專用於 Chen、Shih、Wu，*Strength Estimation and Human-Like Strength Adjustment in Games*（ICLR 2025，arXiv:2502.17109v2）的重現。
@@ -475,3 +477,82 @@ DDP 每張卡必須拿相同數量的完整組，這由第四步 sampler 保證�
 2026-11-02 完整 reproduce_paper CPU 合成回歸結果為 **67 passed（27.04s）**。Gloo 全參數梯度向量相對 L2＝**1.37e-6**、最大絕對誤差＝**3.69e-7**、近零分量最大絕對誤差＝**2.68e-8**；執行命令與完整紀錄見根目錄 RESULTS。
 
 CUDA／NCCL、GPU AMP、SyncBN、microbatch、SGD schedule、checkpoint 與正式收斂仍待第六步。未載入作者權重，未做作者原程式／C++ 二進位逐值比對；沒有新增外部訓練資料。k=5／10／15／20 分數、增益與訓練成本仍未知。
+
+
+## 第六步：8×H200、100 步量測入口（2026-11-02）
+
+使用者指定只完成 8 卡 GPU 短測。新增 `train.py`、`configs/strength/se_smoke100.json`、`slurm/se_smoke100.slurm`。預設 global 128 組／每卡 16 組（1,120 個位置），256 channels／20 blocks，BF16、SyncBN、SGD、LR=0.04；前 5 步僅排除於穩態統計，不是 LR warmup。CUDA 入口拒絕非 8 processes；CPU 模式只供小模型合成測試。
+
+在專案根目錄提交（本次只實作，未提交）：
+
+```bash
+sbatch slurm/se_smoke100.slurm
+```
+
+Slurm 申請 dev、8×H200、96 CPUs、128GB RAM、4 小時上限；此為排程上限，實際耗時未知。可在新 config 調整 `microbatch_groups` 以降低顯存，但不得拆散排序組；梯度依組數加權累積，BN／SyncBN 的統計樣本隨 microbatch 大小改變。預設每卡 16 組一次完成，無跨 microbatch 累積。
+
+輸出位於 `outputs/rank/reproduce_paper/se_smoke100_8gpu/`：
+
+- `config.json`、`data_identity.json`、`environment.json`：有效設定、prepared／games／value.npy SHA-256、環境／NCCL／GPU 與程式身分。Slurm log 另記 driver。
+- `train.jsonl`：逐步、逐 rank 的三項 loss／total、當步及下一步 LR、梯度／參數／更新 L2 norm、更新相對幅度、十級 score 平均；資料等待、forward/backward、optimizer、診斷、checkpoint 秒數；CUDA allocated／reserved 峰值、RSS 與 `/proc` I/O counter 增量。Loss／score 跨卡平均，其餘數字保留各 rank。
+- `probe_summary_00000_00100.json`：暖機後最慢 rank 的端到端 mean／p50／p95、steps/s、positions/s、全程 GPU-hours、checkpoint 成本、最大單卡顯存與節點取樣 RSS，並依 35,000 步估算訓練時間／GPU-hours。分段續跑各自保存 session 摘要。
+- `last.json`、`checkpoints/`：第 50／100 步保存原子 checkpoint，只留最新一份。保存 model、optimizer、scheduler、各 rank RNG／BN buffers 與消費端 step。
+
+續跑明確指定 `--resume`，不會覆寫既有 run；中斷後只重跑最近 checkpoint 以後的步數，移除 log 中未提交步數以避免重複列。相同 config／資料 hash／程式 hash／world size 才接受續跑；`.writer.lock` 在硬中斷後可能殘留，須先確認沒有作業寫入再移除。可用相同設定在第 50 步停下，再恢復至 100 步：
+
+```bash
+sbatch slurm/se_smoke100.slurm --stop-after 50
+# 前一作業結束後再提交：
+sbatch slurm/se_smoke100.slurm --resume outputs/rank/reproduce_paper/se_smoke100_8gpu/last.json
+```
+
+量測限制：同步 CUDA、每步複製參數及有限性檢查均有成本，摘要包含診斷與 logging／彙總，不能當成移除診斷後正式訓練的純效能；分項耗時可用來歸因。RAM 為主程序與仍存活 worker RSS 的取樣總和，共享頁可能重複計算；CUDA 峰值為 PyTorch allocator，不等於整卡用量。`read_bytes`／`write_bytes` 是 OS counter，`rchar`／`wchar` 包含 cache 命中，不能直接視為平行檔案系統實體流量。有限性通過只證明沒有 NaN／Inf，收斂與穩定性須檢視曲線。
+
+本次不完成正式長訓練入口、不生成 centroid／validation 分數，也不把四個 32 組／LR=0.01 與一個 128 組／LR=0.04 的對照混入效能短測；此診斷仍屬第六步後續工作。
+
+工程驗證：完整 reproduce_paper 合成回歸 **73 passed（38.50s）**；補強未保存 log 清理後，短測入口測試重跑 **5 passed（15.52s）**。涵蓋 LR 邊界／scheduler 恢復、CPU FP32 連續／續跑參數與 loss 完全一致、兩程序 Gloo 訓練、8 卡 CUDA 限制、量測與覆寫保護。這不代表 CUDA／NCCL／SyncBN 或官方 100 步已驗收。
+
+
+## 大顯存方向一：固定訓練 batch 的運算對照
+
+新增四份獨立 100 步設定，維持 seed、模型、global 128 組、每卡 16 組、SyncBN、BF16、LR 與 checkpoint 頻率。每份寫入不同目錄，不覆寫已完成的 job 673013。
+
+| Config（`configs/strength/`） | cuDNN benchmark | channels-last |
+|---|---|---|
+| `se_smoke100_perf_baseline.json` | false | false |
+| `se_smoke100_cudnn.json` | true | false |
+| `se_smoke100_channels_last.json` | false | true |
+| `se_smoke100_cudnn_channels_last.json` | true | true |
+
+這是 2×2 對照：先各自與新基準比較，再看合用效果。原基準 673013 的實測為 3.78 steps/s、單卡 allocated 峰值約 17 GiB；本次也調整了診斷向量的非連續權重支援與多餘拷貝，應重跑同版本基準才能歸因。
+
+```bash
+CONFIG=configs/strength/se_smoke100_perf_baseline.json sbatch slurm/se_smoke100.slurm
+CONFIG=configs/strength/se_smoke100_cudnn.json sbatch slurm/se_smoke100.slurm
+CONFIG=configs/strength/se_smoke100_channels_last.json sbatch slurm/se_smoke100.slurm
+CONFIG=configs/strength/se_smoke100_cudnn_channels_last.json sbatch slurm/se_smoke100.slurm
+```
+
+`train.py` 將完整組展平成 4D position tensor 後轉換布局，forward 後恢復分組軸；模型、loss、BN 的樣本集合與更新步數不變。模型與輸入都使用相同布局。摘要新增 `channels_last`／`cudnn_benchmark`。比較暖機後吞吐、forward/backward、顯存、loss／梯度／更新幅度；cuDNN 搜尋成本會反映於前幾步及整體耗時。CPU FP32 固定 BN running stats 的第一個 update，其 loss／模型狀態以 atol／rtol=1e-5 驗證布局接線；GPU BF16 的效能與數值差異仍須實測，不自動升級任何候選。
+
+本次程式 hash 已改變，既有 probe checkpoint 不接受以新版 trainer 續跑；它仍可由下方推論入口讀取權重。PyTorch 官方介面參考：[2.6 cuDNN benchmark](https://docs.pytorch.org/docs/2.6/backends.html#torch.backends.cudnn.benchmark)、[channels-last](https://docs.pytorch.org/tutorials/intermediate/memory_format_tutorial.html)。未加入 torch.compile、新依賴或更大的訓練 batch。
+
+## 大顯存方向二：8 卡推論 batch 對照
+
+新增 `infer.py`、`configs/strength/se_infer_batch_benchmark.json` 與 `slurm/se_infer_benchmark.slurm`。使用既有 job 673013 的 checkpoint，預設 train 有效位置、無 D4、eval mode，不需要 validation teacher。每卡取固定連續 71,680 個 sample_index；八卡區間互斥，依序比較每卡 batch **1,120／2,240／4,480／8,960**。
+
+```bash
+sbatch slurm/se_infer_benchmark.slurm
+```
+
+推論 CUDA 同樣只接受 8 processes。Slurm 上限 1 小時，這不是實測估時；本次未提交。輸出在 `outputs/rank/reproduce_paper/se_infer_batch_benchmark_8gpu/`：
+
+- `benchmark.json`：逐候選／逐 rank 的位置範圍、位置數、batch 數、資料／計算／初始化耗時、RSS、OS I/O counters、CUDA allocated／reserved 峰值、最慢 rank 換算的全節點 positions/s。另保存 checkpoint／prepared／程式 SHA-256。
+- `reference_rank_XX.npy`：最小 batch 下固定位置的 scalar scores，與相應 report 的 `[sample_start, sample_stop)` 一對一對齊。後續 batch 回報最大絕對誤差與相對 L2。
+- `config.json`、`environment.json`：有效設定與執行環境。
+
+每個候選先以第一批重複 warmup 兩次；worker 啟動／第一批資料／warmup 歸入 setup，吞吐同時列出含 setup 與不含 setup 的版本。記憶體峰值涵蓋 warmup。候選順序固定由小到大，後續可能受益於 OS cache，不能把所有吞吐差異歸因於 batch。任何卡 OOM 都會彙總記錄並停止更大的 batch；其他錯誤直接失敗。不自動選最大 batch 或接受 BF16 score 差異。
+
+`infer_positions` 可供後續第七步重用，支援無補齊尾批、空分片與有界讀取，還原呼叫前的模型 train/eval 狀態。當前入口只量測固定子集，不生成正式全量 centroid、每盤聚合或 validation 成績；不宣稱第七步已完成。新增的 Slurm 腳本沿用目前 repo 的 `slurm/` 忽略規則，需納入版本控制時使用 `git add -f slurm/se_infer_benchmark.slurm`。
+
+最終 CPU 合成回歸 **79 passed（46.50s）**：包含布局訓練／續跑、固定 BN 的首步接線、推論 batch／布局／分片、兩程序推論與 OOM 停止。Training-mode BN 的 CPU FP32 布局對照 loss 差約 1e-6，但更新向量相對 L2 約 0.00303；這是未控制 BN／數值歸約時的診斷結果，不宣稱跨布局完全等價。GPU 加速與 BF16 差異尚未實測。

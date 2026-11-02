@@ -167,11 +167,11 @@
 - Policy CE、value MSE、BT 各自可報告，總 loss 權重皆為 1；有遮罩時明確記錄 value loss 的有效樣本與歸一化方式。
 - 在可控 BN 行為的 FP32 基準中，完整組計算與兩程序分組計算的 loss 相對差與全參數梯度向量相對 L2 ≤ `1e-5`；接近零的分量另報最大絕對誤差。
 
-### 第六步：訓練器、單卡／DDP 短測與續跑
+### 第六步：訓練器、8 卡 DDP 短測與續跑
 
-**狀態：待實作。依賴：第三步小樣本標籤、第四、五步。**
+**狀態：8 卡／100 步短測入口、量測與 checkpoint 續跑已實作；CPU 合成驗收及 GPU 實測狀態見 README。依賴：第三步標籤、第四、五步。2026-11-02 使用者限定只完成 8 卡，不安排單卡 GPU 短測。**
 
-實作範圍：新增 `train.py`；整合 SGD、step scheduler、AMP、單節點 DDP、三項 loss 紀錄及原子 checkpoint。沿用 shared runtime／checkpoint 能力，適配本版 sampler 與資料身分。
+實作範圍：新增 `train.py`；整合 SGD、step scheduler、BF16／FP32、單節點 8 卡 DDP、三項 loss 紀錄及原子 checkpoint。先交付 100 步量測，不啟動正式 35,000 步。沿用 shared runtime／checkpoint 能力，適配本版 sampler 與資料身分。
 
 驗收目標：
 
@@ -180,7 +180,7 @@
 - 固定 seed 的中斷續跑與連續執行具有相同抽樣、增強、optimizer steps 及 LR；在固定 FP32／確定性短測條件下比較 loss 與參數差異。
 - 普通 BN／SyncBN、BF16 與必要 microbatch 的行為另行查核、記錄；不可把 BN 差異誤判為分組 loss 錯誤或宣稱跨硬體逐值一致。
 - 短測須檢查 LR=0.04 的三項 loss、梯度及參數更新是否有限且穩定；以相同 128 組資料比較四個 32 組／LR=0.01 小步與一個 128 組／LR=0.04 大步的參數更新方向及幅度，先控制 BN 再檢查正式設定。這是近似誤差診斷，不以單卡／DDP 正確性容差要求兩種優化軌跡相同。
-- H200 dev 單卡 100–500 steps 短測通過後，再測所需 DDP 配置，記錄 steps/s、峰值顯存、RAM、GPU-hours、I/O 與 checkpoint 成本。
+- H200 dev 直接跑 8 卡 100 steps，global 128 組／每卡 16 組，預設 BF16＋SyncBN，每卡一次 forward/backward 處理完整 16 組；不安排單卡 GPU 短測。記錄各卡三項 loss、梯度／參數／更新 L2 norm、各級 score 平均、資料等待、forward/backward、optimizer、診斷與 checkpoint 秒數，及 CUDA allocated／reserved 峰值、主程序＋worker RSS、Linux I/O counters、checkpoint bytes。前 5 步為量測暖機，不改 LR；後 95 步以最慢 rank 的端到端耗時估算吞吐與 35,000 步成本。
 - 依實測選定監控與保存頻率；不得假定 8 卡可線性加速八倍。
 
 ### 第七步：逐位置推論、centroid 與評估
@@ -231,4 +231,23 @@
 
 第五步後完整回歸為 **67 passed（27.04s）**，包括第四步資料接線、三頭模型、公式與兩程序 Gloo loss／梯度驗證。架構／loss 實作方式及對齊／偏離詳見 README 第五步。GPU 訓練品質、分 k 成績與成本仍未知。
 
-下一步為第六步：整合 SGD、固定 update LR schedule、單卡／DDP 訓練器、原子 checkpoint 與消費端 step 續跑；先驗證 FP32／BN 行為，再依計畫執行 H200 短測、回報正式估時。第七步推論／centroid 可在小模型上另行驗收。
+下一步為第六步：整合 SGD、固定 update LR schedule、8 卡 DDP 訓練器、原子 checkpoint 與消費端 step 續跑；先驗證 FP32／BN 行為，再依計畫執行 H200 短測、回報正式估時。第七步推論／centroid 可在小模型上另行驗收。
+
+2026-11-02：新增 `train.py`、`configs/strength/se_smoke100.json`、`slurm/se_smoke100.slurm` 與 CPU 合成測試。此入口最多 500 步，預設只跑 100 步；CUDA 強制 8 processes，CPU 僅作工程驗證。第 50／100 步保存 latest-only checkpoint，config／資料標籤 hash／world size／程式不一致拒絕續跑；正式完整訓練、GPU 驗收與四個 32 組小步對照診斷仍待完成。
+
+
+### 2026-11-02：大顯存效能實作補充
+
+依使用者指定實作前兩個方向：
+
+1. 第六步新增 cuDNN benchmark／channels-last 的 2×2、8 卡 100 步對照設定。固定 global 128 組、每卡 16 組及既定訓練參數；另建同版本基準，不覆寫 job 673013。比較吞吐／耗時／顯存與 loss／梯度／更新幅度，不自動採用候選；預期加速與分 k 增益未知。
+2. 第七步先交付 `infer_positions` 與 8 卡 batch benchmark：同一 checkpoint、每卡同一 71,680 個位置，batch=1,120／2,240／4,480／8,960，eval／無 D4；量測吞吐／資源及 score 差異，OOM 停止更大候選。CPU 合成驗證涵蓋尾批、空分片、布局／batch 不變性及多程序接線。正式 centroid、全量輸出／每盤聚合、評估仍待完成。
+
+只實作與 CPU 測試，未提交新的 GPU 作業；既有 job 673013 checkpoint 僅供推論讀取，不以新版 trainer 繞過程式 hash 檢查續跑。操作與限制見 README。
+
+
+### 2026-11-02：選定 channels-last，關閉 cuDNN 搜尋
+
+依使用者決定，reproduce_paper 訓練採 `channels_last=true`、`cudnn_benchmark=false`，同步 `configs/strength/se_seed2026.json` 與 `se_smoke100.json`。預設短測改用獨立 `outputs/rank/reproduce_paper/se_smoke100_default_8gpu/`，不改寫已完成的 baseline／對照 config 或輸出。模型、128 組、LR schedule、35,000 步預算不變；正式完整訓練入口尚未完成。
+
+依據：job 673150（channels-last）5.133 steps/s、allocated 峰值 16.85 GiB；job 673193（兩者合用）5.152 steps/s、18.70 GiB，額外吞吐僅約 0.37%。此為效能設定決策，不以 100 步 loss 宣稱棋力改善；尚無同版本新 baseline 或重複量測。未提交新 GPU 作業。

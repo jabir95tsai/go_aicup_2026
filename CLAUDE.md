@@ -426,3 +426,20 @@ project/
 ### 2026-11-02：reproduce_paper 第五步完成
 
 依固定作者版本查核，新增專用三頭 ResNet 與 FP32 分組 BT／policy CE／soft value MSE，保留卷積 bias、residual 相加後 ReLU、預設 BN／初始化與 value tanh；不使用 V1／V2 的不同骨幹，省略作者未啟用的 learned weight head。支援第四步完整組輸入及逐位置推論，loss 等權且只接受完整 teacher 標籤。完整 reproduce_paper CPU 合成回歸 67 項通過（27.04s），兩程序 Gloo 固定 BN 的全參數梯度向量 relative L2=1.37e-6、max abs=3.69e-7；近零分量 max abs=2.68e-8。詳細方式、對齊／偏離及測試見本目錄 README／plan 與 RESULTS。下一步第六步訓練器／checkpoint／H200 短測；未啟動 GPU、optimizer 訓練或 teacher，分 k 分數及成本未知。
+
+
+### 2026-11-02：reproduce_paper 只做 8 卡／100 步短測
+
+依使用者最新限定，不實作／安排本版單卡 GPU 短測。新增 `reproduce_paper/train.py`、`configs/strength/se_smoke100.json`、`slurm/se_smoke100.slurm`：8×H200 dev、100 updates、global 128 組／每卡 16 組、BF16＋SyncBN；預設每卡整批 1,120 位置。前 5 步只作量測暖機，LR 不變。量測 loss、梯度／更新、分項耗時、顯存／RAM／I/O、checkpoint 與 GPU-hours，保存可續跑 checkpoint，使用獨立 `outputs/rank/reproduce_paper/se_smoke100_8gpu/`。CPU 小模型／Gloo 僅作工程驗證；未提交 GPU 工作，實際效能未知。正式 35,000 步與四小步／一大步近似診斷仍待完成。操作與量測限制見本目錄 README。
+
+
+### 2026-11-02：SE 大顯存前兩方向
+
+使用者指定實作固定訓練 batch 的運算對照與加大推論 batch。新增 cuDNN benchmark／channels-last 2×2 的 8 卡 100 步設定（保持 global 128 組及模型／LR），另建同版本基準；新增 `reproduce_paper/infer.py` 與 `se_infer_batch_benchmark.json`、`slurm/se_infer_benchmark.slurm`，使用既有 checkpoint 在固定位置集合比較每卡 1,120／2,240／4,480／8,960 的推論 batch。推論 eval／無 D4，逐候選報吞吐、顯存、score 差異，OOM 停止更大候選。只實作及 CPU 工程驗證，未提交新 GPU 作業，正式每盤聚合／centroid／評估仍待完成；操作與數據解讀限制見 reproduce_paper README。
+
+
+### 2026-11-02：選定 channels-last，關閉 cuDNN 搜尋
+
+依使用者決定，reproduce_paper 訓練採 `channels_last=true`、`cudnn_benchmark=false`，同步 `configs/strength/se_seed2026.json` 與 `se_smoke100.json`。預設短測改用獨立 `outputs/rank/reproduce_paper/se_smoke100_default_8gpu/`，不改寫已完成的 baseline／對照 config 或輸出。模型、128 組、LR schedule、35,000 步預算不變；正式完整訓練入口尚未完成。
+
+依據：job 673150（channels-last）5.133 steps/s、allocated 峰值 16.85 GiB；job 673193（兩者合用）5.152 steps/s、18.70 GiB，額外吞吐僅約 0.37%。此為效能設定決策，不以 100 步 loss 宣稱棋力改善；尚無同版本新 baseline 或重複量測。未提交新 GPU 作業。

@@ -72,3 +72,13 @@
 沿用 GPL-3.0 作者固定版本 [d9498964e2ba84b5798c40e3f5b8a91a8791d66c](https://github.com/rlglab/strength-estimator/tree/d9498964e2ba84b5798c40e3f5b8a91a8791d66c)，閱讀 `strength/trainer/bt_network.py`／`train.py`、同 tree 內 MiniZero `network/py/alphazero_network.py`／`network_unit.py` 與 `cfg/se_go.cfg`。依查核的架構及數學公式重新撰寫 `reproduce_paper/model.py`／`losses.py`（非直接複製來源檔），包含 bias、post-add ReLU、預設 BN、policy 2 channels、scalar heads、value tanh 與 listwise 正規化；省略未啟用的 weight head，改以本專案分組／DDP 介面整合。未納入作者權重、外部訓練資料或作者執行程式依賴；不宣稱作者 checkpoint／二進位逐值相容。
 
 OpenAI Codex 協助來源查核、程式與合成測試及文件。CPU／Gloo 合成回歸 67 項通過，僅代表工程驗證；分 k 成績與對競賽分數的貢獻未知，未啟動正式訓練。詳細來源連結、架構對齊／偏離及 API 見 `src/go_aicup/tasks/strength/reproduce_paper/README.md` 第五步。
+
+
+## 2026-11-02：SE 8 卡／100 步量測入口
+
+OpenAI Codex 協助撰寫 `reproduce_paper/train.py`、短測 config／Slurm 腳本、CPU 合成測試及操作文件。沿用本專案 shared runtime／checkpoint、既有三頭模型及分組 loss；本次沒有新增外部資料、模型權重或第三方依賴。僅完成工程驗證，尚未提交 GPU 短測；分 k 成績、增益與實測成本未知。
+
+
+## 2026-11-02：SE 卷積／布局對照與推論 batch 量測
+
+參考 [PyTorch 2.6 cuDNN benchmark 文件](https://docs.pytorch.org/docs/2.6/backends.html#torch.backends.cudnn.benchmark) 與 [官方 channels-last 教學](https://docs.pytorch.org/tutorials/intermediate/memory_format_tutorial.html)，查核模型／4D 輸入布局轉換及卷積演算法搜尋介面。僅使用既有 PyTorch 公開 API，未新增依賴、外部資料或權重；未複製外部實作。OpenAI Codex 協助本專案 train 布局接線、獨立對照 config、infer.py 與多程序／數值合成測試。GPU 加速、BF16 差異與競賽分數貢獻未知，未提交新作業。

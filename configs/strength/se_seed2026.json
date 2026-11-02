@@ -34,7 +34,9 @@
     "lr_drop_after_updates": 25000,
     "lr_after_drop": 0.02,
     "final_lr_after_updates": 32500,
-    "final_lr": 0.002
+    "final_lr": 0.002,
+    "channels_last": true,
+    "cudnn_benchmark": false
   },
   "loss_weights": {
     "bt": 1.0,

@@ -1486,3 +1486,38 @@ split 1／2 分開：保險單獨 0.9385／0.9343，融合 0.9865／0.9828，融
 依使用者決定，維持第 1–25,000 步 LR=0.04、第 25,001–32,500 步 LR=0.02，新增第 32,501–35,000 步 LR=0.002。每步仍為 128 組，全程 4,480,000 組／313,600,000 次位置使用，較原預算增加 7.69%。同步修改 config、GroupBatchSampler 預設 updates、plan／README 與 CLAUDE.md；訓練器／scheduler 仍待第六步實作，計畫加入兩次 LR 邊界與停止／續跑驗收。
 
 驗證：`PYTHONPATH=src OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 /home/jason1122/.conda/envs/go/bin/python -m pytest tests/test_reproduce_paper_data.py -q`，**23 passed（17.94s）**，涵蓋設定值及 sampler 第 35,000 步終止。未啟動 GPU 或訓練；實際 LR scheduler、checkpoint 邊界續跑尚未驗收，k=5／10／15／20 增益與正式成本未知。
+
+
+### 2026-11-02：SE 8×H200、100 步短測入口完成（未提交 GPU 作業）
+
+使用者限定只完成 8 卡，不做單卡 GPU 部分。新增 `reproduce_paper/train.py`、`configs/strength/se_smoke100.json`、`slurm/se_smoke100.slurm`：dev 單節點 8 GPUs、100 updates、global 128 組／每卡 16 組（1,120 位置）、BF16＋SyncBN，預設不拆 microbatch。前 5 步排除於穩態統計，LR 全部保持 0.04；正式預算仍為 35,000 updates 與既定兩次降率。短測入口限制最多 500 步。
+
+量測各 rank 的三項 loss／total、梯度／參數／更新 norm、更新相對幅度、各級 score 均值、資料等待、forward/backward、optimizer、診斷與 checkpoint 秒數、CUDA allocated／reserved 峰值、主程序＋worker RSS、Linux I/O counter、checkpoint bytes；摘要使用最慢 rank 的端到端耗時（包含 logging／彙總），回報 steps/s、positions/s、GPU-hours、35,000 步成本估算。診斷有同步及複製成本；RAM 為取樣且可能重複計共享頁，OS I/O counter 不等於實體儲存流量，不宣稱純訓練效能。
+
+第 50／100 步保存 latest-only 原子 checkpoint；綁定有效 config、prepared／games／value.npy 身分、程式 hash 與 world size，保存 optimizer／scheduler／各 rank RNG／BN buffers／消費端 step。中斷後從 checkpoint 重建抽樣及 D4，清除 log 中尚未保存的步數。獨立輸出 `outputs/rank/reproduce_paper/se_smoke100_8gpu/`，拒絕靜默覆寫或並行寫入。
+
+驗證：`PYTHONPATH=src OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 /home/jason1122/.conda/envs/go/bin/python -m pytest tests/test_reproduce_paper_train.py tests/test_reproduce_paper_data.py tests/test_reproduce_paper_model_loss.py tests/test_reproduce_paper_questions.py tests/test_reproduce_paper_value.py -q`，**73 passed（38.50s）**。最後補強未提交 log 清理後，重跑 `tests/test_reproduce_paper_train.py` 為 **5 passed（15.52s）**。涵蓋 LR 25,000／32,500 邊界、scheduler 恢復、CPU FP32 中斷續跑 model／loss 完全一致、量測／拒絕覆寫、CUDA 非 8 processes 拒絕與兩程序 Gloo 訓練接線。`bash -n` 與 `git diff --check` 通過。
+
+僅實作與 CPU 工程驗證，未提交 Slurm、未執行 CUDA／NCCL／SyncBN 或官方 100 步訓練；8 卡實際顯存、吞吐、數值穩定、GPU-hours 與 k=5／10／15／20 分數及增益皆未知。四個 32 組小步與一個 128 組大步診斷、GPU 確定性續跑及正式完整訓練仍待完成。啟動：`sbatch slurm/se_smoke100.slurm`。
+
+
+### 2026-11-02：SE 固定訓練 batch 的運算對照與推論 batch 對照（僅實作）
+
+使用者指定實作大顯存的前兩個方向。第六步新增 `channels_last` 接線，模型與展平後 4D position tensor 使用相同布局，forward 後恢復組軸；修正參數診斷以支援非連續權重並移除多餘拷貝。新增 `se_smoke100_perf_baseline.json`／`se_smoke100_cudnn.json`／`se_smoke100_channels_last.json`／`se_smoke100_cudnn_channels_last.json` 做 2×2、8 卡 100 步對照。四份維持同模型／seed／global 128 組／每卡 16 組／SyncBN／BF16／LR／保存頻率，使用獨立目錄；摘要保存布局與 cuDNN 搜尋開關，不自動採用候選。既有 job 673013 為 3.78 steps/s，但診斷程式改動後須重跑同版本基準才能歸因。
+
+新增 `infer.py`、`se_infer_batch_benchmark.json`、`slurm/se_infer_benchmark.slurm`。由既有 checkpoint 讀權重，驗證模型／資料程式與 prepared 身分；在相同、互斥的連續 sample_index 分片上，以 eval／無 D4 比較每卡 1,120／2,240／4,480／8,960 的 batch。預設每卡固定 71,680 位置；兩次第一批 warmup，分列含 setup 與不含 setup 的吞吐、資料／計算耗時、顯存／RSS／I/O，保存最小 batch 的 score 參考與後續候選的最大絕對／相對 L2 誤差。任一卡 OOM 會記錄並停止更大 batch。此為有界工程量測，不完成第七步正式全量每盤聚合、centroid 或評估。
+
+數值診斷：CPU FP32 training-mode BN 的兩種布局首步 total loss 為 7.9937763／7.9937754，但完整參數 max abs 差 6.15e-5，參數相對 L2=1.54e-5、更新向量相對 L2=0.00303，故不要求跨布局逐參數一致。另以固定 BN running stats 的基準，驗證 loss／首步更新 atol／rtol≤1e-5；同布局的 CPU 中斷續跑仍完全一致。GPU BF16 差異未驗證。
+
+驗證命令：`PYTHONPATH=src OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 /home/jason1122/.conda/envs/go/bin/python -m pytest tests/test_reproduce_paper_train.py tests/test_reproduce_paper_infer.py tests/test_reproduce_paper_data.py tests/test_reproduce_paper_model_loss.py tests/test_reproduce_paper_questions.py tests/test_reproduce_paper_value.py -q`；最終 **79 passed（46.50s）**。包含 channels-last 訓練／續跑、固定 BN 接線對照、推論 batch／布局數值一致性、尾批與空分片、兩程序推論、不覆寫、checkpoint 身分檢查、OOM 停止更大候選。兩個 Slurm 腳本 `bash -n`、推論 `--help` 與 `git diff --check` 通過。
+
+未提交新的 GPU 工作；加速、BF16 數值差異、最大可用 batch、k=5／10／15／20 分數及增益皆未知。新版 trainer 不繞過 code hash 限制恢復舊 checkpoint，舊權重可供推論。來源及操作見 EXTERNAL_RESOURCES 與 reproduce_paper README；保留使用者既有 staged 內容及另新增的 result.md。
+
+
+### 2026-11-02：選定 channels-last，關閉 cuDNN 搜尋
+
+依使用者決定，reproduce_paper 訓練採 `channels_last=true`、`cudnn_benchmark=false`，同步 `configs/strength/se_seed2026.json` 與 `se_smoke100.json`。預設短測改用獨立 `outputs/rank/reproduce_paper/se_smoke100_default_8gpu/`，不改寫已完成的 baseline／對照 config 或輸出。模型、128 組、LR schedule、35,000 步預算不變；正式完整訓練入口尚未完成。
+
+依據：job 673150（channels-last）5.133 steps/s、allocated 峰值 16.85 GiB；job 673193（兩者合用）5.152 steps/s、18.70 GiB，額外吞吐僅約 0.37%。此為效能設定決策，不以 100 步 loss 宣稱棋力改善；尚無同版本新 baseline 或重複量測。未提交新 GPU 作業。
+
+本次驗證：預設兩份 config 開關與 35,000 步預算 assert 通過；`tests/test_reproduce_paper_train.py` **7 passed（19.77s）**，`git diff --check` 通過。CPU 測試的基準 fixture 明確保持 contiguous，另有 channels-last 專用驗證，避免預設變更讓布局對照失效。
