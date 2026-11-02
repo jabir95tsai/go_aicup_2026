@@ -251,3 +251,76 @@
 依使用者決定，reproduce_paper 訓練採 `channels_last=true`、`cudnn_benchmark=false`，同步 `configs/strength/se_seed2026.json` 與 `se_smoke100.json`。預設短測改用獨立 `outputs/rank/reproduce_paper/se_smoke100_default_8gpu/`，不改寫已完成的 baseline／對照 config 或輸出。模型、128 組、LR schedule、35,000 步預算不變；正式完整訓練入口尚未完成。
 
 依據：job 673150（channels-last）5.133 steps/s、allocated 峰值 16.85 GiB；job 673193（兩者合用）5.152 steps/s、18.70 GiB，額外吞吐僅約 0.37%。此為效能設定決策，不以 100 步 loss 宣稱棋力改善；尚無同版本新 baseline 或重複量測。未提交新 GPU 作業。
+
+
+## 5. 完整訓練入口實作提案（2026-11-02，待確認後寫程式）
+
+本節依上述固定規格、[RESULT.md](RESULT.md) 及現有程式整理下一輪實作；屬規劃，不表示入口或驗收已完成。依根目錄 CLAUDE.md §9.1，先確認實作方案；正式長作業另依 §9.6 回報估時後確認啟動。
+
+### 5.1 目標、範圍與現有缺口
+
+目標是讓既有 `train.py` 從初始化完成 35,000 次更新，支援安全中斷、同版本續跑及最終模型交付。沿用 sampler、三頭模型、loss、SGD、scheduler 與 shared checkpoint，不另建 trainer，不增加依賴。
+
+- 現有入口強制 `probe_updates <= 500`，CLI 預設 smoke config；正式 config 缺少 label_dir、device、precision 及 loader／checkpoint 執行設定，不能直接完整訓練。
+- 現有 scheduler 已具備兩次降率；已有測試涵蓋倍率及部分 restore，仍需補 optimizer 實際更新與完整 trainer 在邊界前後續跑的驗收。
+- 現有逐步診斷會複製全參數、收集各 rank 資源，並將所有詳細 rows 留在記憶體；這是短測設計，正式入口改用串流紀錄與累積摘要。
+- 尚無 Slurm 預告中斷的安全停止流程；硬中斷可能殘留 `.writer.lock`，不能直接刪鎖後並行寫入。
+- `infer.py` 現在提供逐位置推論及 batch benchmark，尚非全量 centroid／評估入口。完整方法仍須第七步；訓練完成不等於已取得棋力成績。
+
+既定假設仍是平均位置上的排序 supervision 能學到棋力順序。k=5／10／15／20 的官方得分與相對增益均未知；本輪不增加模型效果承諾或 SL 對照訓練。
+
+### 5.2 第一批：正式 trainer 與設定
+
+1. 同一 `train()` 同時支援 smoke 與正式訓練：有 `probe_updates` 時保留 1..500 限制，未指定時以 `training.updates` 為終點。正式預算為 35,000；`--stop-after` 是本次停止的絕對 completed-update，不修改有效 config 或總預算。既有 smoke Slurm 均明確傳入原 smoke config。
+2. CLI 預設切換到 `se_seed2026.json`；補齊 `paths.label_dir=data/processed/reproduce_paper/value_v1/train`、CUDA／BF16、每 rank 4 workers、SyncBN、每卡 16 組、TF32=false、deterministic=false、channels_last=true、cudnn_benchmark=false。CUDA 保留目前 8 processes 限定，CPU 僅供合成驗收。
+3. 固定 global 128 組，每組十級各七手，每卡一次 forward/backward 共 1,120 位置；不更改抽樣、D4、loss 平均或加入 LR warmup。第 1–25,000 次更新用 0.04，第 25,001–32,500 次用 0.02，第 32,501–35,000 次用 0.002。
+4. 每步保存 step、當步／下一步 LR、三項 loss／total 及 finite checks；每 100 步另保存八卡資源、梯度／參數／更新 norm、各級 score 等完整診斷。Smoke 維持逐步完整量測；診斷降頻不移除每步非有限梯度／loss／參數的檢查。詳細 rows 寫 JSONL，不常駐保留全部歷史；summary 用累積值，耗時分位數最多保留每步一個 scalar。
+5. 每 500 updates、正常提前停止、收到停止要求及第 35,000 步保存 latest-only checkpoint。保留 model／optimizer／scheduler、每 rank RNG／BN buffers、消費端 step、config／資料／程式身分；抽樣與 D4 依已完成步數重建，prefetch 不前移游標。
+6. 補入實際影響續跑的 shared runtime／training／checkpoint、資料組裝依賴的程式指紋。延續嚴格 config／data／world／code 檢查，不將既有 100 步 checkpoint 冒充正式 run 的起點，不放寬 hash 來跨版本續跑。
+7. 新增 `slurm/se_train.slurm`，沿用既有 conda／torchrun 設定：單節點、8×H200、96 CPU、128 GiB RAM、`8gpus` partition，訓練階段先申請 4 小時。新 run 使用既定 `outputs/rank/reproduce_paper/se_seed2026/`；非空目錄仍須顯式 `--resume`。
+
+### 5.3 第二批：中斷恢復與最終產物
+
+- Slurm 在時限前預告（提案 120 秒），將訊號送達實際 trainer processes；handler 只設停止旗標。每個完整 optimizer update 邊界先跨 rank 合併停止要求，再由所有 ranks 一起寫 checkpoint 並退出，禁止 handler 直接做 collective／檔案寫入。腳本須驗證 srun／torchrun 的訊號傳遞，不能只加 SBATCH signal 指令就宣稱完成。
+- SIGKILL、節點故障等無法保證最後保存；由最近已完成 checkpoint 重跑，至多損失 499 個已完成更新。若保存中斷，沿用 shared checkpoint 先發布再清除舊檔的順序，舊 last.json 仍可恢復。
+- 保留寫入鎖；硬中斷殘留鎖的處理須先用 Slurm 狀態確認原作業已停止，再人工清理。不自動依 PID 判定跨節點鎖失效。
+- 續跑截斷 checkpoint 之後的未提交訓練紀錄；能處理最後一行寫到一半的 JSONL。原始環境紀錄保留，續跑環境與 wall／GPU-hours 另記 session，避免覆蓋初始來源或只回報最後一段成本。
+- 第 35,000 步先發布可續跑的最終 checkpoint，再原子發布 `model.pt`：最終 state dict、有效 config、完成步數、資料／程式／權重身分。重載驗證後才標記 training completed；提前停止不可發布成完整最終模型。不依 validation 選 best checkpoint，也不清除續跑 checkpoint。
+- 正式輸出包含 `config.json`、初始及各 session 環境、`data_identity.json`、`train.jsonl`、session／training summary、`last.json`、latest checkpoint、`model.pt`。重跑已完成 run 應驗證並回報完成；若只缺最終模型發布，從最終 checkpoint 補發布，不再做第 35,001 次更新。
+
+### 5.4 必要驗收與通過條件
+
+| 驗收 | 方法與 gate |
+|---|---|
+| 入口與相容性 | 正式設定通過檢查；既有 smoke 限額、獨立輸出及 inference benchmark 測試保留；缺 teacher、非法 batch／精度／world size 明確拒絕 |
+| LR 與停止 | CPU 小模型的 optimizer 實際走過 24,999／25,000／25,001、32,499／32,500／32,501 及 34,999／35,000 邊界；可用一致的合成 checkpoint 直接到邊界，無須跑完整 CNN 35,000 步；不多更新一次 |
+| 續跑 | 固定 FP32／確定性條件下，比較連續與中斷兩段的抽樣、D4、loss、參數、momentum、scheduler／LR 與消費步數；CPU 參數逐值一致。補兩程序 Gloo 與 workers／prefetch 回歸 |
+| 停止與發布 | 任一 rank 請求停止，所有 ranks 同步保存；partial JSONL、非空目錄、hash 不符、寫入失敗保留舊 checkpoint、最終模型發布重試、完成後不多訓練均有合成測試 |
+| GPU 接線 | 新程式版本以同 config 分別完成連續 100 步及 50＋50 步續跑；八卡無 hang、各 loss／梯度／參數有限、有非零更新，sample／LR／step 一致。BF16＋非確定性不要求參數逐值相同，另報 loss／參數相對 L2 及最大絕對差 |
+| 四小步／一大步 | 同初始權重、同 128 組資料，比較四次 32 組／LR=.01 與一次 128 組／LR=.04；先固定 BN、再用正式 SyncBN／BF16，報更新 cosine、norm ratio、relative L2 及分項 loss。此為近似誤差診斷，沒有理論等價門檻；非有限值直接失敗，不用 CPU 梯度正確性容差宣稱等價 |
+
+只跑與改動相關的 `tests/test_reproduce_paper_*.py`，不另跑全 repo 訓練或重製 teacher。正式提交前須完成上述工程驗收並如實列出 GPU 差異；四小步診斷不自動改 batch／LR。
+
+### 5.5 第七步銜接與效果驗收
+
+完整訓練入口先交付訓練；第七步獨立交付全量推論／評估命令，通過各自驗收後才安排正式全量計算，避免把未知成本直接綁進訓練 Slurm 作業。
+
+- 重用 `infer_positions`，eval、無 D4、無 teacher；按 sample_index 分片原子保存 float32 逐位置 scores，完整覆蓋且不補齊尾批。配合已完成分片續作，避免中斷後重算全量。
+- Training 共 76,763,475 位置，validation 共 19,183,737 位置。由逐位置分數保存每盤 score_sum／position_count，以 float64 累計 training 十級 centroid。題目使用 `sum(score_sum) / sum(position_count)`，nearest-centroid；相同距離固定取較低 rank index，記錄規則。
+- 重用固定 10,000 題，報 k=5／10／15／20 的 exact、within-one、官方得分與 Equal-k，各級結果及混淆矩陣；不套用 V1 切點或 V2 score_rank。論文式各 N／500 次評估另依第七步先定抽樣與 CI protocol。
+- 工程通過條件為手算／分片結果一致、完整覆蓋、centroid 僅用 training、報表可重建。官方 0.4631 僅作競賽參考，不當作原論文重現 gate；此 split 有 7,855／7,855 位 validation 玩家同時出現在 training，不與主線 player-disjoint 成績直接比較。
+
+### 5.6 成本、磁碟與執行順序
+
+| 階段 | 估算依據與預算 |
+|---|---|
+| CPU 工程驗收 | 小模型／合成資料，0 GPU-hours；實際 wall time 未知 |
+| 8 卡續跑驗收 | 連續 100＋分段合計 100，共 200 updates；依已測 session 約數分鐘內、暫預留 0.5 GPU-hours（不含排隊），正式腳本訊號驗收另外記帳 |
+| 四小步診斷 | 有限固定 batch，成本未知；先實作 CPU 診斷，再回報 GPU 短作業成本，不與正式訓練混算 |
+| 正式訓練 | RESULT.md 舊設定 0.2643 s/update → 2.57 h／20.56 GPU-hours；選定 channels-last 的 job 673150 summary 為 0.194814 s/update → 1.894 h／15.152 GPU-hours。以 2–3 h／16–24 GPU-hours 規劃，4 h job 配額為 32 GPU-hours 上限，非預期耗用 |
+| Training／validation 推論 | 合計 95,947,212 位置；尚無完整推論吞吐，時間未知。須先用推論 benchmark 量測，以各 split 位置數／實測全節點 positions/s 估算，不套用訓練速度 |
+| 新增磁碟 | 全量 float32 scores 為 383,788,848 bytes，約 366.0 MiB；latest checkpoint 約 185.4 MiB，原子替換需同時容納新舊檔，再加 model.pt、每盤統計及 logs。全流程先保留至少 2 GiB 可用額度，正式執行前重查配額；不複製既有 cache／teacher |
+
+實作順序為第一批 trainer／config／Slurm → 第二批續跑／最終發布 → CPU 驗收 → 經確認執行 GPU 短驗收與診斷 → 回報更新後正式成本 → 經確認啟動 35,000 步。第七步可先用合成模型實作與驗收；全量推論須另回報時間與配額再啟動。
+
+預計修改 `train.py`、`config.py`、`configs/strength/se_seed2026.json`，新增 `slurm/se_train.slurm`，補 `tests/test_reproduce_paper_train.py`；新增設定如影響推論／資料 fixtures，連同相關測試一併調整。第七步擴充 `infer.py`、新增 `evaluate.py` 及聚合／評估測試。同步本計畫、README、根目錄 RESULTS.md 的實際交付與驗收狀態；不覆寫 RESULT.md 的既有未提交修改，不更改 V1／V2 或 shared checkpoint 的公共契約。Slurm 目錄受 ignore 規則影響，交付時須確認腳本有納入版本控制。

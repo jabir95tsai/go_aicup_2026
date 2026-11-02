@@ -1,135 +1,8 @@
-# reproduce_paper 全部短測結果
+# reproduce_paper smoke test 結果
 
 整理日期：2026-11-02（台灣時間）。本次僅整理既有產物，未重跑訓練。
 
-## 全部已完成短測總覽（2026-11-02 更新）
-
-已查核四份 training smoke test 的 `environment.json`、有效 `config.json`、摘要、逐步 log、`last.json` 與 Slurm `sacct`。四個作業均為 **COMPLETED、exit 0:0**；每份都有連續 step 1–100、各步完整 8 ranks，loss／梯度／參數／更新 norm 均有限。第 50／100 步均有 checkpoint 寫入紀錄，保留的第 100 步檔案已重算 SHA-256，與 `last.json` 相符。這不是 GPU 恢復訓練測試。
-
-**選定：`channels_last=true`、`cudnn_benchmark=false`（使用者 2026-11-02 決定）。** 合用 cuDNN 搜尋的吞吐僅再提高約 0.37%，allocated 峰值卻多約 1.85 GiB；目前保留單獨 channels-last。短測 training loss 不作棋力品質選擇依據。
-
-| 設定 | Job ID | channels-last | cuDNN 搜尋 | 完成步數 | Slurm 配置時間 |
-|---|---|---|---|---|---|
-| 舊 baseline | 673013 | false | false | 100 | 57 秒 |
-| cuDNN 搜尋 | 673105 | false | true | 100 | 59 秒 |
-| channels-last（選定） | 673150 | true | false | 100 | 49 秒 |
-| cuDNN＋channels-last | 673193 | true | true | 100 | 46 秒 |
-
-四組共用：8×H200、256 channels／20 blocks、BF16＋SyncBN、global 128 組／每卡 16 組（1,120 個位置）、seed=2026、SGD momentum=0.9／weight decay=0.0001、LR=0.04、三項 loss 等權、每 rank 4 workers、TF32 關閉、不使用跨 microbatch 累積。前 5 步僅作量測暖機，不是 LR warmup；穩態窗口為 step 6–100。軟體版本與下方原始 baseline 環境表相同。
-
-### 吞吐與資源比較
-
-| 設定 | 平均 ms/update | p50／p95 ms | updates/s | positions/s | allocated／reserved GiB（單卡峰值） | 節點取樣 RSS GiB |
-|---|---|---|---|---|---|---|
-| 舊 baseline | 264.327 | 249.268／254.590 | 3.783 | 33,897 | 16.98／17.70 | 43.72 |
-| cuDNN 搜尋 | 259.757 | 244.958／252.061 | 3.850 | 34,494 | 18.27／18.83 | 45.72 |
-| channels-last（選定） | 194.814 | 181.578／190.189 | 5.133 | 45,993 | 16.85／17.15 | 44.02 |
-| cuDNN＋channels-last | 194.102 | 179.772／185.757 | 5.152 | 46,161 | 18.70／18.81 | 45.41 |
-
-相對舊 baseline，cuDNN 搜尋／channels-last／兩者合用的吞吐分別增加 **1.76%／35.68%／36.18%**。合用相對單獨 channels-last 僅增加 **0.37%**。這是單次作業間比較，不是重複實驗的加速保證；新版同程式 baseline（`se_smoke100_perf_baseline_8gpu`）尚無產物。舊 baseline 後曾調整參數診斷的非連續布局支援與多餘拷貝，不能把全部差異嚴格歸因於兩個開關。
-
-### 執行成本與正式預算外推
-
-| 設定 | Session wall／setup 秒 | 程式 session GPU-h | Slurm 配置 GPU-h¹ | 35,000 步外推小時／GPU-h |
-|---|---|---|---|---|
-| 舊 baseline | 40.564／8.011 | 0.09014 | 0.12667 | 2.5698／20.5588 |
-| cuDNN 搜尋 | 40.321／7.981 | 0.08960 | 0.13111 | 2.5254／20.2033 |
-| channels-last（選定） | 33.356／7.723 | 0.07412 | 0.10889 | 1.8940／15.1522 |
-| cuDNN＋channels-last | 30.794／6.889 | 0.06843 | 0.10222 | 1.8871／15.0968 |
-
-¹ Slurm 配置 GPU-h＝頂層 job Elapsed ×8／3,600；不加總 batch／extern／step，以免重複記帳，也不等於 SU 扣款。四份作業合計配置 211 秒，約 **0.46889 GPU-hours**。程式 session 計時不含全部 Python／Slurm 啟動與結束成本。35,000 步僅按暖機後平均耗時線性外推，包含當前診斷／logging／每 50 步保存的攤提成本，不包含 teacher、centroid、validation、排隊，亦非長跑保證。
-
-### 分項耗時
-
-| 設定 | 資料等待 ms | Forward/backward ms | Optimizer ms | 診斷 ms |
-|---|---|---|---|---|
-| 舊 baseline | 3.223 | 238.297 | 1.298 | 4.021 |
-| cuDNN 搜尋 | 3.129 | 234.148 | 1.260 | 3.689 |
-| channels-last（選定） | 3.454 | 169.887 | 1.281 | 4.378 |
-| cuDNN＋channels-last | 3.350 | 168.214 | 1.306 | 4.389 |
-
-每個分項均先取各步最慢 rank，再平均 step 6–100；最大值不一定來自同一 rank，不能直接相加當作端到端耗時。channels-last 的 forward/backward 由約 238 ms 降至 170 ms，資料等待仍約 3 ms；目前主要改善在模型計算。
-
-### Loss：前／後各 10 步平均
-
-| 設定 | Total 前→後 | BT 前→後 | Policy CE 前→後 | Value MSE 前→後 |
-|---|---|---|---|---|
-| 舊 baseline | 8.372920 → 7.777341 | 1.677309 → 1.662166 | 5.903604 → 5.339473 | 0.792007 → 0.775701 |
-| cuDNN 搜尋 | 8.372692 → 8.099800 | 1.677229 → 1.666120 | 5.903505 → 5.657793 | 0.791959 → 0.775887 |
-| channels-last（選定） | 8.372536 → 7.604230 | 1.677393 → 1.639304 | 5.903108 → 5.191901 | 0.792035 → 0.773025 |
-| cuDNN＋channels-last | 8.372647 → 7.753849 | 1.677411 → 1.660216 | 5.903170 → 5.318796 | 0.792066 → 0.774837 |
-
-### Loss：第 1／100 步
-
-| 設定 | Total 1→100 | BT 1→100 | Policy CE 1→100 | Value MSE 1→100 |
-|---|---|---|---|---|
-| 舊 baseline | 8.445898 → 7.564128 | 1.682583 → 1.668319 | 5.965910 → 5.117100 | 0.797405 → 0.778710 |
-| cuDNN 搜尋 | 8.445898 → 7.943127 | 1.682583 → 1.669808 | 5.965909 → 5.494535 | 0.797405 → 0.778783 |
-| channels-last（選定） | 8.445858 → 7.437150 | 1.682582 → 1.651179 | 5.965744 → 5.009324 | 0.797531 → 0.776647 |
-| cuDNN＋channels-last | 8.445858 → 7.594135 | 1.682582 → 1.660477 | 5.965744 → 5.154770 | 0.797531 → 0.778887 |
-
-各步為不同隨機 training batch，並非固定 validation 題目。四組早期下降主要來自 policy CE。演算法／布局與 BF16 可改變浮點歸約順序，差異經 BN、ReLU、SGD momentum 累積後可能走出不同更新軌跡；這是可能機制，本次未做同權重／同 batch 的 GPU 單步對照，不能證明差異全由捨入造成。較低的短測 loss 不代表更高的棋力成績。
-
-### 梯度與參數更新
-
-| 設定 | Gradient L2 min–max | Update L2 min–max | Update／parameter min–max（%） |
-|---|---|---|---|
-| 舊 baseline | 0.337995–6.887647 | 0.044739–0.279323 | 0.03745–0.23410 |
-| cuDNN 搜尋 | 0.343865–6.339716 | 0.046390–0.260310 | 0.03883–0.21828 |
-| channels-last（選定） | 0.417691–7.850758 | 0.050278–0.324584 | 0.04208–0.27212 |
-| cuDNN＋channels-last | 0.385343–13.085187 | 0.045819–0.470991 | 0.03835–0.39489 |
-
-以上為 rank 0 的逐步 norm。合用設定最大 gradient norm=13.085，高於單獨 channels-last 的 7.851，但所有紀錄均有限；單一最大值不能直接判定不穩定，100 步有限性也不能保證長期收斂。
-
-### Checkpoint 與 I/O
-
-| 設定 | Step 50／100 秒（最慢 rank） | Checkpoint 總秒數 | 最後檔案 bytes | SHA-256 |
-|---|---|---|---|---|
-| 舊 baseline | 0.606499／0.768103 | 1.374776 | 194,378,646 | 已驗證 |
-| cuDNN 搜尋 | 0.636801／0.720469 | 1.357458 | 194,378,646 | 已驗證 |
-| channels-last（選定） | 0.538555／0.676800 | 1.215530 | 194,378,838 | 已驗證 |
-| cuDNN＋channels-last | 0.587679／0.733655 | 1.321512 | 194,378,838 | 已驗證 |
-
-| 設定 | read_bytes | write_bytes | rchar | wchar |
-|---|---|---|---|---|
-| 舊 baseline | 0 | 388,907,008 | 11,387,420,874 | 399,576,018 |
-| cuDNN 搜尋 | 0 | 388,907,008 | 11,378,181,208 | 399,573,623 |
-| channels-last（選定） | 0 | 388,907,008 | 11,375,050,298 | 398,898,213 |
-| cuDNN＋channels-last | 0 | 388,907,008 | 11,424,559,364 | 399,061,271 |
-
-I/O 為 100 步所有 rank／loader workers 的 `/proc` counter 增量合計；cache 命中與檔案系統行為會影響數字。四組 `read_bytes=0` 不代表未讀取資料，不能據此推算冷快取頻寬。RSS 為取樣且共享頁可能重複計算，顯存僅為 PyTorch allocator，非整卡用量。
-
-### 證據檔案
-
-- **舊 baseline／job 673013**：`outputs/rank/reproduce_paper/se_smoke100_8gpu/`；Slurm log：`outputs/slurm-se-smoke100-8gpu-673013.out`。
-  - 最後 checkpoint：`outputs/rank/reproduce_paper/se_smoke100_8gpu/checkpoints/update_00000100_epoch_0000_batch_000100_1793595607442517821.pt`；SHA-256：`1095a967a67c0cddef0fa8d6bf15da85294cb134011ae866e57635cb19f22673`。
-- **cuDNN 搜尋／job 673105**：`outputs/rank/reproduce_paper/se_smoke100_cudnn_8gpu/`；Slurm log：`outputs/slurm-se-smoke100-8gpu-673105.out`。
-  - 最後 checkpoint：`outputs/rank/reproduce_paper/se_smoke100_cudnn_8gpu/checkpoints/update_00000100_epoch_0000_batch_000100_1793596922929113735.pt`；SHA-256：`50ab7b6fbded3134d0ac9010d83a832406d8115b19eea23e10abd04e2a953964`。
-- **channels-last（選定）／job 673150**：`outputs/rank/reproduce_paper/se_smoke100_channels_last_8gpu/`；Slurm log：`outputs/slurm-se-smoke100-8gpu-673150.out`。
-  - 最後 checkpoint：`outputs/rank/reproduce_paper/se_smoke100_channels_last_8gpu/checkpoints/update_00000100_epoch_0000_batch_000100_1793597289873461422.pt`；SHA-256：`c00fb723c04ecc1889fdf11af6a833f5ae407c72c522b06c1868717a1fc4ddf6`。
-- **cuDNN＋channels-last／job 673193**：`outputs/rank/reproduce_paper/se_smoke100_cudnn_channels_last_8gpu/`；Slurm log：`outputs/slurm-se-smoke100-8gpu-673193.out`。
-  - 最後 checkpoint：`outputs/rank/reproduce_paper/se_smoke100_cudnn_channels_last_8gpu/checkpoints/update_00000100_epoch_0000_batch_000100_1793597608503070254.pt`；SHA-256：`c444c7252d4d346272041447ab74a4506c3a88142f5ee3c100cb088d113ca43b`。
-
-每個 run 目錄均保存 `config.json`、`environment.json`、`data_identity.json`、`train.jsonl`、`probe_summary_00000_00100.json`、`last.json`。本報告以執行時保存的有效 config 為準，不以後來改過的預設 config 回推歷史設定。
-
-### 尚無結果的短測與工程驗收
-
-- 新版同程式 baseline：設定已存在，目前未找到完成摘要。
-- 推論 batch benchmark：入口與設定已存在，目前未找到 `benchmark.json`；每卡 batch 1,120／2,240／4,480／8,960 的吞吐、顯存與 score 誤差仍未知。
-- 選定設定的新預設短測目錄 `se_smoke100_default_8gpu`：目前未找到完成摘要；採用依據為 job 673150，不另宣稱新作業已執行。
-- CPU 合成工程驗收依根目錄 `RESULTS.md`：完整 reproduce_paper 回歸 **79 passed（46.50s）**；預設設定選定後訓練測試 **7 passed（19.77s）**。這些是既有測試紀錄，本次未重跑；不替代 CUDA／NCCL 恢復訓練驗收。
-- GPU 中斷續跑、跨布局同權重單步對照、25,000／32,500 步 LR 邊界與35,000 步收斂、四個小步／一個大步近似診斷、centroid／validation 評估均仍待完成。
-
-| Validation 官方分數 | k=5 | k=10 | k=15 | k=20 | Equal-k |
-|---|---|---|---|---|---|
-| 舊 baseline | 未知 | 未知 | 未知 | 未知 | 未知 |
-| cuDNN 搜尋 | 未知 | 未知 | 未知 | 未知 | 未知 |
-| channels-last（選定） | 未知 | 未知 | 未知 | 未知 | 未知 |
-| cuDNN＋channels-last | 未知 | 未知 | 未知 | 未知 | 未知 |
-
-本次僅讀取產物、查詢 Slurm 與重算統計，沒有重跑訓練或修改原始輸出。
-
-## 原始 baseline 結論（job 673013）
+## 結論
 
 **8×H200、BF16＋SyncBN、global 128 組的 100 步訓練已完成**。逐步紀錄包含連續的 step 1–100，每步均有 8 個 rank；loss、梯度 norm、參數 norm 與更新 norm 均為有限值，且有非零參數更新。第 50／100 步皆有 checkpoint 寫入紀錄，目前保留第 100 步權重。
 
@@ -199,7 +72,7 @@ Total 的前後十步平均下降 **0.59558**，其中 policy CE 下降 **0.5641
 - 已確認：100 步／8 ranks 的紀錄完整、BF16＋SyncBN 訓練走完、loss／梯度／更新數值有限、checkpoint 寫入及最後檔案存在。
 - 未確認：GPU 中斷續跑與連續執行的參數一致性；本次只有 start_step=0 至 100 的單次 session，未重新載入 checkpoint 驗收。
 - 未確認：正式 LR 在 25,000／32,500 步的切換、35,000 步收斂，以及四個 32 組／LR=0.01 小步與一個 128 組／LR=0.04 大步的近似誤差。
-- 未確認：單卡加速比與其他 microbatch；cuDNN／channels-last 的三組對照已完成，見上方全部短測總覽。
+- 未確認：單卡加速比、其他 microbatch 或 cuDNN／channels-last 設定；本目錄目前只有這一組已完成的 smoke test 結果。
 
 本次未執行 centroid／validation 評估，不能與官方 baseline 0.4631 比較：
 
@@ -216,3 +89,49 @@ Total 的前後十步平均下降 **0.59558**，其中 policy CE 下降 **0.5641
 - 最後權重：`outputs/rank/reproduce_paper/se_smoke100_8gpu/checkpoints/update_00000100_epoch_0000_batch_000100_1793595607442517821.pt`。
 
 本次整理以保存的有效 config 與結果為準；沒有覆寫原始產物、啟動作業或修改訓練程式。
+
+
+## 2026-11-02：已記錄短測產物清理
+
+依使用者要求，已刪除本檔 Git 版本所記錄的四組已完成 training smoke test（jobs 673013／673105／673150／673193）之輸出目錄、全部 checkpoint、執行時 config／環境／逐步 log／摘要及對應 Slurm `.out`。上方證據路徑為歷史紀錄，檔案已不存在。
+
+刪除範圍：
+
+- `outputs/rank/reproduce_paper/` 下的 `se_smoke100_8gpu/`、`se_smoke100_cudnn_8gpu/`、`se_smoke100_channels_last_8gpu/`、`se_smoke100_cudnn_channels_last_8gpu/`。
+- `outputs/slurm-se-smoke100-8gpu-{673013,673105,673150,673193}.out`。
+- `configs/strength/se_smoke100_cudnn.json`、`se_smoke100_channels_last.json`、`se_smoke100_cudnn_channels_last.json`。
+
+保留共用資料、teacher value 標籤、程式與 Slurm 入口，以及尚未執行的新預設 `se_smoke100.json`、`se_smoke100_perf_baseline.json`、`se_infer_batch_benchmark.json`。後者仍引用已刪除的 job 673013 checkpoint；再次使用推論 benchmark 前須指定新的 checkpoint。README 的舊對照／續跑指令亦屬歷史用法，專用 config 與 checkpoint 已刪除。本次未執行訓練或測試。
+
+
+## 2026-11-02：8 卡推論 batch benchmark（job 673590）
+
+**四個 batch 均成功，無 OOM；每卡 batch 從 1,120 增至 8,960，穩態吞吐僅增加 4.56%。** 2,240 的含初始化吞吐最高；本次不自動變更正式推論設定。
+
+設定：8×H200、BF16、channels_last=false、eval mode、無 D4。使用 training 固定連續分片，每卡 71,680 個盤面、全節點每個候選共 573,440 個盤面；每個候選先將第一批重複暖機兩次。報告 wall time 為 48.591 秒，非 Slurm 完整配置時間。
+
+| 每卡 batch | 全節點盤面／秒（排除 setup） | 相對 1,120 | 含 setup 盤面／秒 | 每卡 allocated 峰值（GiB） | 每卡 reserved 峰值（GiB） | score 最大絕對差 | 各 rank 最大相對 L2 差 |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1,120 | 108,710 | +0.00% | 62,818 | 1.36 | 1.72 | 0.0000000 | 0.000e+00 |
+| 2,240 | 110,816 | +1.94% | 63,890 | 2.54 | 2.85 | 0.0078125 | 6.195e-05 |
+| 4,480 | 107,975 | -0.68% | 45,653 | 4.91 | 5.20 | 0.0078125 | 6.195e-05 |
+| 8,960 | 113,671 | +4.56% | 47,417 | 9.64 | 10.11 | 0.0156250 | 1.614e-03 |
+
+score 差異以同一 checkpoint、相同位置的 batch=1,120 結果為基準。8,960 的各 rank 相對 L2 差約 0.152%–0.161%，高於 2,240／4,480 的最大約 0.0062%；是否影響最終棋力級別仍未知。
+
+解讀與限制：
+
+- 穩態吞吐約 10.8–11.4 萬盤面／秒，未隨 batch 明顯增加。各 rank 的 compute_seconds 約 4.46–4.67 秒，表示本次加大 batch 未大幅縮短計算時間；未做 kernel profiling，不能據此斷定硬體瓶頸。
+- 2,240 是本次較均衡的候選：穩態比 1,120 快 1.94%，含 setup 吞吐最高，allocated 峰值 2.54 GiB。8,960 穩態最快，但 allocated 增至 9.64 GiB，數值差異也較大；4,480 未見速度優勢。
+- 每個候選的正式量測僅約 5 秒，只有單次、固定由小至大的比較；後續候選可能受益於 OS cache，不能將幾個百分點的差異視為穩定增益。setup 包含 worker 啟動、第一批讀取與暖機。
+- 本次 channels-last 關閉，尚未驗證目前選定 channels-last 布局的推論效能；顯存統計僅涵蓋 PyTorch allocator。
+- 僅推論固定盤面子集，未執行全量每盤聚合、centroid 或 validation；k=5／10／15／20 與 Equal-k 官方分數均未知，無法判定數值差異對品質的影響。
+
+證據路徑（相對 repo 根目錄）：
+
+- `outputs/rank/reproduce_paper/se_infer_batch_benchmark_8gpu/benchmark.json`：各候選／rank 的耗時、吞吐、顯存、位置範圍與數值差異。
+- 同目錄的 `config.json`、`environment.json`、`reference_rank_00.npy` 至 `reference_rank_07.npy`。
+- `outputs/slurm-se-infer-batch-8gpu-673590.out`。
+- 本次實際 checkpoint：`outputs/rank/reproduce_paper/se_smoke100_8gpu/checkpoints/update_00000100_epoch_0000_batch_000100_1793602368217443709.pt`；SHA-256：`531839c8ebbedd1f7ecb24d548b1f435e0435bba662742fbd1f8bff70b3db306`。此檔名與上方已清理的歷史 job 673013 權重不同。
+
+本次僅整理既有 benchmark 產物，未重跑、提交作業或修改推論設定。
