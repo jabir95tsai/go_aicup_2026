@@ -315,6 +315,14 @@ def label(config, args):
                 for old in (move_array, color_array):
                     if old is not None:
                         _close_mmap(old)
+            # Shared-filesystem mmap flushes may leave stale bytes for other nodes.
+            for name, array in arrays.items():
+                temporary = out / f'{name}.tmp.npy'
+                with temporary.open('wb') as stream:
+                    np.save(stream, np.asarray(array), allow_pickle=False)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, out / f'{name}.npy')
             success = int(np.count_nonzero(arrays['status'] == 1))
             write_json(out / 'summary.json', {'positions': count, 'success': success,
                 'failed_or_pending': count - success, 'new_positions': produced,

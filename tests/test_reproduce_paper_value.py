@@ -42,7 +42,8 @@ def test_duplicate_or_post_game_turn_rejected():
             make_query('g', [0, 20], [0, 1], plies, 1, 'japanese', 6.5)
 
 
-def test_sharded_retry_export_and_mixed_teacher_rejection(tmp_path, monkeypatch):
+@pytest.mark.parametrize('copy_on_write', [False, True])
+def test_sharded_retry_export_and_mixed_teacher_rejection(tmp_path, monkeypatch, copy_on_write):
     """Small fake-engine integration: never starts a real engine, even if run."""
     from argparse import Namespace
     import json
@@ -72,6 +73,13 @@ def test_sharded_retry_export_and_mixed_teacher_rejection(tmp_path, monkeypatch)
     np.save(cache / 'shard_00000_moves.npy', np.tile(np.arange(44, dtype=np.int16), 2))
     np.save(cache / 'shard_00000_colors.npy',
             np.r_[np.arange(44) % 2, 1 - np.arange(44) % 2].astype(np.int8))
+    real_load = np.load
+    if copy_on_write:
+        def load_without_writeback(*args, **kwargs):
+            if kwargs.get('mmap_mode') == 'r+':
+                kwargs['mmap_mode'] = 'c'
+            return real_load(*args, **kwargs)
+        monkeypatch.setattr(module.np, 'load', load_without_writeback)
     calls = []
     fail_once = [True]
 
