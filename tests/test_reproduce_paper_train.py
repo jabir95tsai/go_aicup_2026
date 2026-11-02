@@ -172,3 +172,234 @@ def test_channels_last_preserves_controlled_bn_update(labelled):
         torch.testing.assert_close(losses[0][key], losses[1][key], atol=1e-5, rtol=1e-5)
     for name, value in baseline.state_dict().items():
         torch.testing.assert_close(value, candidate.state_dict()[name], atol=1e-5, rtol=1e-5)
+
+
+def full_config(labelled, tmp_path):
+    config = probe_config(labelled, tmp_path)
+    config['training'].pop('probe_updates')
+    config['training'].pop('warmup_steps')
+    config['training'].update(updates=4, lr_drop_after_updates=2, final_lr_after_updates=3)
+    return config
+
+
+def test_full_training_resume_final_model_and_no_resource_monitoring(labelled, tmp_path, monkeypatch):
+    from go_aicup.tasks.strength.reproduce_paper import train as trainer
+    from go_aicup.tasks.strength.shared.runtime import model_state_hash
+    from go_aicup.tasks.strength.reproduce_paper.model import StrengthEstimator
+    config = full_config(labelled, tmp_path)
+
+    def resource_monitor_called(*args, **kwargs):
+        raise AssertionError('production training must not collect resource usage')
+
+    monkeypatch.setattr(trainer, 'process_stats', resource_monitor_called)
+    finalized_checkpoints = []
+    finalize = trainer.finalize_training
+    def capture_final_checkpoint(directory, *args):
+        finalized_checkpoints.append(torch.load(resolve_checkpoint(directory / 'last.json'), weights_only=False))
+        finalize(directory, *args)
+    monkeypatch.setattr(trainer, 'finalize_training', capture_final_checkpoint)
+    first = train(config, stop_after=2)
+    directory = Path(config['paths']['output_dir'])
+    assert first['status'] == 'stopped' and not (directory / 'model.pt').exists()
+    log = directory / 'train.jsonl'
+    with log.open('a') as handle:
+        handle.write('{"step":3')
+    train(config, resume=directory / 'last.json')
+    payload = finalized_checkpoints[-1]
+    assert not (directory / 'last.json').exists() and not (directory / 'checkpoints').exists()
+    assert not (directory / 'best.json').exists()
+    retained = json.loads((directory / 'best_checkpoints.json').read_text())['checkpoints']
+    assert len(retained) == 2 and retained[0]['loss'] <= retained[1]['loss']
+    for record in retained:
+        checkpoint = torch.load(resolve_checkpoint(directory / record['file']), weights_only=False)
+        assert checkpoint['state']['checkpoint_loss'] == record['loss']
+    events = [json.loads(line) for line in log.read_text().splitlines()]
+    assert [row['step'] for row in events] == [1, 2, 3, 4]
+    assert [row['lr'] for row in events] == [0.04, 0.04, 0.02, 0.002]
+    assert not any('rss_bytes' in row or 'ranks' in row for row in events)
+    assert payload['state']['optimizer_steps'] == 4
+    assert payload['state']['checkpoint_loss_updates'] == 2
+    assert payload['state']['checkpoint_loss'] == pytest.approx(sum(row['total'] for row in events[2:]) / 2)
+    model_path = resolve_checkpoint(directory / 'model.pt')
+    final = torch.load(model_path, weights_only=False)
+    verifier = StrengthEstimator(**config['model'])
+    verifier.load_state_dict(final['model'])
+    assert model_state_hash(verifier) == final['model_state_sha256']
+    assert final['optimizer_steps'] == 4
+    for name, value in payload['model'].items():
+        torch.testing.assert_close(value, final['model'][name], rtol=0, atol=0)
+    continuous = copy.deepcopy(config)
+    continuous['paths']['output_dir'] = str(tmp_path / 'full_continuous')
+    train(continuous)
+    expected = finalized_checkpoints[-1]
+    for name, value in payload['model'].items():
+        torch.testing.assert_close(value, expected['model'][name], rtol=0, atol=0)
+    assert payload['scheduler'] == expected['scheduler']
+    for parameter, state in payload['optimizer']['state'].items():
+        torch.testing.assert_close(state['momentum_buffer'], expected['optimizer']['state'][parameter]['momentum_buffer'], rtol=0, atol=0)
+    retry = train(config, resume=directory / 'last.json')
+    assert retry['status'] == 'completed' and retry['updates_this_session'] == 0
+    assert len(log.read_text().splitlines()) == 4
+
+
+def test_full_training_stop_request_and_final_publication_retry(labelled, tmp_path, monkeypatch):
+    from go_aicup.tasks.strength.reproduce_paper import train as trainer
+    config = full_config(labelled, tmp_path)
+    directory = Path(config['paths']['output_dir'])
+    original_log = trainer.log_event
+
+    def stop_after_first(directory, rank, event):
+        original_log(directory, rank, event)
+        (directory / '.stop-requested').touch()
+
+    monkeypatch.setattr(trainer, 'log_event', stop_after_first)
+    stopped = train(config)
+    assert stopped['completed_updates'] == 1 and stopped['status'] == 'stopped'
+    assert not (directory / 'model.pt').exists()
+    monkeypatch.setattr(trainer, 'log_event', original_log)
+    finalize = trainer.finalize_training
+
+    def fail_finalize(*args):
+        raise OSError('simulated final publication failure')
+
+    monkeypatch.setattr(trainer, 'finalize_training', fail_finalize)
+    with pytest.raises(OSError, match='final publication failure'):
+        train(config, resume=directory / 'last.json')
+    payload = torch.load(resolve_checkpoint(directory / 'last.json'), weights_only=False)
+    assert payload['state']['optimizer_steps'] == 4
+    assert not (directory / '.writer.lock').exists()
+    monkeypatch.setattr(trainer, 'finalize_training', finalize)
+    final = train(config, resume=directory / 'last.json')
+    assert final['status'] == 'completed' and final['updates_this_session'] == 0
+    assert resolve_checkpoint(directory / 'model.pt').exists()
+
+
+def test_production_config_has_full_budget_and_checkpoint_interval():
+    config = read_config()
+    assert config['training']['updates'] == 35000
+    assert config['training']['checkpoint_every'] == 1000
+    assert 'probe_updates' not in config['training']
+    assert config['training']['microbatch_groups'] == 16
+    assert config['training']['channels_last'] and not config['training']['cudnn_benchmark']
+    assert config['precision'] == 'bf16' and config['device'] == 'cuda'
+    assert Path(config['paths']['label_dir']).name == 'train'
+
+
+def test_two_process_full_training(labelled, tmp_path):
+    import os
+    import subprocess
+    import sys
+    config = full_config(labelled, tmp_path)
+    path = tmp_path / 'full_config.json'
+    path.write_text(json.dumps(config))
+    result = subprocess.run([
+        sys.executable, '-m', 'torch.distributed.run', '--standalone', '--nnodes=1',
+        '--nproc-per-node=2', '-m', 'go_aicup.tasks.strength.reproduce_paper.train',
+        '--config', str(path)], capture_output=True, text=True, timeout=120,
+        env=dict(os.environ, OMP_NUM_THREADS='1', MKL_NUM_THREADS='1'))
+    assert result.returncode == 0, result.stdout + result.stderr
+    directory = Path(config['paths']['output_dir'])
+    payload = torch.load(resolve_checkpoint(directory / 'model.pt'), weights_only=False)
+    assert payload['optimizer_steps'] == 4
+    assert not (directory / 'last.json').exists() and not (directory / 'checkpoints').exists()
+    assert resolve_checkpoint(directory / 'model.pt').exists()
+    assert len((directory / 'train.jsonl').read_text().splitlines()) == 4
+
+
+def test_completed_training_cleanup_can_resume_after_partial_deletion(labelled, tmp_path, monkeypatch):
+    from go_aicup.tasks.strength.reproduce_paper import train as trainer
+    config = full_config(labelled, tmp_path)
+    directory = Path(config['paths']['output_dir'])
+    remove = trainer.shutil.rmtree
+
+    def fail_after_removing_checkpoints(path):
+        remove(path)
+        raise OSError('simulated cleanup interruption')
+
+    monkeypatch.setattr(trainer.shutil, 'rmtree', fail_after_removing_checkpoints)
+    with pytest.raises(OSError, match='cleanup interruption'):
+        train(config)
+    assert resolve_checkpoint(directory / 'model.pt').exists()
+    assert not (directory / 'checkpoints').exists()
+    assert (directory / 'last.json').exists()
+    assert not (directory / '.writer.lock').exists()
+    for name in ('last.json.tmp', '.stop-requested', 'train.tmp', 'model.pt.tmp', 'model.complete.json.tmp'):
+        (directory / name).touch()
+    preserved = {path.name: path.read_bytes() for path in directory.iterdir()
+                 if path.name in ('config.json', 'data_identity.json', 'train.jsonl', 'environment.json',
+                                  'model.pt', 'model.complete.json', 'training_summary.json')}
+    monkeypatch.setattr(trainer.shutil, 'rmtree', remove)
+    result = train(config, resume=directory / 'last.json')
+    assert result['status'] == 'completed' and result['updates_this_session'] == 0
+    assert not (directory / '.writer.lock').exists()
+    assert not (directory / 'last.json').exists()
+    assert not list(directory.glob('*.tmp')) and not (directory / '.stop-requested').exists()
+    for name, contents in preserved.items():
+        assert (directory / name).read_bytes() == contents
+    assert train(config)['updates_this_session'] == 0
+
+
+def test_cleanup_refuses_invalid_or_incomplete_final_model(labelled, tmp_path):
+    from go_aicup.tasks.strength.reproduce_paper.train import cleanup_training
+    config = full_config(labelled, tmp_path)
+    directory = Path(config['paths']['output_dir'])
+    train(config, stop_after=2)
+    previous = resolve_checkpoint(directory / 'last.json')
+    with pytest.raises(FileNotFoundError):
+        cleanup_training(directory, config)
+    assert previous.exists()
+    train(config, resume=directory / 'last.json')
+    (directory / 'checkpoints').mkdir()
+    retained = directory / 'checkpoints' / 'retained.pt'
+    retained.touch()
+    (directory / 'last.json').write_text('{}')
+    with (directory / 'model.pt').open('ab') as handle:
+        handle.write(b'corrupt')
+    with pytest.raises(ValueError, match='hash mismatch'):
+        cleanup_training(directory, config)
+    assert retained.exists() and (directory / 'last.json').exists()
+
+
+def test_best_checkpoint_copy_failure_preserves_resume_and_retries(labelled, tmp_path, monkeypatch):
+    from go_aicup.tasks.strength.reproduce_paper import train as trainer
+    config = full_config(labelled, tmp_path)
+    directory = Path(config['paths']['output_dir'])
+    original = trainer.shutil.copyfile
+    copies = []
+    def fail_second_copy(source, destination):
+        copies.append(source)
+        if len(copies) == 2:
+            Path(destination).write_bytes(b'incomplete')
+            raise OSError('simulated checkpoint copy failure')
+        return original(source, destination)
+    monkeypatch.setattr(trainer.shutil, 'copyfile', fail_second_copy)
+    with pytest.raises(OSError, match='copy failure'):
+        train(config)
+    assert resolve_checkpoint(directory / 'last.json').exists()
+    assert len(list((directory / 'checkpoints').glob('*.pt'))) == 2
+    assert not (directory / 'best_checkpoints.json').exists()
+    monkeypatch.setattr(trainer.shutil, 'copyfile', original)
+    assert train(config, resume=directory / 'last.json')['updates_this_session'] == 0
+    assert not (directory / 'checkpoints').exists() and not (directory / 'best.json').exists()
+    records = json.loads((directory / 'best_checkpoints.json').read_text())['checkpoints']
+    assert len(records) == 2
+    for record in records:
+        assert resolve_checkpoint(directory / record['file']).exists()
+    assert not list(directory.glob('*.tmp'))
+
+
+def test_single_saved_checkpoint_and_corrupt_archive_guard(labelled, tmp_path):
+    from go_aicup.tasks.strength.reproduce_paper.train import cleanup_training
+    config = full_config(labelled, tmp_path)
+    config['training']['checkpoint_every'] = 1000
+    directory = Path(config['paths']['output_dir'])
+    train(config)
+    assert (directory / 'best_1.pt').exists() and not (directory / 'best_2.pt').exists()
+    with (directory / 'best_1.pt').open('ab') as handle:
+        handle.write(b'corrupt')
+    (directory / 'checkpoints').mkdir()
+    remaining = directory / 'checkpoints' / 'remaining.pt'
+    remaining.touch()
+    with pytest.raises(ValueError, match='hash mismatch'):
+        cleanup_training(directory, config)
+    assert remaining.exists()

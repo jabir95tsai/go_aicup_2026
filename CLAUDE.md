@@ -443,3 +443,23 @@ project/
 依使用者決定，reproduce_paper 訓練採 `channels_last=true`、`cudnn_benchmark=false`，同步 `configs/strength/se_seed2026.json` 與 `se_smoke100.json`。預設短測改用獨立 `outputs/rank/reproduce_paper/se_smoke100_default_8gpu/`，不改寫已完成的 baseline／對照 config 或輸出。模型、128 組、LR schedule、35,000 步預算不變；正式完整訓練入口尚未完成。
 
 依據：job 673150（channels-last）5.133 steps/s、allocated 峰值 16.85 GiB；job 673193（兩者合用）5.152 steps/s、18.70 GiB，額外吞吐僅約 0.37%。此為效能設定決策，不以 100 步 loss 宣稱棋力改善；尚無同版本新 baseline 或重複量測。未提交新 GPU 作業。
+
+
+### 2026-11-02：reproduce_paper 正式訓練入口
+
+依使用者確認，先完成正式訓練、續跑與最終 model.pt；centroid／評估留待下一步。train.py 預設改讀 se_seed2026.json，完成 CUDA／BF16／SyncBN／channels-last 的單節點 8 卡、35,000 updates 入口及 slurm/se_train.slurm。每 1,000 步保存 checkpoint，以自前次保存後的平均 training total loss 比較；只有新 loss 嚴格較低才刪緊接前一份，不清更早歷史，相等／較高保留兩份。保留最新 checkpoint 作續跑，正式訓練取消資源用量與更新 norm 監控。提前停止／Slurm 停止檔在完整更新後同步保存；全部更新完成才發布經重載驗證的 model.pt，支援最終發布重試。已完成逐位置推論與 batch 效能測試，本輪依使用者要求不跑 GPU 短測、不提交正式訓練或推論。CPU 合成工程驗證見 RESULTS.md；GPU 中斷續跑、正式收斂及分 k 成績未知。最新契約與操作見 reproduce_paper PLAN.md 第 5 節及 README。V1／V2 未傳 checkpoint loss 參數時保留原 latest-only 行為。
+
+
+### 2026-11-02：reproduce_paper 完整訓練後清除續跑殘留
+
+依使用者要求，正式訓練完成、最終模型驗證及完成摘要發布成功後，自動刪除 checkpoints/ 全目錄、last.json、停止請求與已知暫存，保留 model.pt／marker、設定、資料身分、loss、環境與 session 摘要。清理前再次驗證最終 checksum／config／完成步數；失敗不刪檔。提前停止及最終發布失敗仍保留續跑資料。完成清理中斷可使用相同 config 重跑補清，不依賴 last.json、不增加更新；probe 路徑不清除 checkpoint。本次僅程式／CPU 合成回歸，不啟動官方訓練或刪除既有實驗產物。
+
+
+### 2026-11-02：reproduce_paper 完訓後自動全量評估與圖表
+
+依使用者追加要求，預設正式入口在全部訓練、最終模型及續跑清理成功後，自動呼叫 evaluate.py。全部 800,000 training 棋局有效位置按位置等權建立十級 centroid、統計及全量 histogram；全量 validation 推論後以固定題組所有位置平均＋nearest-centroid（並列取較低 index）評估 k=5／10／15／20 的官方公式分數與 Equal-k，另存各級／單盤診斷、confusion matrices 與 training loss learning curve。預設 evaluation.per_gpu_batch_size=2240；不再做 GPU 短測或 batch benchmark。產物在 run/evaluation/，包含可重用的全部逐位置分片、每盤／每題統計、CSV／JSON／NPY／NPZ 及 10 張 PNG；可用 evaluate --report-only 在 CPU 重建。原訓練 checkpoint 清理政策不變；評估失敗不重新訓練。本輪不啟動正式訓練或全量推論，不宣稱幽玄真實分 k 成績。最新規格／驗收見本目錄 PLAN.md 第 6 節與 RESULTS.md。
+
+
+### 2026-11-02：reproduce_paper 保留最低 loss 的兩個 checkpoint
+
+依使用者最新要求，取代先前相鄰比較及完訓刪除全部 checkpoint：正式訓練每次保存後保留全歷程 training total loss 保存窗口平均最低的兩份，另保留最新一份供續跑；loss 相同優先較晚 optimizer step。完訓先原子留存並驗證 best_1.pt／best_2.pt（完整 checkpoint）及 complete markers、best_checkpoints.json，成功後才刪來源 checkpoints/、last.json、best.json 與暫存；失敗保留來源並可重試，不增加更新。不足兩份時只留實際份數，舊規則已刪除的檔案無法還原。model.pt 仍是最後一步，完訓後自動 centroid／評估不切換至最佳 training loss 權重。V1／V2／probe 不傳 loss 時仍維持原 latest-only 行為；本輪不啟動 GPU 工作或對既有實驗檔操作。

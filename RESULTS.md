@@ -1521,3 +1521,47 @@ split 1／2 分開：保險單獨 0.9385／0.9343，融合 0.9865／0.9828，融
 依據：job 673150（channels-last）5.133 steps/s、allocated 峰值 16.85 GiB；job 673193（兩者合用）5.152 steps/s、18.70 GiB，額外吞吐僅約 0.37%。此為效能設定決策，不以 100 步 loss 宣稱棋力改善；尚無同版本新 baseline 或重複量測。未提交新 GPU 作業。
 
 本次驗證：預設兩份 config 開關與 35,000 步預算 assert 通過；`tests/test_reproduce_paper_train.py` **7 passed（19.77s）**，`git diff --check` 通過。CPU 測試的基準 fixture 明確保持 contiguous，另有 channels-last 專用驗證，避免預設變更讓布局對照失效。
+
+
+### 2026-11-02：SE 正式 35,000 步訓練入口（未啟動正式訓練）
+
+依使用者確認範圍，沿用 reproduce_paper/train.py 完成正式訓練、續跑及最終 model.pt；centroid／評估留待下一步，已完成的逐位置推論與 batch 效能測試不重跑。本輪依指示不執行 GPU 短測、不提交 Slurm 或官方訓練。預設 config 改為 se_seed2026.json，補齊 training value 路徑、CUDA／BF16、SyncBN、每卡 16 組、4 workers；固定 128 組、35,000 updates 與 .04／.02／.002 schedule，channels-last 開啟、cuDNN 搜尋關閉。
+
+Checkpoint 每 1,000 步及正常停止／最後一步保存，loss 為前次保存後各步跨 rank 平均 training total loss 的平均，保存實際窗口步數。只有新 loss 嚴格小於緊接前一份才刪除前一份與 marker；相等／變差保留新舊，更早歷史不清。新檔與 last.json 原子發布後才刪舊檔，last.json 永遠指最新更新。shared checkpoint 新增可選 loss，未傳的 V1／V2／probe 保持 latest-only。正式路徑不收集顯存／RAM／I/O／更新 norm；保留逐步 loss／LR、finite checks、資料／程式身分、起始及續跑環境。正常停止支援 --stop-after，Slurm 預告透過 batch shell 建立停止檔，在完整 update 後跨 rank 同步保存。正式續跑只接受該 run latest checkpoint 與相同 config／data／world／code。
+
+完成全預算後原子發布經重載／hash 驗證的 model.pt／model.complete.json，保留可續跑 checkpoint；最終發布失敗可從完成步數重試，不增加一次更新。infer.py 適配 run 根目錄最終模型，原 checkpoints/ 路徑仍可讀取。新增 slurm/se_train.slurm（8gpus、單節點 8 GPU、96 CPU、128 GiB RAM、4 小時、時限前 120 秒通知）；命令為 sbatch slurm/se_train.slurm，續跑加 --resume outputs/rank/reproduce_paper/se_seed2026/last.json。腳本仍受既有 slurm/ ignore，需 git add -f 納入版本控制。
+
+CPU 工程驗證：tests/test_checkpoint_retention.py、tests/test_reproduce_paper_train.py、tests/test_reproduce_paper_infer.py 首次合計 20 passed／1 failed（28.47s）；失敗是新增 final-model 推論測試設定 warmup_batches=0，被既有 benchmark 的至少 1 批限制正確拒絕。改為 1 後單獨重跑該測試 1 passed（4.61s），合計 21 個測試分次驗證通過。涵蓋保留／相等／變差／嚴格改善及只刪緊接前一份、發布失敗保住舊檔、正式步數／降率、CPU FP32 續跑模型／momentum／scheduler 一致、partial JSONL、停止檔、最終發布失敗恢復與完成後零更新、正式路徑不呼叫資源監控、兩程序 Gloo 及 final model 推論接線。bash -n slurm/se_train.slurm 與 git diff --check 通過。
+
+舊 channels-last 實測外推約 1.894 小時／15.152 GPU-hours，取消監控後未重測，不宣稱取得新的加速數字。每份 checkpoint 舊量測約 185.4 MiB，若 35 份全部保留約 6.34 GiB，另留原子暫存與最終模型空間。未驗收 GPU／Slurm 實際中斷續跑或正式收斂，k=5／10／15／20 及 Equal-k 均未知；本版 game-disjoint，不直接與主線 player-disjoint 比較。
+
+
+### 2026-11-02：SE 完整訓練後自動清理續跑資料
+
+依使用者要求，完整訓練在 model.pt 重載驗證、complete marker 與完成摘要發布成功後，清除 checkpoints/（含所有歷史 checkpoint／marker／暫存）、last.json、停止請求與已知根目錄暫存；writer lock 在退出時移除。保留最終模型／marker、config、data_identity、loss、environment 與 session／training 摘要。提前停止／最終發布失敗仍保留續跑資料。清理前再次驗證最終 checksum、完成步數及 config；損壞或不匹配時不刪檔。清理中斷後可重跑相同 config（或原 --resume 命令）補清，不依賴已刪除的 last.json、不增加更新。只修改 reproduce_paper 路徑，不改 probe／shared checkpoint 清理政策。
+
+驗證：PYTHONPATH=src OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 /home/jason1122/.conda/envs/go/bin/python -m pytest tests/test_reproduce_paper_train.py tests/test_reproduce_paper_infer.py -q，18 passed（43.94s）；git diff --check 通過。涵蓋完整清理、失敗時續跑狀態保留、最終模型損壞拒絕清理、刪到一半後不依賴 last.json 重試、重複完成零額外更新、模型／設定／log／環境內容保留，以及兩程序 Gloo 與最終模型推論回歸。本次不跑 GPU 短測、不啟動官方訓練、不清理任何既有實驗輸出；正式 GPU／Slurm 收尾尚未實測。
+
+
+### 2026-11-02：SE 完訓後全量 training centroid／分布、validation 評估與 learning curve
+
+使用者要求完整訓練後，以全部 training 建立各級分數平均／分布，並輸出 confusion matrix、官方分數及 learning curve。新增 reproduce_paper/evaluate.py，預設 se_seed2026.json 設 evaluation.per_gpu_batch_size=2240；正式 CLI／Slurm 完成訓練、最終模型與續跑清理後自動接評估，提前停止不執行。自動評估沿用已初始化的 process group，評估後才釋放；單獨 evaluate 自行初始化。評估失敗後可從最終模型及完成分片接續，不恢復 optimizer，不重跑訓練或 teacher。原有 infer_positions 增加可關閉資源量測的參數，既有 benchmark 預設行為保留。
+
+Training 全部 800,000 盤／76,763,475 有效位置按位置等權，保存十級 mean／std／min／max／count、centroids.npy 及全量共用 128-bin histogram；不使用每盤七手抽樣代替全量。Validation 全部 200,000 盤／19,183,737 位置，固定 10,000 題按所有位置平均，再 nearest-centroid（並列取較低 rank index），不擬合 validation 切點。官方公式使用 metrics.rank_report／NEAR，保存 k=5／10／15／20 的 exact、within1、score 及 Equal-k，另存各級題目成績與單盤診斷。Learning curve 從完整 train.jsonl 重建 total／BT／policy／value 原始及 trailing-100 平均；未建立虛構的中途 validation 曲線。
+
+產物在 run/evaluation/：綁定最終模型／prepared／題組／程式／world／batch／精度／布局的 identity，全部 float32 逐位置 score 分片及 checksum、每盤 score_sum／position_count／mean、centroid／級別統計、histogram counts、逐題預測、官方分數 CSV／JSON、6 組 confusion NPY 及 learning_curve.csv。plot/ 共 10 張 PNG（training 分布、centroid、單盤／全部題目／四 k 的 6 張 confusion、官方分數、learning curve）。Confusion 列真值／欄預測，cell 數量標示、真值列正規化著色；不呼叫 plt.show()。相同 identity 可重用完成的分片；checksum／來源不同拒絕混用；evaluate --report-only 在 CPU 從保存分數重建。保留全部 score 分片供重建，合計約 366 MiB；不保留已清除的訓練 checkpoint。
+
+驗證：先新增的 4 項 CPU 合成測試通過（15.76s）。加入兩程序完訓後接評估時，相關三檔測試為 22 passed／1 failed（53.10s）：第二次建立 process group 出現 Gloo connectFullMesh 失敗。修正為 train 將 process group 交給評估，單項兩程序驗收 1 passed（17.88s）。最後改用實際四步合成訓練→最終發布／清理→兩程序評估的完整接線，連同 tests/test_reproduce_paper_evaluate.py、tests/test_reproduce_paper_infer.py、tests/test_reproduce_paper_train.py、tests/test_checkpoint_retention.py 合計 28 passed（58.19s）。涵蓋長短盤按位置等權手算、全部 histogram counts、centroid 並列、題組防洩漏／重複拒絕、官方公式、分片重用／損壞拒絕、CPU 圖表重建、正式評估不讀資源 counters、自動完整／提前停止接線及兩程序 Gloo。檢視合成十級分布 PNG 的布局；evaluate --help、bash -n slurm/se_train.slurm 與 git diff --check 通過。
+
+既有 BF16／contiguous batch=2240 benchmark 為 110,816 positions/s，全部 95,947,212 位置粗估純推論約 14.43 分鐘／1.92 GPU-hours；channels-last、冷快取、匯出與繪圖成本未在本輪量測，不以此保證全量效能。沒有提交 GPU 工作、啟動官方全量訓練／推論、重做既有 batch benchmark 或新增外部依賴。真實 k=5／10／15／20、Equal-k 與相對增益皆未知，仍是 game-disjoint／可能玩家重疊的本地驗證，不與主線 player-disjoint 成績直接比優劣。論文式各 N／500 次及 CI 不在本次新增需求範圍。
+
+
+### 2026-11-02：SE 保留全歷程最低 loss 的兩個 .pt checkpoint
+
+依使用者對「checkpoints/ 全部歷史與暫存」清理規則的追加要求，改為訓練中保留歷次保存窗口平均 training total loss 最低兩份及最新一份供續跑，最多三份；同 loss 優先較晚 optimizer step。每 1,000 步及正常停止／最後一步的保存頻率不變。shared checkpoint 的 loss 模式以 best.json 原子記錄前兩名，先發布新檔／last.json／best.json 再刪除未入選舊檔；V1／V2／probe 未傳 loss 仍是 latest-only。此規則取代相鄰 loss 改善就刪前一份，以免遺失真正全歷程最佳權重。
+
+完訓在最終 model.pt 與完成摘要驗證成功後，先把兩份完整 checkpoint 原子複製、hash 驗證為 run 根目錄 best_1.pt／best_2.pt，保留 complete markers 及 best_checkpoints.json（loss／步數／checksum），再刪 checkpoints/ 原始目錄、last.json、best.json 及暫存。少於兩份時只留實際份數。兩份包含原本的模型／optimizer／scheduler／RNG；複製失敗不刪來源，已留存後清理中斷可重試，沒有多做更新。留存也合併 last.json，以涵蓋最新 checkpoint 已發布但 best.json 更新失敗的情況。infer.py 可從 run 根目錄載入這兩份 .pt。model.pt 及自動全量 centroid／validation 評估仍用最後一步權重，不依 training loss 自動切換。
+
+驗證：tests/test_checkpoint_retention.py、tests/test_reproduce_paper_train.py、tests/test_reproduce_paper_infer.py、tests/test_reproduce_paper_evaluate.py 合計 31 passed（65.86s）。補上最佳索引發布失敗時合併 latest 的恢復路徑後，重跑 checkpoint retention 全檔及兩個複製／清理恢復測試，8 passed（5.59s），含 1 項新增測試；共 32 個測試分次驗證通過。涵蓋兩個全歷程最低 loss＋最新檔、同分取較晚步數、避免被相鄰刪除遺失、完整 .pt/state loss、只有一份時的行為、第二份複製失敗保留來源並重試、留存檔損壞拒絕清理、best index 發布失敗恢復、best_1.pt 推論，以及完訓／評估 CPU／兩程序回歸。git diff --check 通過。
+
+只修改程式／文件並使用合成資料驗證；未啟動 GPU 或正式訓練，也未對既有實驗產物做留存／刪除。歷史上已依舊規則清除的 checkpoint 無法復原。原先每份約 185.4 MiB 的估計下，完訓保留兩份約 370.8 MiB，另留暫存與最終模型空間；實際正式檔案大小與分 k 成績未知。

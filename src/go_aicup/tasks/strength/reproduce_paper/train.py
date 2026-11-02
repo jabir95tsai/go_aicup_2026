@@ -1,10 +1,12 @@
-"""Eight-GPU training probe with complete groups and measured costs."""
+"""Eight-GPU SE training with resumable updates; optional bounded performance probe."""
 import argparse
 from contextlib import nullcontext
 import json
 import os
 from pathlib import Path
 import resource
+import signal
+import shutil
 import time
 
 import numpy as np
@@ -17,10 +19,10 @@ from go_aicup.artifacts import file_hash, object_hash, write_json
 from go_aicup.paths import ROOT
 from go_aicup.tasks.strength.shared.checkpoint import save_checkpoint, resolve_checkpoint
 from go_aicup.tasks.strength.shared.runtime import (
-    autocast_context, setup_distributed, on_rank_zero, barrier)
+    autocast_context, setup_distributed, on_rank_zero, barrier, model_state_hash)
 from go_aicup.tasks.strength.shared.training import (
     configure_torch, seed_process, environment, restore_rng, log_event)
-from .config import read_config, validate_config
+from .config import DEFAULT_CONFIG, read_config, validate_config
 from .dataset import PaperDataset, GroupBatchSampler, collate_groups
 from .losses import grouped_losses
 from .model import StrengthEstimator
@@ -62,30 +64,135 @@ def synchronize(device):
         torch.cuda.synchronize(device)
 
 
-def train(config, *, resume=None, stop_after=None):
+def trim_training_log(directory, step):
+    """Discard updates beyond the durable cursor, including a torn final line."""
+    path = directory / 'train.jsonl'
+    if not path.exists():
+        return
+    temporary = path.with_suffix('.tmp')
+    with path.open() as source, temporary.open('w') as target:
+        for line in source:
+            if not line.endswith('\n'):
+                break
+            event = json.loads(line)
+            if event['step'] <= step:
+                target.write(line)
+    os.replace(temporary, path)
+
+
+def finalize_training(directory, model, config, manifest, code, step):
+    """Publish and verify final weights before any resumable state is removed."""
+    if step != config['training']['updates']:
+        raise ValueError('cannot finalize incomplete training')
+    payload = dict(artifact_format='strength_estimator_1',
+                   model={name: value.detach().cpu() for name, value in model.state_dict().items()},
+                   config=config, optimizer_steps=step, dataset_id=manifest['dataset_id'],
+                   cache_build_id=manifest['cache_build_id'], code_sha256=code,
+                   model_state_sha256=model_state_hash(model))
+    path = directory / 'model.pt'
+    temporary = path.with_suffix('.pt.tmp')
+    torch.save(payload, temporary)
+    loaded = torch.load(temporary, map_location='cpu', weights_only=False)
+    verifier = StrengthEstimator(**config['model'])
+    verifier.load_state_dict(loaded['model'])
+    if model_state_hash(verifier) != payload['model_state_sha256']:
+        raise ValueError('final model reload verification failed')
+    os.replace(temporary, path)
+    write_json(path.with_suffix('.complete.json'), dict(status='completed', optimizer_steps=step,
+                                                       file=path.name, sha256=file_hash(path)))
+
+
+def archive_best_checkpoints(directory):
+    """Commit the two best full checkpoints before deleting resumable storage."""
+    archive = directory / 'best_checkpoints.json'
+    if archive.exists():
+        records = json.loads(archive.read_text())['checkpoints']
+    else:
+        best = directory / 'best.json'
+        selected = json.loads(best.read_text())['checkpoints'] if best.exists() else []
+        latest = directory / 'last.json'
+        if latest.exists():
+            selected.append(json.loads(latest.read_text()))
+        selected = list({record['file']: record for record in selected}.values())
+        if any(not np.isfinite(record['loss']) for record in selected):
+            raise ValueError('invalid ranked checkpoint loss')
+        selected = sorted(selected, key=lambda record: (record['loss'], -record['optimizer_steps'], record['file']))[:2]
+        records = []
+        for index, record in enumerate(selected[:2], start=1):
+            if Path(record['file']).name != record['file']:
+                raise ValueError('unsafe ranked checkpoint path')
+            source = resolve_checkpoint(directory / 'checkpoints' / record['file'])
+            if file_hash(source) != record['sha256']:
+                raise ValueError('ranked checkpoint hash mismatch')
+            target = directory / f'best_{index}.pt'
+            temporary = target.with_suffix('.pt.tmp')
+            shutil.copyfile(source, temporary)
+            if file_hash(temporary) != record['sha256']:
+                raise ValueError('archived checkpoint copy verification failed')
+            os.replace(temporary, target)
+            published = dict(record, file=target.name)
+            write_json(target.with_suffix('.complete.json'), published)
+            records.append(published)
+        write_json(archive, {'checkpoints': records})
+    if len(records) > 2:
+        raise ValueError('invalid best checkpoint archive')
+    for index, record in enumerate(records, start=1):
+        if (record['file'] != f'best_{index}.pt' or not np.isfinite(record['loss'])
+                or file_hash(resolve_checkpoint(directory / record['file'])) != record['sha256']):
+            raise ValueError('archived checkpoint identity/hash mismatch')
+
+
+def cleanup_training(directory, config):
+    """Remove resumable state only after a complete final artifact is verified."""
+    path = resolve_checkpoint(directory / 'model.pt')
+    record = json.loads(path.with_suffix('.complete.json').read_text())
+    payload = torch.load(path, map_location='cpu', weights_only=False)
+    if (record.get('status') != 'completed'
+            or payload.get('artifact_format') != 'strength_estimator_1'
+            or payload['optimizer_steps'] != config['training']['updates']
+            or object_hash(payload['config']) != object_hash(config)):
+        raise ValueError('final model/config mismatch; refusing checkpoint cleanup')
+    archive_best_checkpoints(directory)
+    checkpoints = directory / 'checkpoints'
+    if checkpoints.exists():
+        shutil.rmtree(checkpoints)
+    for name in ('last.json', 'last.json.tmp', 'best.json', 'best.json.tmp', '.stop-requested', 'train.tmp',
+                 'model.pt.tmp', 'model.complete.json.tmp', 'best_1.pt.tmp', 'best_2.pt.tmp',
+                 'best_1.complete.json.tmp', 'best_2.complete.json.tmp', 'best_checkpoints.json.tmp'):
+        (directory / name).unlink(missing_ok=True)
+
+
+def train(config, *, resume=None, stop_after=None, keep_distributed=False):
     validate_config(config)
     options = config['training']
     groups = options['groups_per_update']
-    limit = options['probe_updates'] if stop_after is None else stop_after
-    if (type(limit) is not int or not 1 <= limit <= options['probe_updates'] <= options['updates']
-            or options['probe_updates'] > 500):
+    if type(groups) is not int or groups < 1 or type(options['updates']) is not int or options['updates'] < 1:
+        raise ValueError('groups and updates must be positive integers')
+    if options['optimizer'] != 'sgd':
+        raise ValueError('SE training requires SGD')
+    probe = 'probe_updates' in options
+    budget = options['probe_updates'] if probe else options['updates']
+    limit = budget if stop_after is None else stop_after
+    if probe and (type(budget) is not int or not 1 <= budget <= 500):
         raise ValueError('probe must run 1..500 updates within the training budget')
+    if type(limit) is not int or not 1 <= limit <= budget <= options['updates']:
+        raise ValueError('stop must be a positive update within the training budget')
     for key in ('microbatch_groups', 'checkpoint_every'):
         if type(options[key]) is not int or options[key] < 1:
             raise ValueError(f'{key} must be positive')
     if type(options['workers']) is not int or options['workers'] < 0:
         raise ValueError('workers must be a nonnegative integer')
     if config['precision'] not in ('fp32', 'bf16') or config['device'] not in ('cpu', 'cuda'):
-        raise ValueError('probe supports fp32/bf16 and cpu/cuda')
-    if not 0 <= options['warmup_steps'] < options['probe_updates']:
+        raise ValueError('training supports fp32/bf16 and cpu/cuda')
+    if probe and not 0 <= options['warmup_steps'] < budget:
         raise ValueError('invalid warmup measurement window')
     if not (0 < options['lr_drop_after_updates'] < options['final_lr_after_updates'] < options['updates']
             and 0 < options['final_lr'] <= options['lr_after_drop'] <= options['lr']):
         raise ValueError('invalid learning-rate schedule')
     if config['loss_weights'] != dict(bt=1.0, policy=1.0, value=1.0):
-        raise ValueError('probe requires the confirmed equal loss weights')
+        raise ValueError('training requires the confirmed equal loss weights')
     if config['device'] == 'cuda' and int(os.environ.get('WORLD_SIZE', '1')) != 8:
-        raise ValueError('CUDA probe requires exactly eight GPUs via torchrun')
+        raise ValueError('CUDA training requires exactly eight GPUs via torchrun')
     configure_torch(config)
     # Shared runtime's batch divisibility check uses sample counts; here the unit is a complete group.
     runtime = dict(config, training=dict(options, global_batch_size=groups),
@@ -94,18 +201,44 @@ def train(config, *, resume=None, stop_after=None):
     directory = Path(config['paths']['output_dir'])
     dataset = None
     lock = directory / '.writer.lock'
+    stop_file = directory / '.stop-requested'
     locked = False
     started = time.perf_counter()
+    handlers = {}
+    stop_requested = False
+    handoff = False
+    def request_stop(signum, frame):
+        nonlocal stop_requested
+        stop_requested = True
     try:
+        if not probe:
+            for signum in (signal.SIGUSR1, signal.SIGTERM, signal.SIGINT):
+                handlers[signum] = signal.signal(signum, request_stop)
         def initialize():
             directory.mkdir(parents=True, exist_ok=True)
-            if resume is None and any(directory.iterdir()):
-                raise ValueError('nonempty probe output; use --resume or a new output directory')
+            completed_artifact = not probe and (directory / 'model.complete.json').is_file()
+            if resume is None and any(directory.iterdir()) and not completed_artifact:
+                raise ValueError('nonempty training output; use --resume or a new output directory')
             fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             with os.fdopen(fd, 'w') as handle:
                 handle.write(str(os.getpid()))
+            if not probe:
+                stop_file.unlink(missing_ok=True)
         on_rank_zero(initialize, rank)
         locked = True
+        if not probe:
+            completed_artifact = [False]
+            def finish_completed():
+                if (directory / 'model.complete.json').exists():
+                    cleanup_training(directory, config)
+                    completed_artifact[0] = True
+            on_rank_zero(finish_completed, rank)
+            if world > 1:
+                dist.broadcast_object_list(completed_artifact, src=0)
+            if completed_artifact[0]:
+                handoff = True
+                return dict(start_step=options['updates'], completed_updates=options['updates'],
+                            updates_this_session=0, status='completed', finite_checks_passed=True)
         seed_process(config['seed'])
         dataset = PaperDataset(config['paths']['dataset_dir'], augment=True, seed=config['seed'],
                                cache_dir=config['paths']['cache_dir'],
@@ -122,6 +255,12 @@ def train(config, *, resume=None, stop_after=None):
         manifest = dict(dataset_id=object_hash(identity), cache_build_id=record['identity']['cache_build_id'])
         code = {name: file_hash(Path(__file__).with_name(name)) for name in
                 ('train.py', 'config.py', 'dataset.py', 'model.py', 'losses.py')}
+        if not probe:
+            package = ROOT / 'src/go_aicup'
+            for name in ('tasks/strength/shared/runtime.py', 'tasks/strength/shared/training.py',
+                         'tasks/strength/shared/checkpoint.py', 'tasks/strength/shared/dataset.py',
+                         'data/board_cache.py', 'artifacts.py'):
+                code[name] = file_hash(package / name)
         model = StrengthEstimator(**config['model']).to(device)
         if options['sync_batch_norm'] and world > 1:
             model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
@@ -134,7 +273,10 @@ def train(config, *, resume=None, stop_after=None):
         step = 0
         payload = None
         if resume is not None:
-            payload = torch.load(resolve_checkpoint(Path(resume)), map_location=device, weights_only=False)
+            checkpoint = resolve_checkpoint(Path(resume))
+            if not probe and checkpoint.resolve() != resolve_checkpoint(directory / 'last.json').resolve():
+                raise ValueError('resume must use this run latest checkpoint')
+            payload = torch.load(checkpoint, map_location=device, weights_only=False)
             if (payload['config_sha256'] != object_hash(config) or payload['dataset_id'] != manifest['dataset_id']
                     or payload['world_size'] != world or payload['code_sha256'] != code):
                 raise ValueError('checkpoint config/data/world/code mismatch')
@@ -142,7 +284,7 @@ def train(config, *, resume=None, stop_after=None):
             optimizer.load_state_dict(payload['optimizer'])
             scheduler.load_state_dict(payload['scheduler'])
             step = payload['state']['optimizer_steps']
-            if not 0 <= step < limit:
+            if not 0 <= step <= limit or (probe and step == limit):
                 raise ValueError('checkpoint is already at or past the requested stop')
         wrapped = (DistributedDataParallel(model, device_ids=[device.index] if device.type == 'cuda' else None)
                    if world > 1 else model)
@@ -157,21 +299,18 @@ def train(config, *, resume=None, stop_after=None):
         loader = DataLoader(dataset, batch_sampler=sampler, collate_fn=collate_groups, **loader_options)
         iterator = iter(loader)
         # PyTorch exposes worker processes only on the iterator; used solely for Linux resource accounting.
-        worker_pids = [worker.pid for worker in getattr(iterator, '_workers', [])]
+        worker_pids = [worker.pid for worker in getattr(iterator, '_workers', [])] if probe else []
+        session_id = time.time_ns()
         def metadata():
             write_json(directory / 'config.json', config)
             write_json(directory / 'data_identity.json', identity)
-            write_json(directory / 'environment.json', environment(device, world))
+            current_environment = environment(device, world)
+            if not (directory / 'environment.json').exists():
+                write_json(directory / 'environment.json', current_environment)
+            if not probe:
+                write_json(directory / f'environment_{session_id}.json', current_environment)
         if payload is not None:
-            def trim_uncommitted_log():
-                path = directory / 'train.jsonl'
-                if path.exists():
-                    lines = [line for line in path.read_text().splitlines()
-                             if json.loads(line)['step'] <= step]
-                    temporary = path.with_suffix('.tmp')
-                    temporary.write_text(''.join(line + '\n' for line in lines))
-                    os.replace(temporary, path)
-            on_rank_zero(trim_uncommitted_log, rank)
+            on_rank_zero(lambda: trim_training_log(directory, step), rank)
         on_rank_zero(metadata, rank)
         barrier()
         synchronize(device)
@@ -181,10 +320,13 @@ def train(config, *, resume=None, stop_after=None):
         local_groups = groups // world
         micro = min(options['microbatch_groups'], local_groups)
         params = list(model.parameters())
+        completed_updates = step
+        loss_sum = 0.0
+        loss_count = 0
         for completed in range(step, limit):
             tick = time.perf_counter()
-            before_io = process_stats(worker_pids)
-            if device.type == 'cuda':
+            before_io = process_stats(worker_pids) if probe else None
+            if probe and device.type == 'cuda':
                 torch.cuda.reset_peak_memory_stats(device)
             data_start = time.perf_counter()
             batch = next(iterator)
@@ -212,9 +354,43 @@ def train(config, *, resume=None, stop_after=None):
                             batch['value_weight'][begin:end].to(device, non_blocking=True))
                     (terms['total'] * weight).backward()
                 losses += torch.stack([terms[key].detach() for key in ('total', 'bt', 'policy', 'value')]) * weight
-                score_means += output['score'].detach().float().mean(dim=(0, 2)) * weight
-            synchronize(device)
+                if probe:
+                    score_means += output['score'].detach().float().mean(dim=(0, 2)) * weight
+            if probe:
+                synchronize(device)
             forward_backward_seconds = time.perf_counter() - compute_start
+            if not probe:
+                torch.nn.utils.clip_grad_norm_(params, float('inf'), error_if_nonfinite=True)
+                optimizer.step()
+                scheduler.step()
+                finite = torch.stack([torch.isfinite(parameter).all() for parameter in params]).all()
+                finite &= torch.isfinite(losses).all()
+                if world > 1:
+                    dist.all_reduce(finite, op=dist.ReduceOp.MIN)
+                    dist.all_reduce(losses)
+                    losses /= world
+                if not finite:
+                    raise FloatingPointError('nonfinite parameters or loss')
+                completed_updates = completed + 1
+                values = losses.tolist()
+                loss_sum += values[0]
+                loss_count += 1
+                event = dict(step=completed_updates, lr=lr, next_lr=optimizer.param_groups[0]['lr'],
+                             **dict(zip(('total', 'bt', 'policy', 'value'), values)))
+                on_rank_zero(lambda: log_event(directory, rank, event), rank)
+                stopping = torch.tensor(int(stop_requested or (rank == 0 and stop_file.exists())), device=device)
+                if world > 1:
+                    dist.all_reduce(stopping, op=dist.ReduceOp.MAX)
+                if completed_updates % options['checkpoint_every'] == 0 or completed_updates == limit or stopping.item():
+                    checkpoint_loss = loss_sum / loss_count
+                    save_checkpoint(directory, model, optimizer, scheduler, scaler, config, manifest,
+                        dict(optimizer_steps=completed_updates, epoch=0, next_batch=completed_updates,
+                             checkpoint_loss=checkpoint_loss, checkpoint_loss_updates=loss_count),
+                        device, rank, world, code_sha256=code, tag='training', loss=checkpoint_loss)
+                    loss_sum, loss_count = 0.0, 0
+                if stopping.item():
+                    break
+                continue
             diagnostic_start = time.perf_counter()
             grad_norm = torch.nn.utils.clip_grad_norm_(params, float('inf'), error_if_nonfinite=True)
             previous = torch.cat([parameter.detach().reshape(-1) for parameter in params])
@@ -275,6 +451,20 @@ def train(config, *, resume=None, stop_after=None):
                 dist.all_reduce(duration, op=dist.ReduceOp.MAX)
             if completed + 1 > options['warmup_steps']:
                 measured_wall_times.append(float(duration))
+        if not probe:
+            complete = completed_updates == options['updates']
+            if complete:
+                on_rank_zero(lambda: finalize_training(directory, model, config, manifest, code,
+                                                        completed_updates), rank)
+            summary = dict(start_step=step, completed_updates=completed_updates,
+                           updates_this_session=completed_updates - step,
+                           status='completed' if complete else 'stopped', finite_checks_passed=True)
+            on_rank_zero(lambda: write_json(directory / f'training_session_{session_id}.json', summary), rank)
+            on_rank_zero(lambda: write_json(directory / 'training_summary.json', summary), rank)
+            if complete:
+                on_rank_zero(lambda: cleanup_training(directory, config), rank)
+                handoff = True
+            return summary
         elapsed = time.perf_counter() - started
         measured = measured_wall_times
         checkpoint_seconds = sum(max(row['checkpoint_seconds'] for row in group) for group in rows)
@@ -302,21 +492,32 @@ def train(config, *, resume=None, stop_after=None):
         on_rank_zero(lambda: write_json(directory / f'probe_summary_{step:05d}_{limit:05d}.json', summary), rank)
         return summary
     finally:
+        for signum, handler in handlers.items():
+            signal.signal(signum, handler)
         if dataset is not None:
             dataset.close()
         if locked and rank == 0:
             lock.unlink(missing_ok=True)
-        if dist.is_initialized():
+        if dist.is_initialized() and not (keep_distributed and handoff):
             dist.destroy_process_group()
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--config', type=Path, default=DEFAULT_PROBE_CONFIG)
+    parser.add_argument('--config', type=Path, default=DEFAULT_CONFIG)
     parser.add_argument('--resume', type=Path)
     parser.add_argument('--stop-after', type=int, help='Stop at this completed update for a resume check')
     args = parser.parse_args(argv)
-    train(read_config(args.config), resume=args.resume, stop_after=args.stop_after)
+    config = read_config(args.config)
+    postprocess = 'probe_updates' not in config['training'] and 'evaluation' in config
+    summary = train(config, resume=args.resume, stop_after=args.stop_after, keep_distributed=postprocess)
+    try:
+        if postprocess and summary['status'] == 'completed':
+            from .evaluate import evaluate
+            evaluate(config)
+    finally:
+        if dist.is_initialized():
+            dist.destroy_process_group()
     return 0
 
 

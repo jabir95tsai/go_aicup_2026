@@ -129,3 +129,26 @@ def test_two_process_inference_benchmark(labelled, tmp_path):
     assert summary['candidates'][1]['max_abs_error'] < 1e-6
     first, second = summary['candidates'][0]['ranks']
     assert first['sample_stop'] <= second['sample_start']
+
+
+def test_final_training_model_can_be_read_by_inference(labelled, tmp_path):
+    from test_reproduce_paper_train import full_config
+    config = full_config(labelled, tmp_path)
+    train(config)
+    config['inference'] = dict(per_gpu_batch_sizes=[7], positions_per_rank=11,
+                               warmup_batches=1, split='valid', channels_last=False,
+                               checkpoint=str(Path(config['paths']['output_dir']) / 'model.pt'))
+    config['paths']['output_dir'] = str(tmp_path / 'final_model_inference')
+    result = benchmark(config)
+    assert result['candidates'][0]['status'] == 'ok'
+
+
+def test_retained_best_checkpoint_can_be_read_by_inference(labelled, tmp_path):
+    from test_reproduce_paper_train import full_config
+    config = full_config(labelled, tmp_path)
+    train(config)
+    config['inference'] = dict(per_gpu_batch_sizes=[7], positions_per_rank=11,
+                               warmup_batches=1, split='valid', channels_last=False,
+                               checkpoint=str(Path(config['paths']['output_dir']) / 'best_1.pt'))
+    config['paths']['output_dir'] = str(tmp_path / 'best_checkpoint_inference')
+    assert benchmark(config)['candidates'][0]['status'] == 'ok'

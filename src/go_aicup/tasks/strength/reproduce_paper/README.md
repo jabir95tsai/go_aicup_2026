@@ -556,3 +556,64 @@ sbatch slurm/se_infer_benchmark.slurm
 `infer_positions` 可供後續第七步重用，支援無補齊尾批、空分片與有界讀取，還原呼叫前的模型 train/eval 狀態。當前入口只量測固定子集，不生成正式全量 centroid、每盤聚合或 validation 成績；不宣稱第七步已完成。新增的 Slurm 腳本沿用目前 repo 的 `slurm/` 忽略規則，需納入版本控制時使用 `git add -f slurm/se_infer_benchmark.slurm`。
 
 最終 CPU 合成回歸 **79 passed（46.50s）**：包含布局訓練／續跑、固定 BN 的首步接線、推論 batch／布局／分片、兩程序推論與 OOM 停止。Training-mode BN 的 CPU FP32 布局對照 loss 差約 1e-6，但更新向量相對 L2 約 0.00303；這是未控制 BN／數值歸約時的診斷結果，不宣稱跨布局完全等價。GPU 加速與 BF16 差異尚未實測。
+
+
+## 正式訓練入口（2026-11-02）
+
+依使用者確認，正式訓練先交付訓練、續跑及最終模型；全量 centroid／題組評估留待第七步。已完成的逐位置推論與 batch 效能測試不重跑，也不要求新的 GPU 短測。
+
+```bash
+sbatch slurm/se_train.slurm
+# 中斷後，使用同一版本程式、相同 config 與 8 卡配置續跑：
+sbatch slurm/se_train.slurm --resume outputs/rank/reproduce_paper/se_seed2026/last.json
+```
+
+亦可用 `torchrun --standalone --nnodes=1 --nproc-per-node=8 -m go_aicup.tasks.strength.reproduce_paper.train`，CLI 預設讀取 `configs/strength/se_seed2026.json`。正式 config 已含 training value 路徑、CUDA／BF16、SyncBN、每卡 16 組、4 workers、channels-last，固定共 35,000 updates 與 .04 → .02 → .002 schedule。輸出為 `outputs/rank/reproduce_paper/se_seed2026/`。此處命令只供操作，本次未提交作業。
+
+每 1,000 步保存 checkpoint；正常提前停止／停止通知／最後一步亦保存。Loss 使用前次保存後各步跨 rank 平均 training total loss 的平均值。訓練期間保留歷次 loss 最低的兩份及最新一份供續跑（可能重疊，最多三份）；同 loss 優先較晚 optimizer step。`best.json` 記錄最佳兩份，`last.json` 一律指最新更新，不回退訓練。窗口平均與樣本數存於 checkpoint state 的 checkpoint_loss／checkpoint_loss_updates。完訓後把最佳兩份完整 checkpoint 原子保存為 run 根目錄的 `best_1.pt`、`best_2.pt`，各附 complete marker，並以 `best_checkpoints.json` 保存 loss／步數／checksum；不足兩份時只保留實際份數。
+
+正式路徑不量測顯存、RAM、I/O 或更新 norm。train.jsonl 每步保存跨 rank 平均三項 loss／total、lr／next_lr；保留非有限 loss／梯度／參數檢查。原有 probe config 的量測路徑仍可使用，未傳 loss 的 V1／V2／probe checkpoint 維持 latest-only。
+
+腳本使用單節點 8×H200 的 8gpus partition、96 CPU、128 GiB RAM、4 小時；時限前 120 秒由 batch shell 建立 `.stop-requested`，trainer 在完整 update 後跨 rank 同步停止並保存，不直接把 Slurm USR1 送到 torchrun。`--stop-after N` 可指定本次停止的絕對完成步數，不改總預算。硬中斷可能留下 `.writer.lock`，須確認原作業已停止再手動移除；SIGKILL／節點故障需重跑最近成功 checkpoint 後約 1,000 個 updates（保存當下中斷亦可能重算該步）。Slurm 通知及 GPU 中斷續跑未在本輪實測。
+
+完成第 35,000 步才原子發布 model.pt／model.complete.json，包含三頭權重、有效 config、完成步數、資料／程式／權重身分，重載驗證並寫入完成摘要後，先驗證 best_1.pt／best_2.pt 已留存，再刪除 checkpoints/ 原始目錄、last.json、best.json、停止請求與已知暫存；保留設定、loss、環境、資料身分及 session 摘要。發布失敗時重新 `--resume .../last.json` 可補發布，不多做一次更新。最終 model.pt 可供現有 infer.py 的 checkpoint 參數讀取。提前停止不發布完整模型。
+
+環境、data_identity.json、training_session_*.json 與 training_summary.json 一併留存；續跑保留原始 environment.json，另記該次環境，並清掉未提交 log／不完整尾行。嚴格驗證 config／data／world size／code，程式更新後不直接續跑舊 smoke checkpoint。Slurm 目錄目前由 .gitignore 忽略，納入版本控制需 `git add -f slurm/se_train.slurm`。
+
+
+完整訓練完成後保留 loss 最低的兩個完整 checkpoint 為 best_1.pt／best_2.pt，再清除其餘續跑殘留；提前停止或 model.pt 發布失敗時仍保留 checkpoint。若清理中斷，重新執行相同 config 即會先驗證最終模型 checksum／config／完成步數並補清理，不依賴 last.json，也不重新訓練。檢查未通過不刪除續跑檔。writer lock 仍由退出流程移除；現有 probe 路徑不套用完整訓練清理。
+
+
+## 完訓後全量評估與圖表（2026-11-02）
+
+預設 `sbatch slurm/se_train.slurm` 完成 35,000 步後，會直接接 `evaluate.py`，不用另下命令。提前停止不執行評估。評估讀最終 model.pt，不讀 optimizer checkpoint；失敗後重跑同一正式命令會跳過已完成訓練、補評估。既有 smoke 設定不自動評估。
+
+Training 使用全部 800,000 盤的 76,763,475 有效位置，指定玩家且 ply>=30，eval／無 D4／不需要 teacher。各級 centroid 與分布都按全部位置計算，不限七手、不先做每盤等權。Validation 推論全部 200,000 盤，對固定 10,000 題以 `sum(score_sum)/sum(position_count)` 聚合，再選最近的 training rank centroid；距離相同取較低 rank index，不套用 V1 cutpoints 或 V2 score_rank。
+
+所有新產物在 `outputs/rank/reproduce_paper/se_seed2026/evaluation/`：
+
+- `rank_statistics.csv`、`centroids.npy`：十級位置數、mean／std／min／max 與平均分數。
+- `training_distributions.npz`：共用 128 bins、每級全部位置 histogram；`plot/training_score_distributions.png` 為十級分面圖，`plot/rank_centroids.png` 顯示各級平均。
+- `official_scores.csv`、`validation_by_rank.csv`、`report.json`：分 k=5／10／15／20 的官方公式 score、exact、within1 及 Equal-k，另存單盤診斷及各級題目成績。within1 包含 exact；是本地 game-disjoint validation，並非官方 LB。
+- `confusion_*.npy` 與 `plot/confusion_*.png`：單盤、全部題目及各 k 的 6 組矩陣；列真值、欄預測，圖中數量標記／真值列正規化顏色。
+- `learning_curve.csv`、`plot/learning_curve.png`：全部 updates 的 training total／BT／policy／value loss，原始值及 trailing-100 平均；沒有中途 validation 曲線。
+- `plot/official_scores.png`：分 k 官方分數與 Equal-k。合計 10 張 PNG，直接存檔，不呼叫 plt.show()。
+- `train_scores_rankXX.npy`／`valid_scores_rankXX.npy` 與 json：全部逐位置 float32 分數（合計約 366 MiB）、sample ranges 與 hash；`train_games.parquet`／`valid_games.parquet` 保存每盤 score_sum／position_count／mean，`validation_predictions.parquet` 保存逐題結果。
+
+正式推論每卡 batch 固定 2240，沿用 BF16／channels-last，不重新搜尋 batch；不收集資源用量。來源及分片 identity 綁定模型／資料／題組／程式／精度／布局／world size／batch，重跑會重用完成分片，來源或 checksum 不同明確報錯。硬中斷後的 evaluation/.writer.lock 須先確認原作業已停止再移除。
+
+```bash
+# 已有最終模型時，單獨補全量評估
+torchrun --standalone --nnodes=1 --nproc-per-node=8 -m go_aicup.tasks.strength.reproduce_paper.evaluate
+# 所有分片已完成時，不使用 GPU 重建所有表格及 PNG
+python -m go_aicup.tasks.strength.reproduce_paper.evaluate --report-only
+```
+
+以上入口均可加 `--config <path>`。本次只實作與 CPU 合成回歸，未提交正式 GPU 訓練／推論、未重跑已完成的效能測試；實際分 k 成績未知。完整資料契約、產物清單與粗估成本見 PLAN.md 第 6 節。
+
+自動接線在訓練與評估之間沿用同一個 process group，完成評估後釋放，避免重建通訊群組的 rendezvous 衝突。相關 CPU／兩程序合成回歸共 28 項通過；正式 CUDA／NCCL 全量流程本輪未執行。
+
+
+### 2026-11-02：保留最低 loss 的兩個 checkpoint
+
+此決策取代先前相鄰 loss 刪除與刪除全部 checkpoint 的規則。best_1.pt 的 loss 最低，best_2.pt 次低，同分取較晚 step；比較 training total loss 的保存窗口平均，不是 validation 分數。兩份是原始完整 checkpoint 的 .pt（含模型／optimizer／scheduler／RNG），可由既有 infer.py 讀取。model.pt 仍是最後一步的最終模型，自動 centroid／validation 評估仍使用 model.pt，不自動改成最低 training loss 的權重。未完整訓練時保留 best.json 與最新續跑檔；完訓留存兩份成功後才清除來源，複製／清理中斷可重新執行補完，不重做更新。先前已清除的 checkpoint 無法憑最終模型還原。

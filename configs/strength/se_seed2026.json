@@ -5,7 +5,8 @@
   "paths": {
     "cache_dir": "data/processed/boards/strength_v1",
     "dataset_dir": "data/processed/reproduce_paper/seed2026",
-    "output_dir": "outputs/rank/reproduce_paper/se_seed2026"
+    "output_dir": "outputs/rank/reproduce_paper/se_seed2026",
+    "label_dir": "data/processed/reproduce_paper/value_v1/train"
   },
   "split": {
     "expected_games_per_rank": 100000,
@@ -36,7 +37,13 @@
     "final_lr_after_updates": 32500,
     "final_lr": 0.002,
     "channels_last": true,
-    "cudnn_benchmark": false
+    "cudnn_benchmark": false,
+    "microbatch_groups": 16,
+    "checkpoint_every": 1000,
+    "workers": 4,
+    "sync_batch_norm": true,
+    "deterministic": false,
+    "allow_tf32": false
   },
   "loss_weights": {
     "bt": 1.0,
@@ -51,5 +58,10 @@
   },
   "questions": {
     "validation": 10000
+  },
+  "device": "cuda",
+  "precision": "bf16",
+  "evaluation": {
+    "per_gpu_batch_size": 2240
   }
 }

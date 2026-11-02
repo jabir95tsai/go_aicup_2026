@@ -26,7 +26,7 @@ DEFAULT_CONFIG = ROOT / 'configs/strength/se_infer_batch_benchmark.json'
 
 @torch.inference_mode()
 def infer_positions(model, dataset, config, device, *, batch_size, rank=0, world=1,
-                    positions_per_rank=None, warmup_batches=0, channels_last=False):
+                    positions_per_rank=None, warmup_batches=0, channels_last=False, collect_resources=True):
     """Contiguous sample-index partitions, no padding, labels, D4 or BN updates.
 
     Return scalar scores in sample-index order; caller may save each rank's
@@ -55,12 +55,12 @@ def infer_positions(model, dataset, config, device, *, batch_size, rank=0, world
     was_training = model.training
     model.eval()
     scores = np.empty(stop - start, dtype=np.float32)
-    before_io = process_stats(worker_pids)
+    before_io = process_stats(worker_pids) if collect_resources else dict(rss_bytes=0, read_bytes=0, write_bytes=0, rchar=0, wchar=0)
     peak_rss = before_io['rss_bytes']
     data_seconds = compute_seconds = 0.0
     steps = 0
     after_io = before_io
-    if device.type == 'cuda':
+    if collect_resources and device.type == 'cuda':
         torch.cuda.reset_peak_memory_stats(device)
     try:
         first_start = time.perf_counter()
@@ -94,8 +94,9 @@ def infer_positions(model, dataset, config, device, *, batch_size, rank=0, world
             scores[cursor:cursor + count] = values
             cursor += count
             steps += 1
-            after_io = process_stats(worker_pids)
-            peak_rss = max(peak_rss, after_io['rss_bytes'])
+            if collect_resources:
+                after_io = process_stats(worker_pids)
+                peak_rss = max(peak_rss, after_io['rss_bytes'])
             data_start = time.perf_counter()
             batch = next(iterator, None)
             data_seconds += time.perf_counter() - data_start
@@ -109,8 +110,8 @@ def infer_positions(model, dataset, config, device, *, batch_size, rank=0, world
                       measured_seconds=elapsed, data_seconds=data_seconds, compute_seconds=compute_seconds,
                       rss_bytes=peak_rss, io_delta={key: after_io[key] - before_io[key]
                       for key in ('read_bytes', 'write_bytes', 'rchar', 'wchar')},
-                      peak_cuda_allocated_bytes=torch.cuda.max_memory_allocated(device) if device.type == 'cuda' else 0,
-                      peak_cuda_reserved_bytes=torch.cuda.max_memory_reserved(device) if device.type == 'cuda' else 0)
+                      peak_cuda_allocated_bytes=torch.cuda.max_memory_allocated(device) if collect_resources and device.type == 'cuda' else 0,
+                      peak_cuda_reserved_bytes=torch.cuda.max_memory_reserved(device) if collect_resources and device.type == 'cuda' else 0)
         return scores, report
     finally:
         # Release each candidate's loader before the next batch-size measurement.
@@ -167,7 +168,9 @@ def benchmark(config):
                 or dataset.record['identity']['split'] != config['split']
                 or dataset.record['identity']['positions'] != config['positions']):
             raise ValueError('checkpoint/model/prepared configuration mismatch')
-        identity = json.loads((checkpoint.parent.parent / 'data_identity.json').read_text())
+        identity_directory = (checkpoint.parent if (checkpoint.parent / 'data_identity.json').is_file()
+                              else checkpoint.parent.parent)
+        identity = json.loads((identity_directory / 'data_identity.json').read_text())
         if (object_hash(identity) != payload['dataset_id']
                 or identity['prepared_manifest_sha256'] != file_hash(dataset.directory / 'manifest.json')
                 or identity['games_sha256'] != file_hash(dataset.directory / 'games.parquet')):
