@@ -203,3 +203,74 @@ class PaperDataset:
 
     def __getitem__(self, task):
         return self.__getitems__([task])[0]
+
+
+class GroupBatchSampler:
+    """Sample complete training groups; start_step is the consumer's next update.
+
+    Each group has ascending ranks 0..9 and seven distinct positions per rank.
+    RNG is keyed by (seed, step, global group), independent of workers/prefetch
+    and world size. Iteration never advances a checkpoint cursor implicitly.
+    """
+    def __init__(self, dataset, *, groups_per_update=128, updates=32500,
+                 start_step=0, rank=0, world_size=1):
+        groups_per_update, updates, start_step, rank, world_size = map(
+            operator.index, (groups_per_update, updates, start_step, rank, world_size))
+        if (world_size < 1 or groups_per_update < 1 or groups_per_update % world_size
+                or not 0 <= rank < world_size):
+            raise ValueError('groups_per_update must be divisible by world_size; invalid rank/world_size')
+        if updates < 1 or not 0 <= start_step <= updates or dataset.seed < 0:
+            raise ValueError('invalid updates, start_step or seed')
+        if dataset.split != 'train' or dataset.label_dir is None:
+            raise ValueError('group sampling requires training data with teacher labels')
+        dataset._ensure_open()
+        games, offsets, _ = dataset._indices
+        ranks = dataset._cache.rank_ids[games]
+        self.rows_by_rank = [np.flatnonzero(ranks == level) for level in range(10)]
+        if any(len(rows) == 0 for rows in self.rows_by_rank) or np.any((ranks < 0) | (ranks > 9)):
+            raise ValueError('group sampling requires all ten ranks')
+        # Own the small offsets array so closing the dataset cannot invalidate it.
+        self.offsets = offsets.copy()
+        self.seed, self.rank = dataset.seed, rank
+        self.groups_per_update, self.world_size = groups_per_update, world_size
+        self.updates, self.start_step = updates, start_step
+
+    def __len__(self):
+        return self.updates - self.start_step
+
+    def __iter__(self):
+        local_groups = self.groups_per_update // self.world_size
+        begin = self.rank * local_groups
+        for step in range(self.start_step, self.updates):
+            tasks = []
+            for group in range(begin, begin + local_groups):
+                rng = np.random.default_rng(np.random.SeedSequence([self.seed, step, group]))
+                for rows in self.rows_by_rank:
+                    row = rows[rng.integers(len(rows))]
+                    start, stop = self.offsets[row:row + 2]
+                    indices = start + rng.choice(int(stop - start), size=7, replace=False)
+                    tasks.extend((int(index), step) for index in indices)
+            yield tasks
+
+
+def collate_groups(samples):
+    """Validate complete ranking groups and retain [groups,10,7,...] axes."""
+    from torch.utils.data import default_collate
+    if not samples or len(samples) % 70:
+        raise ValueError('batch must contain complete ten-rank/seven-position groups')
+    if any('value_target' not in sample or 'value_weight' not in sample for sample in samples):
+        raise ValueError('group batch requires teacher labels for every position')
+    batch = default_collate(samples)
+    batch = {name: tensor.reshape(-1, 10, 7, *tensor.shape[1:]) for name, tensor in batch.items()}
+    import torch
+    if not torch.all(batch['rank_id'] == torch.arange(10).reshape(1, 10, 1)):
+        raise ValueError('group ranks must be ordered 0..9')
+    for name in ('game_index', 'player_color'):
+        if not torch.all(batch[name] == batch[name][..., :1]):
+            raise ValueError('seven positions must share a game and player color')
+    if torch.any(batch['ply'].sort(dim=-1).values.diff(dim=-1) == 0):
+        raise ValueError('seven positions must be distinct')
+    if (not torch.isfinite(batch['value_target']).all() or torch.any(batch['value_target'].abs() > 1)
+            or not torch.all(batch['value_weight'] == 1)):
+        raise ValueError('invalid teacher value or weight')
+    return batch

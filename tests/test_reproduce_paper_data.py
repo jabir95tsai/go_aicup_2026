@@ -267,3 +267,160 @@ def test_prepare_and_questions_share_data_across_training_seeds(tmp_path):
         assert (file_hash(p), p.stat().st_mtime_ns) == expected
     table = pd.read_parquet(path.parent / 'games.parquet')
     assert len(table[table.split == 'train']) == len(table[table.split == 'valid']) == 400
+
+
+@pytest.fixture
+def labelled(prepared, tmp_path):
+    _, path, _ = prepared
+    count = json.loads(path.read_text())['splits']['train']['positions']
+    values = np.linspace(-1, 1, count, dtype=np.float32)
+    np.save(tmp_path / 'value.npy', values)
+    dataset = PaperDataset(path.parent, augment=True, label_dir=tmp_path)
+    yield dataset, values
+    dataset.close()
+
+
+def test_group_batch_structure_and_value_alignment(labelled):
+    from go_aicup.tasks.strength.reproduce_paper.dataset import GroupBatchSampler, collate_groups
+    dataset, values = labelled
+    tasks = next(iter(GroupBatchSampler(dataset, groups_per_update=3, updates=1)))
+    samples = dataset.__getitems__(tasks)
+    batch = collate_groups(samples)
+    assert batch['planes'].shape == (3, 10, 7, 18, 19, 19)
+    assert batch['policy_target'].shape == (3, 10, 7)
+    indices = batch['sample_index'].numpy()
+    np.testing.assert_array_equal(batch['value_target'].numpy(), values[indices])
+    assert set(batch['player_color'].flatten().tolist()) == {0, 1}
+    assert batch['ply'].min() >= 30
+    games = set(dataset._indices[0].tolist())
+    assert set(batch['game_index'].flatten().tolist()) <= games
+    # Values are already in the player's perspective, including white samples.
+    plain = PaperDataset(dataset.directory, label_dir=dataset.label_dir)
+    try:
+        for sample in samples:
+            original = plain[sample['sample_index']]
+            np.testing.assert_array_equal(sample['planes'], apply_d4(original['planes'], sample['d4']))
+            assert sample['policy_target'] == transform_policy(original['policy_target'], sample['d4'])
+            assert sample['value_target'] == values[sample['sample_index']]
+    finally:
+        plain.close()
+
+
+
+def test_group_resume_ddp_and_prefetch_are_reproducible(labelled):
+    from go_aicup.tasks.strength.reproduce_paper.dataset import GroupBatchSampler
+    dataset, _ = labelled
+    serial = list(GroupBatchSampler(dataset, groups_per_update=128, updates=3))
+    resumed = GroupBatchSampler(dataset, groups_per_update=128, updates=3, start_step=1)
+    assert len(resumed) == 2
+    assert list(resumed) == serial[1:]
+    # Advancing a producer/prefetch iterator must not mutate the consumer cursor.
+    iterator = iter(resumed)
+    next(iterator)
+    next(iterator)
+    assert list(resumed) == serial[1:]
+    for step in range(3):
+        combined = []
+        for rank in range(8):
+            local = next(iter(GroupBatchSampler(dataset, updates=3, start_step=step,
+                                               rank=rank, world_size=8)))
+            assert len(local) == 16 * 10 * 7
+            combined.extend(local)
+        assert combined == serial[step]
+    assert serial[0] != serial[1]
+    assert list(GroupBatchSampler(dataset, updates=3, start_step=3)) == []
+
+
+def test_group_sampling_is_uniform_by_game_not_position():
+    from types import SimpleNamespace
+    from go_aicup.tasks.strength.reproduce_paper.dataset import GroupBatchSampler
+    # Two games per rank with 7 and 70 positions: either game must get half the draws.
+    offsets = np.r_[0, np.cumsum([7, 70] * 10)]
+    dataset = SimpleNamespace(seed=2026, split='train', label_dir='labels',
+        _ensure_open=lambda: None, _indices=(np.arange(20), offsets, None),
+        _cache=SimpleNamespace(rank_ids=np.repeat(np.arange(10), 2)))
+    tasks = next(iter(GroupBatchSampler(dataset, groups_per_update=2000, updates=1)))
+    indices = np.array([index for index, _ in tasks]).reshape(2000, 10, 7)
+    rows = np.searchsorted(offsets, indices, side='right') - 1
+    assert np.all(rows == rows[..., :1])
+    assert np.all(np.abs((rows[..., 0] % 2).mean(axis=0) - 0.5) < 0.05)
+    assert np.all(np.diff(np.sort(indices, axis=-1), axis=-1) > 0)
+
+
+def test_group_loader_spawn_and_resume_match(labelled):
+    torch = pytest.importorskip('torch')
+    from go_aicup.tasks.strength.reproduce_paper.dataset import GroupBatchSampler, collate_groups
+    dataset, _ = labelled
+    def loader(workers, start_step=0):
+        kwargs = dict(num_workers=workers, collate_fn=collate_groups,
+            batch_sampler=GroupBatchSampler(dataset, groups_per_update=2, updates=3, start_step=start_step))
+        if workers:
+            kwargs.update(multiprocessing_context='spawn', prefetch_factor=2, persistent_workers=True)
+        return torch.utils.data.DataLoader(dataset, **kwargs)
+    serial = list(loader(0))
+    for actual_batches, expected_batches in ((list(loader(2)), serial), (list(loader(2, 1)), serial[1:])):
+        assert len(actual_batches) == len(expected_batches)
+        for actual, expected in zip(actual_batches, expected_batches):
+            for name in expected:
+                torch.testing.assert_close(actual[name], expected[name], rtol=0, atol=0)
+
+
+def test_group_invalid_inputs_and_labels_are_rejected(labelled, prepared):
+    from go_aicup.tasks.strength.reproduce_paper.dataset import GroupBatchSampler, collate_groups
+    dataset, _ = labelled
+    for kwargs in (dict(world_size=3), dict(rank=8, world_size=8), dict(world_size=0),
+                   dict(groups_per_update=0), dict(start_step=-1), dict(updates=0),
+                   dict(start_step=4, updates=3)):
+        with pytest.raises(ValueError):
+            GroupBatchSampler(dataset, **kwargs)
+    _, path, _ = prepared
+    for unlabelled in (PaperDataset(path.parent), PaperDataset(path.parent, split='valid', label_dir=dataset.label_dir)):
+        with pytest.raises(ValueError, match='training data with teacher labels'):
+            GroupBatchSampler(unlabelled)
+    samples = dataset.__getitems__(next(iter(GroupBatchSampler(dataset, groups_per_update=1, updates=1))))
+    with pytest.raises(ValueError, match='complete'):
+        collate_groups(samples[:-1])
+    for key, value, message in (('rank_id', 9, 'ranks'), ('game_index', -1, 'share a game'),
+                                ('player_color', 2, 'share a game'), ('value_target', np.nan, 'teacher'),
+                                ('value_target', 2, 'teacher'), ('value_weight', 0, 'teacher'),
+                                ('ply', samples[1]['ply'], 'distinct')):
+        broken = [dict(sample) for sample in samples]
+        broken[0][key] = value
+        with pytest.raises(ValueError, match=message):
+            collate_groups(broken)
+    del samples[0]['value_target']
+    with pytest.raises(ValueError, match='teacher labels'):
+        collate_groups(samples)
+    values = dataset._values
+    try:
+        dataset._values = np.full(len(dataset), np.nan, dtype=np.float32)
+        with pytest.raises(ValueError, match='invalid teacher value'):
+            dataset[0]
+    finally:
+        dataset._values = values
+
+
+@pytest.mark.parametrize('dtype,length_delta', [(np.float64, 0), (np.float32, -1)])
+def test_group_sampler_rejects_misaligned_label_file(labelled, dtype, length_delta):
+    from go_aicup.tasks.strength.reproduce_paper.dataset import GroupBatchSampler
+    dataset, values = labelled
+    dataset.close()
+    np.save(dataset.label_dir / 'value.npy', values[:len(values) + length_delta].astype(dtype))
+    with pytest.raises(ValueError, match='teacher value shape/dtype'):
+        GroupBatchSampler(dataset)
+
+
+def test_group_batch_runs_three_head_model_and_losses(labelled):
+    import torch
+    from go_aicup.tasks.strength.reproduce_paper.dataset import GroupBatchSampler, collate_groups
+    from go_aicup.tasks.strength.reproduce_paper.model import StrengthEstimator
+    from go_aicup.tasks.strength.reproduce_paper.losses import grouped_losses
+    dataset, _ = labelled
+    tasks = next(iter(GroupBatchSampler(dataset, groups_per_update=1, updates=1)))
+    batch = collate_groups(dataset.__getitems__(tasks))
+    model = StrengthEstimator(channels=2, blocks=1)
+    output = model(batch['planes'].float())
+    losses = grouped_losses(output, batch['policy_target'], batch['value_target'], batch['value_weight'])
+    assert all(torch.isfinite(loss) for loss in losses.values())
+    losses['total'].backward()
+    assert model.stem[0].weight.grad is not None

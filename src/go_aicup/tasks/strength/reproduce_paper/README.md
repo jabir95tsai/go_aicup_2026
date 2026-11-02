@@ -10,7 +10,7 @@
 - 起點：`396b71fd741f363b8e0133295094be16658c56f9`（`t1-pipeline-t2-models`）
 - 本機論文：`reference/2502.17109v2.pdf`，完整閱讀含附錄 A–C，共 18 頁。
 - PDF SHA-256：`83aa786ff7c659f9715fb030f4e9eb0c094b19f0ca6b0229aeeb9ebb37249f87`
-- 作者程式：[rlglab/strength-estimator](https://github.com/rlglab/strength-estimator)，查核版本 `d9498964e2ba84b5798c40e3f5b8a91a8791d66c`（`iclr2025`）。本次僅閱讀，未複製或納入作者程式。
+- 作者程式：[rlglab/strength-estimator](https://github.com/rlglab/strength-estimator)，查核版本 `d9498964e2ba84b5798c40e3f5b8a91a8791d66c`（`iclr2025`）。前置查核僅閱讀；2026-11-02 已依查核的架構與公式重新撰寫專用模型／loss，來源及差異見下方第五步。
 - 後續實作與驗收見 [plan.md](plan.md)；正式長作業依 `CLAUDE.md` §9 先回報實測估時。
 
 ## 已確認方向（2026-11-01 更新）
@@ -55,7 +55,7 @@
 
 ## 訓練流程：論文原版與競賽資料版本
 
-本節分開說明論文原版，以及使用者先前指定的競賽資料改動。取消 epoch 已確認；十級、每級十萬盤、80/20 與排除前 30 手保留為既有資料要求，不能稱為原論文資料規格。設定、split／有效位置索引與樣本組裝已實作；模型與訓練尚未實作。
+本節分開說明論文原版，以及使用者先前指定的競賽資料改動。取消 epoch 已確認；十級、每級十萬盤、80/20 與排除前 30 手保留為既有資料要求，不能稱為原論文資料規格。設定、split／有效位置索引、樣本組裝及三頭模型／loss 已實作；訓練器仍待第六步。
 
 ### 一次 optimizer update 如何產生
 
@@ -160,17 +160,19 @@ SGD：momentum=0.9、weight_decay=0.0001。第 1–100,000 次更新用 LR=0.01�
 
 本版為「幽玄十級方法移植」：teacher 偽標籤取代真實勝負，資料來源、級別與訓練預算均偏離原論文，不能宣稱完成 Fox 原始結果或整篇重現。Fox 資料、勝負與 candidate/query 固定清單仍缺，原始切分是否玩家互斥未知。
 
-### 已有程式（2026-11-01 紀錄）
+### 已有程式（2026-11-02 更新）
 
 | 檔案 | 已實作功能 |
 |---|---|
 | `config.py` | 讀取根目錄 `configs/strength/se_seed2026.json`、檢查設定與解析 paths |
 | `prepare.py` | 呼叫共用 CV 模組，保存固定切分、有效位置索引與 manifest |
 | `questions.py` | 從共用切分建立固定 validation 題組與 eligibility |
-| `dataset.py` | 落子前盤面與 policy target、同步 D4、批次讀取及對齊的逐位置 value 標籤讀取；尚無分組 sampler |
+| `dataset.py` | 落子前盤面與 policy target、同步 D4、批次讀取及對齊的逐位置 value 標籤讀取；完整排序組 sampler 與分組 collate |
 | `label_value.py` | KataGo 逐有效盤面分析、分片、重試、續跑與匯出；不改寫棋譜或 RE |
+| `model.py` | 專用三頭 ResNet；作者版 residual activation／bias／BN／head 結構，支援完整組輸入 |
+| `losses.py` | FP32 分組 listwise BT、362 類 policy CE、soft value MSE 與等權總 loss |
 
-分組 sampler、三頭模型／loss、訓練器、推論與評估的待實作內容及驗收要求統一見 [plan.md §3](plan.md#3-實作順序與驗收)。專用資料放 `data/processed/reproduce_paper/`，各 run 放 `outputs/rank/reproduce_paper/<run-id>/`；沿用既有壓縮快取，路徑走 config。
+訓練器、推論與評估的待實作內容及驗收要求統一見 [plan.md §3](plan.md#3-實作順序與驗收)。專用資料放 `data/processed/reproduce_paper/`，各 run 放 `outputs/rank/reproduce_paper/<run-id>/`；沿用既有壓縮快取，路徑走 config。
 
 ### 效果目標與後續驗收
 
@@ -239,7 +241,7 @@ finally:
     dataset.close()
 ```
 
-`PaperDataset` 支援批次 `__getitems__`、process-local memmap、LRU 及 spawn workers；增強由 seed／round／sample index 決定。第 4 步的分組 sampler 尚未加入。識別資訊不進入模型通道；未指定 `label_dir` 時不提供 value label。`soft_value_target(p_black, player_color)` 提供有限值／範圍檢查及黑白視角轉換。
+`PaperDataset` 支援批次 `__getitems__`、process-local memmap、LRU 及 spawn workers；增強由 seed／round／sample index 決定。第 4 步已加入 `GroupBatchSampler` 與 `collate_groups`（操作見下方）。識別資訊不進入模型通道；未指定 `label_dir` 時不提供 value label。`soft_value_target(p_black, player_color)` 提供有限值／範圍檢查及黑白視角轉換。
 
 ### 已查核的 state/action 契約
 
@@ -363,3 +365,113 @@ sbatch slurm/label_value.slurm 1 \
 腳本亦沿用既有環境變數寫法：`VISITS=1 RUN=data/processed/reproduce_paper/value_v1 SPLIT=train sbatch slurm/label_value.slurm`。位置參數仍可使用且優先於環境變數。`slurm/` 依既有 `.gitignore` 規則為本機腳本目錄。
 
 Nano4 GPU partition 要求明確指定 `--gpus-per-node`；本腳本已加入 `#SBATCH --gpus-per-node=8`，與 8 tasks／每 task 1 GPU 一致。分析 srun 明確指定每節點 8 GPU，匯出 srun 指定 1 GPU，避免繼承完整八卡設定。
+
+
+### 第四步：完整排序組與 teacher value batch（2026-11-02）
+
+```python
+from torch.utils.data import DataLoader
+from go_aicup.tasks.strength.reproduce_paper.config import read_config
+from go_aicup.tasks.strength.reproduce_paper.dataset import (
+    PaperDataset, GroupBatchSampler, collate_groups,
+)
+
+config = read_config()
+dataset = PaperDataset(
+    config['paths']['dataset_dir'], split='train', augment=True,
+    seed=config['seed'], max_open_shards=config['loader']['max_open_shards'],
+    label_dir='data/processed/reproduce_paper/value_v1/train',
+)
+sampler = GroupBatchSampler(
+    dataset,
+    groups_per_update=config['training']['groups_per_update'],
+    updates=config['training']['updates'],
+    start_step=0,  # Resume with the number of updates actually completed.
+    rank=0, world_size=1,  # Use the process rank/world size under DDP.
+)
+loader = DataLoader(dataset, batch_sampler=sampler, collate_fn=collate_groups,
+                    num_workers=0)
+try:
+    batch = next(iter(loader))
+    # planes: [local_groups, 10, 7, 18, 19, 19]
+    # policy_target/value_target: [local_groups, 10, 7]
+finally:
+    dataset.close()
+```
+
+每組按 rank 0..9 排列，每級先均勻抽一盤 training 棋局，再不放回抽七個有效位置；跨組／step 可以重抽同盤。`value_target` 直接讀取既有指定玩家視角的 v，不再翻轉黑白符號。`collate_groups` 拒絕缺標籤、錯 rank 順序、跨盤／跨色或重複位置及無效 value 的 batch。
+
+抽樣由 `(seed, step, global_group)` 決定，D4 沿用 `(seed, step, sample_index)`；不依賴 worker RNG。8 卡／128 組時，每卡保留 16 個完整組、1,120 個位置，沒有補齊組。續跑時傳入消費端已完成 updates 作為 `start_step`，不能使用 DataLoader 預取進度。使用 spawn workers 時，將執行入口放在 `if __name__ == '__main__':` 內，並設定 `multiprocessing_context='spawn'`；worker／prefetch 數不影響抽樣與增強。
+
+資料管線、三頭模型與 loss 已完成；optimizer 更新／訓練器仍待第六步，以上範例不啟動訓練。
+
+
+### 第五步：三頭模型與分組 loss（2026-11-02）
+
+#### 固定作者版本查核與網路結構
+
+本次逐檔查核 commit `d9498964e2ba84b5798c40e3f5b8a91a8791d66c` 的 [BTNetwork／ScoreNetwork](https://github.com/rlglab/strength-estimator/blob/d9498964e2ba84b5798c40e3f5b8a91a8791d66c/strength/trainer/bt_network.py)、[AlphaZeroNetwork](https://github.com/rlglab/strength-estimator/blob/d9498964e2ba84b5798c40e3f5b8a91a8791d66c/minizero/minizero/network/py/alphazero_network.py)、[network_unit.py](https://github.com/rlglab/strength-estimator/blob/d9498964e2ba84b5798c40e3f5b8a91a8791d66c/minizero/minizero/network/py/network_unit.py)、[train.py](https://github.com/rlglab/strength-estimator/blob/d9498964e2ba84b5798c40e3f5b8a91a8791d66c/strength/trainer/train.py) 與 [se_go.cfg](https://github.com/rlglab/strength-estimator/blob/d9498964e2ba84b5798c40e3f5b8a91a8791d66c/cfg/se_go.cfg)。這些 MiniZero Python 檔直接存在該 commit 的 tree 中，並非以另一個未固定版本的安裝套件代替。
+
+`model.py` 的 `StrengthEstimator(**config['model'])` 沿用作者的以下運算結構：
+
+| 部位 | 實作及作者對齊項目 |
+|---|---|
+| Stem | `Conv3×3(18→256) → BN → ReLU`，保持 19×19 |
+| 20 個 residual blocks | `Conv3×3 → BN → ReLU → Conv3×3 → BN`，與輸入相加後再做 `ReLU` |
+| Policy head | `Conv1×1(256→2) → BN → ReLU → flatten(722) → Linear(722→362)`；輸出 raw logits，包含 pass |
+| Value head | `Conv1×1(256→1) → BN → ReLU → flatten(361) → Linear(361→256) → ReLU → Linear(256→1) → tanh` |
+| Strength head | 與 value head 的隱藏層結構相同，但最後沒有 tanh，輸出無界 scalar beta |
+| Bias／BN／初始化 | 所有卷積有 bias；BN 使用 PyTorch 預設 `eps=1e-5`、`momentum=0.1`、affine 與 running stats；保留各層預設初始化，沒有套用 V1/V2 的自訂初始化 |
+
+專用 residual block 是必要差異：既有 shared block 缺少相加後 ReLU、卷積為 `bias=False`，直接沿用會改變作者網路。Value 與 strength 各自擁有獨立 head 參數。
+
+`forward` 接受浮點 `[B,18,19,19]` 或 `[G,10,7,18,19,19]`。分組輸入先展成 `G×70` 個位置做一次共享骨幹 forward，再恢復原有組／rank／位置軸；BN 對本次傳入的所有位置計算，不逐組執行網路。回傳字典：`score`／`value` 為 `[G,10,7]`，`policy_logits` 為 `[G,10,7,362]`；逐位置輸入則分別為 `[B]` 與 `[B,362]`。Dataset 的 uint8 planes 由呼叫端轉為浮點，模型不隱式轉換。
+
+相對作者程式的介面／範圍差異：本版省略 `bt_use_weight=false` 下未參與 loss 的 learned weight head；不額外輸出 policy softmax，CE 直接使用 logits；scalar 輸出省略最後長度 1 軸並可保留組軸，名稱為 `policy_logits`。State-dict 名稱不同，未提供作者 checkpoint 匯入。資料仍是幽玄十級、soft teacher value 與已確認修改的訓練預算；這些不構成 Fox 十一級原始結果重現。
+
+#### Loss 計算與數值尺度
+
+`grouped_bt_loss(scores)` 嚴格接受 `[G,10,7]`，rank 0 最弱、rank 9 最強：
+
+```text
+b[g,i] = FP32_mean(scores[g,i,:])
+L_BT = mean_g { sum(i=1..9) [logsumexp(b[g,0:i+1]) - b[g,i]] / 9 }
+L_policy = mean_over_all_positions CE(policy_logits, policy_target)
+L_value = mean_over_all_positions (predicted_value - teacher_value)^2
+L_total = L_BT + L_policy + L_value
+```
+
+程式用 `torch.logcumsumexp(b, dim=1)` 一次建立弱到強的所有 prefix，排除只有最弱一級的零項，再對 `G×9` 個項目取平均。這等價於論文強到弱的 suffix 公式及作者除以 `n-1` 的尺度；沒有先把不同組的同級 scores 混在一起。每組先平均七個 strength scores，不平均 exp(score)，也不先將所有組同級平均。
+
+三項 loss 都轉為 FP32 計算，包含級內平均、logsumexp、CE 與 MSE；不直接計算 `exp(beta)`，避免大 score 溢位。Policy target 使用整數 action ID（含 361 pass），與作者 one-hot CE 在本資料規格下等價。Value target 直接使用已轉為指定玩家視角的 `[-1,1]` soft value，不轉成硬勝負、不重做黑白正負號轉換。
+
+`grouped_losses` 回傳可微的 `total`／`bt`／`policy`／`value`，三項權重固定為已確認的 1。輸入會檢查 shape、device、浮點／整數類型、有限值、action 範圍及 value 範圍。當前嚴格要求完整標籤；可傳入 Dataset 的 `value_weight`，但只接受與 target 同形且全為 1，尚未加入品質遮罩或缺標籤跳過政策。因無遮罩，policy／value 的分母都是 `G×70`。
+
+#### 與第四步接線
+
+以下承接第四步取得的 `batch`，只展示一次 forward／backward，並非正式訓練器：
+
+```python
+from go_aicup.tasks.strength.reproduce_paper.model import StrengthEstimator
+from go_aicup.tasks.strength.reproduce_paper.losses import grouped_losses
+
+model = StrengthEstimator(**config['model'])
+output = model(batch['planes'].float())
+losses = grouped_losses(
+    output, batch['policy_target'], batch['value_target'], batch['value_weight'],
+)
+losses['total'].backward()
+# losses['bt'], losses['policy'], losses['value'] remain separately reportable.
+```
+
+DDP 每張卡必須拿相同數量的完整組，這由第四步 sampler 保證；各卡本地 loss 平均後 backward，DDP 的參數梯度平均就是全域平均，不需再乘／除 world_size，也不需在 loss 內做可微 all-reduce。訓練器若要顯示全域 loss，仍須另行聚合 detached metrics。當前不支援不等組數或空 rank。
+
+#### 驗證範圍與限制
+
+`tests/test_reproduce_paper_model_loss.py` 涵蓋作者結構／bias／BN 設定、residual 相加後 activation、分組與逐位置輸出一致、strength 無界／value tanh、直接公式（絕對差 ≤1e-6）、正反排序及組邊界、極端 score 的有限 loss／梯度、BF16 輸入下 FP32 loss、one-hot CE／soft MSE 等價、所有 head 與共享骨幹反向傳播及無效輸入拒絕。資料測試另包含 sampler → Dataset → collate → model → 三項 loss → backward 的合成整合。
+
+兩程序 CPU Gloo 測試在 FP32、固定 BN running stats（`model.eval()` 但保留 autograd）下，比較全組與分組的四項 loss 及全參數梯度向量。以梯度向量相對 L2 ≤1e-5 驗收，另報最大絕對誤差及近零分量（參考梯度絕對值 ≤1e-7）的最大絕對誤差。這項測試驗證分組／梯度尺度，不代表 training-mode 普通 BN 與 SyncBN 等效。
+
+2026-11-02 完整 reproduce_paper CPU 合成回歸結果為 **67 passed（27.04s）**。Gloo 全參數梯度向量相對 L2＝**1.37e-6**、最大絕對誤差＝**3.69e-7**、近零分量最大絕對誤差＝**2.68e-8**；執行命令與完整紀錄見根目錄 RESULTS。
+
+CUDA／NCCL、GPU AMP、SyncBN、microbatch、SGD schedule、checkpoint 與正式收斂仍待第六步。未載入作者權重，未做作者原程式／C++ 二進位逐值比對；沒有新增外部訓練資料。k=5／10／15／20 分數、增益與訓練成本仍未知。

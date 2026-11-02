@@ -416,3 +416,13 @@ project/
 ### 2026-11-01：training value teacher 改用 1 visit
 
 依使用者決定，`configs/strength/se_seed2026.json` 的 teacher.visits 設為 1，`slurm/label_value.slurm` 預設亦為 1，可直接不帶參數提交。仍只處理 training；未執行計算、測試或提交作業，品質與實際耗時尚未驗收。
+
+
+### 2026-11-02：reproduce_paper 第四步完成
+
+使用者回報全部 training target 已取得；prepared 索引、固定 validation 題組及 `value_v1/train/value.npy` 已存在。第四步已實作 `GroupBatchSampler`／`collate_groups`，按盤等權抽每級同盤七手、完整組 DDP 分配及消費端 step 可重建抽樣／D4，沿用逐位置 value。資料／題組／teacher protocol 合成回歸 41 項通過（21.50s），含 spawn workers、prefetch、8 rank 分組及續跑一致性；未啟動 GPU、teacher 或訓練，未逐值重新稽核官方標籤。`plan.md`／README 與 RESULTS 已更新，下一步為第五步三頭模型／loss；正式品質、分 k 成績及成本未知。
+
+
+### 2026-11-02：reproduce_paper 第五步完成
+
+依固定作者版本查核，新增專用三頭 ResNet 與 FP32 分組 BT／policy CE／soft value MSE，保留卷積 bias、residual 相加後 ReLU、預設 BN／初始化與 value tanh；不使用 V1／V2 的不同骨幹，省略作者未啟用的 learned weight head。支援第四步完整組輸入及逐位置推論，loss 等權且只接受完整 teacher 標籤。完整 reproduce_paper CPU 合成回歸 67 項通過（27.04s），兩程序 Gloo 固定 BN 的全參數梯度向量 relative L2=1.37e-6、max abs=3.69e-7；近零分量 max abs=2.68e-8。詳細方式、對齊／偏離及測試見本目錄 README／plan 與 RESULTS。下一步第六步訓練器／checkpoint／H200 短測；未啟動 GPU、optimizer 訓練或 teacher，分 k 分數及成本未知。

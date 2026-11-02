@@ -1461,3 +1461,21 @@ split 1／2 分開：保險單獨 0.9385／0.9343，融合 0.9865／0.9828，融
 ### 2026-11-01：修正 value Slurm GPU 資源提交欄位
 
 使用者提交收到 `GPU partition requires --gpus-per-node=<num>`。已在 `slurm/label_value.slurm` 明確新增每節點 8 GPU，保留 8 tasks／每 task 1 GPU；srun 分析與匯出亦分別明確指定每節點分片數 GPU／1 GPU。同步修正單卡覆寫指令。未重新提交或執行計算，排程器是否接受仍待使用者重提確認。
+
+
+### 2026-11-02：reproduce_paper 第四步分組 sampler 完成
+
+`dataset.py` 新增 `GroupBatchSampler`／`collate_groups`：training 每組十級、每級按棋局等權抽一盤並抽七個不同有效位置，沿用逐位置 `value_target`，輸出 `[local_groups, 10, 7, ...]`。128 組／8 卡時每卡 16 個完整組、1,120 個位置，不補齊。抽樣由 seed／step／全域組編號決定，D4 沿用 seed／step／sample_index；以消費端完成 updates 作 `start_step` 可重建續跑，不受 worker／prefetch 影響。缺標籤、shape／dtype 錯配、分組不合法及非有限／越界 value 明確報錯。
+
+合成回歸驗證：`PYTHONPATH=src /home/jason1122/.conda/envs/go/bin/python -m pytest tests/test_reproduce_paper_data.py tests/test_reproduce_paper_questions.py tests/test_reproduce_paper_value.py -q`，**41 passed，21.50s**。包括不等盤長的按盤等權檢查、8 rank 分組與單卡一致、spawn workers／prefetch 及消費端續跑一致、D4／teacher 對齊及錯誤輸入。未啟動 GPU／DDP 訓練或 teacher 分析，未逐值重新稽核官方標籤；k=5／10／15／20 分數、增益與訓練成本未知。使用者回報 training target 已全數取得；既有 prepared／questions 與 training value.npy 已存在。`plan.md`／README 已更新，下一步為第五步三頭模型與 loss。
+
+
+### 2026-11-02：reproduce_paper 第五步三頭模型與分組 loss 完成
+
+核對作者固定 commit `d9498964e2ba84b5798c40e3f5b8a91a8791d66c` 的 BT／MiniZero network、train 與 SE config 後，新增專用 `model.py`／`losses.py`。預設 20 blocks／256 channels，所有卷積保留 bias、residual 相加後 ReLU、預設 BN 與初始化；policy 為 2-channel 1×1 conv→722→362 logits，value／strength 為 1-channel conv→361→256→1，僅 value 接 tanh。省略作者 `bt_use_weight=false` 下未用的 weight head；不改 V1／V2 shared model，未匯入作者權重。
+
+分組輸入 `[G,10,7,18,19,19]` 展平做一次 forward 並恢復組軸；每組每級 FP32 平均七手，再以弱到強 `logcumsumexp` prefix loss 平均 9 項／各組。總 loss＝BT＋policy CE＋soft value MSE，各項固定權重 1。完整 teacher value 直接使用指定玩家視角；只接受全 1 value_weight，不加入品質遮罩。等組數 DDP 使用本地平均及 DDP 梯度平均，不額外 world-size scaling；訓練器仍須聚合顯示用 metrics。
+
+驗證命令：`PYTHONPATH=src OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 /home/jason1122/.conda/envs/go/bin/python -m pytest tests/test_reproduce_paper_model_loss.py tests/test_reproduce_paper_data.py tests/test_reproduce_paper_questions.py tests/test_reproduce_paper_value.py -q -s`。結果 **67 passed（27.04s）**；直接公式絕對差通過 ≤1e-6，極端 score／BF16→FP32、各 head 梯度、錯誤輸入及 sampler→model→loss→backward 整合通過。兩程序 CPU Gloo、固定 BN running stats、FP32 小模型的全參數梯度向量相對 L2＝**1.37e-6**（gate ≤1e-5），最大絕對差＝**3.69e-7**，近零分量（參考梯度 abs≤1e-7）最大絕對差＝**2.68e-8**。未執行 CUDA／NCCL、SyncBN、正式模型 GPU forward、optimizer 訓練或標籤重算；k=5／10／15／20 分數、增益與正式成本未知。
+
+`plan.md`／README 已更新詳細架構、公式、介面與偏離；下一步第六步訓練器／checkpoint／H200 短測。外部來源與 Codex 貢獻同步登記 EXTERNAL_RESOURCES。

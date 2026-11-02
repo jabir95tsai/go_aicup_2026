@@ -65,3 +65,10 @@
 ## 2026-11-01：SE 第一、二步實作查核
 
 沿用上列作者固定版本，補閱 `strength/misc/game_wrapper.cpp`、`strength/trainer/st_data_loader.cpp` 及內嵌 MiniZero 的 `minizero/minizero/environment/{base/base_env.h,go/go.cpp}`，確認落子前輸入、當手 policy target、本人／對手歷史順序與零 padding。僅閱讀參考，未複製或納入作者程式碼；本專案沿用既有 packed cache，自行撰寫設定、索引準備、樣本轉換與合成驗證。沒有外部訓練資料或新模型分數。OpenAI Codex 協助本次實作與驗證。來源連結與契約見 `src/go_aicup/tasks/strength/reproduce_paper/README.md`。
+
+
+## 2026-11-02：SE 第五步三頭模型／loss 實作查核
+
+沿用 GPL-3.0 作者固定版本 [d9498964e2ba84b5798c40e3f5b8a91a8791d66c](https://github.com/rlglab/strength-estimator/tree/d9498964e2ba84b5798c40e3f5b8a91a8791d66c)，閱讀 `strength/trainer/bt_network.py`／`train.py`、同 tree 內 MiniZero `network/py/alphazero_network.py`／`network_unit.py` 與 `cfg/se_go.cfg`。依查核的架構及數學公式重新撰寫 `reproduce_paper/model.py`／`losses.py`（非直接複製來源檔），包含 bias、post-add ReLU、預設 BN、policy 2 channels、scalar heads、value tanh 與 listwise 正規化；省略未啟用的 weight head，改以本專案分組／DDP 介面整合。未納入作者權重、外部訓練資料或作者執行程式依賴；不宣稱作者 checkpoint／二進位逐值相容。
+
+OpenAI Codex 協助來源查核、程式與合成測試及文件。CPU／Gloo 合成回歸 67 項通過，僅代表工程驗證；分 k 成績與對競賽分數的貢獻未知，未啟動正式訓練。詳細來源連結、架構對齊／偏離及 API 見 `src/go_aicup/tasks/strength/reproduce_paper/README.md` 第五步。

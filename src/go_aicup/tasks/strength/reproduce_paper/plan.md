@@ -1,6 +1,6 @@
 # SE 幽玄十級方法移植：實作與驗收計畫
 
-更新日期：2026-11-01。
+更新日期：2026-11-02。
 
 本文件將 [README.md](README.md) 的已確認方法拆成可逐步交付、驗收的工程工作；專案規則仍以根目錄 [CLAUDE.md](../../../../../CLAUDE.md) 為準。設定檔為根目錄 [configs/strength/se_seed2026.json](../../../../../configs/strength/se_seed2026.json)。新增決策或短測結果須同步回填設定與實驗帳本，避免本文件形成另一套規格。
 
@@ -41,7 +41,7 @@
 | Policy | 預測所選當手，row-major 0..360；361 為 pass，盤面與 target 同步 D4 |
 | 取樣 | 每組十級，各級均勻抽一盤，再抽同盤指定玩家七個不同有效位置；跨組／step 可重複 |
 | Global batch | 128 組 × 10 級 × 7 位置 = 8,960 個位置／update |
-| 模型 | 256 channels、20 residual blocks、三頭；block／head 細節依作者固定版本查核 |
+| 模型 | 256 channels、20 residual blocks、三頭；bias、post-add ReLU、BN／head 已依作者固定版本查核 |
 | Loss | `L_BT + L_policy + L_value`，初始權重皆為 1 |
 | Optimizer | SGD，momentum=0.9、weight_decay=0.0001 |
 | Schedule | 32,500 optimizer updates；完成第 25,000 次後，LR 由 0.04 降至 0.02 |
@@ -63,7 +63,7 @@
 - Teacher 標籤、training centroid 與固定 validation 題組都依同一切分表判定角色；各 run 重用固定 validation 題組，不因訓練 seed 更換題目。
 - 原始資料或切分規格真的變更時，須另建明確版本並記錄原因，不覆寫既有共用切分；不同切分版本的成績不可當成同一 holdout 比較。
 
-驗收已完成：不同訓練 seed 的 run 具有完全相同的 train／valid 名單、切分雜湊與固定 validation 題組；重跑不改寫產物。`prepare.py` 使用獨立且固定為 2026 的 `split_seed`，資料 identity 不包含訓練 seed；初次建置與共用讀取皆已驗證。模型、訓練器及實際 checkpoint 續跑仍屬後續階段。
+驗收已完成：不同訓練 seed 的 run 具有完全相同的 train／valid 名單、切分雜湊與固定 validation 題組；重跑不改寫產物。`prepare.py` 使用獨立且固定為 2026 的 `split_seed`，資料 identity 不包含訓練 seed；初次建置與共用讀取皆已驗證。模型與分組 loss 已完成第五步；訓練器及實際 checkpoint 續跑仍屬後續階段。
 
 ### 128 組與四倍 LR 的最新決策
 
@@ -78,13 +78,13 @@
 
 ### 第一步：設定、split 與有效位置索引
 
-**狀態：設定／索引、獨立固定 split_seed 與跨 run 共用切分已實作並通過合成驗收；官方全量資料尚未準備。**
+**狀態：設定／索引、獨立固定 split_seed 與跨 run 共用切分已實作並通過合成驗收；官方 prepared 索引及固定 validation 題組已存在（2026-11-02 查核）。**
 
 實作範圍：`config.py`、根目錄 `configs/strength/se_seed2026.json`、`prepare.py`。沿用 packed cache metadata／實際顏色，產生 split、每盤有效位置及 manifest；不重新 parse 官方 CSV／SGF，不複製全量盤面。
 
 交付：`games.parquet`、`{train,valid}_{game,offsets,ply}.npy`、`manifest.json`。
 
-資料準備流程第五步「固定 validation 題組」已另由 `questions.py` 完成：讀取共用切分表，呼叫唯一 CV 模組產生題組與 eligibility，預設 10,000 題、固定 seed=2026，不受訓練 seed 影響。產物為 `validation_questions.parquet`、`validation_eligibility.parquet`、`questions_manifest.json`；題數須為 40 的正整數倍，四個 k／十級 cell 等量，題內同玩家同色且不重複，與 train 棋局零重疊。來源或題組損壞／設定衝突明確拒絕覆寫。操作入口見 README；官方全量題組尚未生成。
+資料準備流程第五步「固定 validation 題組」已另由 `questions.py` 完成：讀取共用切分表，呼叫唯一 CV 模組產生題組與 eligibility，預設 10,000 題、固定 seed=2026，不受訓練 seed 影響。產物為 `validation_questions.parquet`、`validation_eligibility.parquet`、`questions_manifest.json`；題數須為 40 的正整數倍，四個 k／十級 cell 等量，題內同玩家同色且不重複，與 train 棋局零重疊。來源或題組損壞／設定衝突明確拒絕覆寫。操作入口見 README；官方固定題組產物已存在。
 
 驗收目標：
 
@@ -112,7 +112,7 @@
 
 ### 第三步：逐有效盤面 teacher 與標籤準備
 
-**狀態：script 與 dataset 接線已撰寫；依使用者要求不執行計算或測試，工程驗收及品質短測待執行。**
+**狀態：使用者回報全部 training target 已取得；已確認 `value_v1/train/value.npy` 存在。合成 protocol／重試／匯出測試已通過；本次未重新分析 teacher 或逐值稽核官方標籤，品質與效能量測仍未知。**
 
 2026-11-01 使用者明確改為「逐有效盤面分析，各自取得 v」，取代原末盤共用標籤。有效位置維持指定玩家且 `ply >= 30`，每個落子前盤面各自分析。Teacher 只收到所需歷史 prefix，不加入虛構 pass、不續弈、不改寫 RE。
 
@@ -123,18 +123,20 @@
 待執行驗收與正式執行 gate：
 
 - 使用已登記強網路，記錄引擎／網路／config／程式 SHA-256、規則／貼目、visits、BLACK 視角；拒絕 HumanSL。
-- 合成測試涵蓋落子前時點、完整歷史、黑白轉換、失敗與續跑、分片混用拒絕、匯出及 dataset 對齊。包含完成清理、清理中斷續作及重複匯出；目前只新增測試程式，尚未執行，未宣稱通過。
+- 合成測試涵蓋落子前時點、完整歷史、黑白轉換、失敗與續跑、分片混用拒絕、匯出及 dataset 對齊。包含完成清理、清理中斷續作及重複匯出；2026-11-02 已執行合成測試通過，不代表官方標籤已逐值重新稽核。
 - 使用者已指定 `teacher.visits=1`，Slurm 預設同為 1。後續固定 training 小樣本可用 `--limit-games` 量測穩定性、失敗率、positions/s 與品質；本次不執行。
 - 全量成本須按全部有效位置數估算，不能沿用每局一次末盤的估時。短測後回報時間、GPU-hours、RAM、磁碟再啟動長作業。
 - 2026-11-01 使用者決定本次只生成 training 標籤；Slurm 預設只處理 train。Validation 標籤不在本次執行範圍。
 
-操作見 README。本次只完成準備所有有效盤面 v 的程式，未產生任何實際 label。
+操作見 README。Training 標籤由使用者完成，本次未重跑標籤生成；validation 標籤仍不在範圍內。
 
 ### 第四步：分組 sampler 與 teacher 標籤讀取整合
 
-**狀態：待實作。依賴：有效位置索引、樣本介面及第三步標籤格式。**
+**狀態：已實作，合成驗收通過（2026-11-02）；未啟動 GPU／DDP 訓練。**
 
-實作範圍：擴充 `dataset.py`，按 step 產生完整排序組，保留 `[groups, 10, 7, ...]` 結構；將已對齊的逐位置 teacher target 接入。抽樣使用 training，不以全資料 epoch shuffle 取代分組抽樣。
+交付：`dataset.py` 新增 `GroupBatchSampler` 與 `collate_groups`，沿用 `PaperDataset(label_dir=...)`。每組按 rank 0..9 排列、每級先均勻抽棋局再抽七個互異有效位置；value 已為指定玩家視角，不再次翻轉符號。Collate 保留 `[local_groups, 10, 7, ...]`，拒絕缺標籤、錯級別順序、跨盤／跨色、重複位置與非有限／越界 value。
+
+抽樣 RNG 由 `(seed, step, global_group)` 決定；完整組依全域編號連續分配給各 DDP rank，128 組／8 卡時每卡 16 組、1,120 個位置。D4 沿用 `(seed, step, sample_index)`。`start_step` 是消費端已完成 optimizer updates，迭代／prefetch 不修改此游標；同設定可重建任意後續 step，不受 worker 數影響。操作範例見 README 第四步。
 
 驗收目標：
 
@@ -146,9 +148,16 @@
 
 ### 第五步：三頭模型與分組 loss
 
-**狀態：待實作。依賴：第二、四步的資料契約。**
+**狀態：已實作並通過 CPU／兩程序 Gloo 合成驗收（2026-11-02）；CUDA／SyncBN／正式訓練留待第六步。**
 
-實作範圍：新增 `model.py`、`losses.py`；核對固定作者版本的 residual activation、BN、各 head 結構與 value 輸出範圍。Strength 為 scalar，policy 為 362 logits，value 接收 soft target。
+交付：`model.py` 的 `StrengthEstimator`／專用 residual block、`losses.py` 的 `grouped_bt_loss`／`grouped_losses`、`tests/test_reproduce_paper_model_loss.py`，以及第四步資料到三頭 backward 的整合測試。完整架構、來源對齊／偏離、公式與 API 見 [README 第五步](README.md#第五步三頭模型與分組-loss2026-11-02)。
+
+- 固定作者 commit `d9498964e2ba84b5798c40e3f5b8a91a8791d66c` 的 BT／MiniZero network、train 與 SE config 已查核。專用骨幹保留卷積 bias、residual 相加後 ReLU、預設 BN eps=1e-5／momentum=0.1 及各層初始化；不改 V1／V2 shared model。
+- Policy：1×1 conv→2 channels→flatten 722→362 logits。Value／strength：1×1 conv→1 channel→flatten 361→256→1，僅 value 接 tanh。支援逐位置與分組輸入；同次展平 forward 後恢復 `[G,10,7,...]`。
+- FP32 級內七手平均，再對每組使用 `logcumsumexp` 計算弱到強 prefix 排序 loss，平均 9 項／各組。Policy CE、soft value MSE 與 BT 等權，回傳分項及 total；value 不再次翻號或硬分類，只接受完整標籤／全 1 value_weight。
+- 作者 `bt_use_weight=false` 下未使用的 learned weight head 省略；本版只輸出 logits、scalar 去除最後長度 1 軸、state-dict 名稱不同，不匯入作者 checkpoint。幽玄十級、teacher 與訓練預算差異保留。
+
+驗收結果：完整 reproduce_paper CPU 合成回歸 **67 passed（27.04s）**。直接公式 loss 絕對差通過 ≤1e-6，極端 score／BF16→FP32 及所有 head 梯度通過。兩程序 Gloo 固定 BN running stats 後，全參數梯度向量相對 L2 **1.37e-6**、最大絕對差 **3.69e-7**、近零分量最大絕對差 **2.68e-8**。這是等組數、FP32 小模型驗收；尚未執行完整 20×256 GPU forward 或 training-mode BN／SyncBN 對照。
 
 驗收目標：
 
@@ -156,7 +165,7 @@
 - 每組每級先平均七個 strength scores，再以強到弱順序計算 listwise loss、除以 `10-1`，最後平均各組；不可先平均全域各級再算一次 loss。
 - 級別平均與 logsumexp 使用 FP32；與直接公式的 loss 絕對差 ≤ `1e-6`，極端輸入下保持有限。
 - Policy CE、value MSE、BT 各自可報告，總 loss 權重皆為 1；有遮罩時明確記錄 value loss 的有效樣本與歸一化方式。
-- 在可控 BN 行為的 FP32 基準中，完整組計算與兩程序分組計算的 loss／參數梯度相對差 ≤ `1e-5`；接近零的量另報絕對誤差。
+- 在可控 BN 行為的 FP32 基準中，完整組計算與兩程序分組計算的 loss 相對差與全參數梯度向量相對 L2 ≤ `1e-5`；接近零的分量另報最大絕對誤差。
 
 ### 第六步：訓練器、單卡／DDP 短測與續跑
 
@@ -211,11 +220,15 @@
 |---|---|
 | 專用程式與本計畫 | `src/go_aicup/tasks/strength/reproduce_paper/` |
 | 預設設定 | `configs/strength/se_seed2026.json` |
-| 已有合成測試 | `tests/test_reproduce_paper_data.py`、`tests/test_reproduce_paper_questions.py` |
+| 已有合成測試 | `tests/test_reproduce_paper_data.py`、`tests/test_reproduce_paper_questions.py`、`tests/test_reproduce_paper_value.py`、`tests/test_reproduce_paper_model_loss.py` |
 | 預設 prepared 資料 | `data/processed/reproduce_paper/seed2026/` |
 | 預設 run 輸出 | `outputs/rank/reproduce_paper/se_seed2026/` |
 | 實驗與外部資源紀錄 | `RESULTS.md`、`EXTERNAL_RESOURCES.md` |
 
-第一、二步原有程式、資料準備第二步的固定 split_seed／跨 run 共用切分，以及資料準備第五步的固定 validation 題組皆已完成，合計 24 項合成測試通過（7.17s）；第三步 script 與 dataset 接線已撰寫但未執行驗收，第四至八步尚未完成。Teacher visits 已指定為 1；品質門檻、精度、BN／SyncBN、microbatch、監控與 checkpoint 頻率、正式成本，依後續查核與短測回填。既有官方全量資料準備、teacher 分析及正式訓練均尚未執行。
+第一、二步、共用切分及固定 validation 題組已完成；使用者已取得全部 training target，檔案位於 `data/processed/reproduce_paper/value_v1/train/value.npy`。第四步 sampler／標籤整合與分組 batch 已完成，涵蓋按盤等權、每級同盤七手互異、teacher／D4 對齊、8 卡完整組分配、消費端 step 續跑及 spawn workers／prefetch 一致性。第五步三頭模型／分組 loss 亦已完成；第六至八步仍待完成。
 
-下一步為第三步程式驗收與固定 training 小樣本短測（本次依指示不執行）；target 已確認為逐有效盤面，取得成本後再安排全量分析。
+2026-11-02 驗證：`tests/test_reproduce_paper_data.py`、`tests/test_reproduce_paper_questions.py`、`tests/test_reproduce_paper_value.py` 合計 **41 passed（21.50s）**，包含新第四步測試與既有資料／題組／teacher protocol 回歸；未重新生成 teacher、未逐值稽核官方 value.npy，未啟動 GPU 或正式訓練。Teacher visits=1；品質、精度、BN／SyncBN、microbatch、監控與 checkpoint 頻率及正式成本仍待後續短測。k=5／10／15／20 的模型成績與增益均未知。
+
+第五步後完整回歸為 **67 passed（27.04s）**，包括第四步資料接線、三頭模型、公式與兩程序 Gloo loss／梯度驗證。架構／loss 實作方式及對齊／偏離詳見 README 第五步。GPU 訓練品質、分 k 成績與成本仍未知。
+
+下一步為第六步：整合 SGD、固定 update LR schedule、單卡／DDP 訓練器、原子 checkpoint 與消費端 step 續跑；先驗證 FP32／BN 行為，再依計畫執行 H200 短測、回報正式估時。第七步推論／centroid 可在小模型上另行驗收。
