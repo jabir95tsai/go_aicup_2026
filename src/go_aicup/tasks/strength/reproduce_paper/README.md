@@ -35,7 +35,7 @@ Adam、AdamW、Muon 或其他 optimizer 的比較不列入目前重現範圍。�
 | KataGo 規則／貼目 | 日本規則、貼目 6.5；是 teacher 分析假設，不是原局規則已知值 |
 | 本次範圍 | 僅基本 SE 三頭模型、逐有效盤面 soft value 偽標籤與對應評估；不實作／訓練 SLsum、SLvote，也不建立 SL 對照 gate |
 
-本版總 loss 採 `L_BT + L_policy + L_value`，各項初始權重為 1。SE-infinity 維持排除。BF16、BN 行為、teacher visits 與監控頻率等屬原始碼查核／短測項目，並非以上五項決策尚待確認。
+本版總 loss 採 `L_BT + L_policy + L_value`，各項初始權重為 1。SE-infinity 維持排除。BF16、BN 行為、監控頻率等屬原始碼查核／短測項目；teacher visits 已由使用者指定為 1，並非以上五項決策尚待確認。
 
 ### 目前競賽版訓練預算
 
@@ -120,7 +120,7 @@ SGD：momentum=0.9、weight_decay=0.0001。第 1–100,000 次更新用 LR=0.01�
 
 原末盤共用 target 方案由使用者明確改為逐盤面分析。每個有效 `ply` 對應落子前盤面，由強 KataGo 在日本規則／6.5 貼目下各自估計 `p_black`。黑方 v=`2*p_black-1`，白方取負；不硬分類、不當成原局真實勝負、不寫入 RE。同局不同位置不再共用末盤 v。
 
-原資料無勝負結果，這仍是 teacher 偽標籤，與論文 outcome supervision 不同。規則／貼目是分析假設，visits、品質門檻與成本待 training 小樣本短測，不能依 validation rank 挑選。
+原資料無勝負結果，這仍是 teacher 偽標籤，與論文 outcome supervision 不同。規則／貼目是分析假設，visits 已由使用者指定為 1；品質門檻與成本仍待 training 小樣本短測，不能依 validation rank 挑選。
 
 
 ## 先盤點目前可以沿用的程式
@@ -211,7 +211,7 @@ SGD：momentum=0.9、weight_decay=0.0001。第 1–100,000 次更新用 LR=0.01�
 五項模型／資料決策均已確認，不再要求重複確認。實作期間需完成以下工程查核：
 
 - 固定版本 MiniZero 的輸入時點、顏色層、policy target、residual block 與多卡 BN 行為；以具體棋局樣本驗證，避免輸入包含 policy 答案。
-- Teacher visits、標籤品質與失敗處理：在日本規則／6.5 下用固定 training 小樣本比較，凍結設定後再處理全量資料。
+- Teacher 使用 1 visit（使用者決定）；標籤品質與失敗處理仍須驗收。
 - FP32 基準、BF16 與 BN／SyncBN 的數值、顯存和吞吐驗證；監控與 checkpoint 頻率依成本決定。
 - 偽標籤生成、training centroid 全量推論與正式 32,500-step 訓練的時間、GPU-hours 和磁碟需求；依 CLAUDE.md §9，在長作業前回報估時並確認啟動。
 
@@ -346,25 +346,25 @@ PYTHONPATH=src python -m pytest tests/test_reproduce_paper_data.py tests/test_re
 ## 第三步：準備每個有效盤面的 v（程式已撰寫，未執行）
 
 先具備 `prepare.py` 產物。本次沒有啟動 prepare、teacher、測試、GPU 或訓練。
-以下命令供之後使用，`VISITS` 必須先由 training 短測決定；不提供預設正式預算。
+2026-11-01 使用者指定 1 visit；config 與 Slurm 預設均為 1，以下命令尚未執行。
 
 ```bash
 # 固定 training 前 100 局；同一小樣本比較不同 visits 時必須換 out。
 python -m go_aicup.tasks.strength.reproduce_paper.label_value \
-  --out outputs/rank/reproduce_paper/value_pilot_v32 --split train \
-  --visits 32 --limit-games 100
+  --out outputs/rank/reproduce_paper/value_pilot_v1 --split train \
+  --visits 1 --limit-games 100
 
 # 正式分片範例：每個 worker 各自使用 shard 0..7，指定自己的 GPU。
 python -m go_aicup.tasks.strength.reproduce_paper.label_value \
   --out data/processed/reproduce_paper/value_v1 --split train \
-  --visits "$VISITS" --num-shards 8 --shard 0
+  --visits 1 --num-shards 8 --shard 0
 
 # 全部分片成功後匯出一個 sample_index 對齊的 v 向量（此命令不啟動引擎）。
 python -m go_aicup.tasks.strength.reproduce_paper.label_value \
   --out data/processed/reproduce_paper/value_v1 --split train --export
 ```
 
-上例 32 visits 僅示範小樣本呼叫，不是已通過品質 gate。完整 valid 也要取得 v 時，用同一組 teacher 設定改 `--split valid` 分片執行與匯出。以 `CUDA_VISIBLE_DEVICES` 配置各 worker；不會自動提交 Slurm 或啟動多 GPU。`--engine-config` 可指定執行配置，變更後須使用新輸出版本。
+1 visit 是使用者指定設定，尚未執行本版品質驗收。完整 valid 也要取得 v 時，用同一組 teacher 設定改 `--split valid` 分片執行與匯出。以 `CUDA_VISIBLE_DEVICES` 配置各 worker；不會自動提交 Slurm 或啟動多 GPU。`--engine-config` 可指定執行配置，變更後須使用新輸出版本。
 
 每個 `<out>/<split>/shard_XXXXX/` 保存與該分片有效位置同序的 `value.npy`、`p_black.npy`、`score_black.npy`、`score_stdev.npy`、`visits.npy`、`status.npy` 及來源 manifest。分片按共用 game array 的 row modulo 分配，局內按原有效 ply 排序。狀態 0=未完成、1=成功、2=失敗；缺失值為 NaN。每局完成先 flush 數值再提交 status，`--retries` 預設 2 次；重跑相同命令只處理非成功位置。錯誤見 `failures.jsonl`／`katago_stderr.log`。硬中斷留下 `.writer.lock` 時先確認原程序已停止再移除鎖。
 
@@ -397,21 +397,23 @@ samples = PaperDataset(
 
 腳本：`slurm/label_value.slurm`。預設 `8gpus` partition、單節點 8 張 H200、8 tasks（每 task 1 GPU／12 CPU）、總 RAM 128GB、時限 48 小時。這是資源申請上限，並非實測完成時間；未量測 GPU-hours。執行前須已有 prepare 產物，腳本不自動重新準備資料。
 
-從 repo 根目錄提交，第一個參數必須是已選定的正整數 visits：
+從 repo 根目錄提交，不帶參數即使用 1 visit；可用第一個參數覆寫：
 
 ```bash
-# 先設定 VISITS；此處不替正式預算選值。
-sbatch slurm/label_value.slurm "$VISITS"
+# 預設 1 visit、只處理 training。
+sbatch slurm/label_value.slurm
 
 # 也可指定輸出位置與單一 split。
-sbatch slurm/label_value.slurm "$VISITS" \
+sbatch slurm/label_value.slurm 1 \
   data/processed/reproduce_paper/value_v1 train
 ```
 
-預設依序執行 train、valid，各 split 內啟動八個分片；所有分片成功才執行 `--export`，完成後各目錄只留 `value.npy`。任一分片失敗即停止，保留續跑資料；修正問題後以相同 visits、task 數、設定、輸出目錄重提。遭 Slurm 強制終止時，先確認所有原作業程序停止，再移除殘留 `.writer.lock` 才能續跑。已完成的 split 只重新檢查匯出檔，不啟動 teacher。
+預設只執行 train，啟動八個分片，不生成 validation 標籤；所有分片成功才執行 `--export`，完成後各目錄只留 `value.npy`。任一分片失敗即停止，保留續跑資料；修正問題後以相同 visits、task 數、設定、輸出目錄重提。遭 Slurm 強制終止時，先確認所有原作業程序停止，再移除殘留 `.writer.lock` 才能續跑。已完成的 split 只重新檢查匯出檔，不啟動 teacher。
 
-預設使用 `$HOME/.conda/envs/go/bin/python`，可透過 `PYTHON_BIN`、`CONFIG` 環境變數覆寫；工作目錄沿用既有腳本固定為 `/work/jason1122/go_aicup_2026`；Slurm 負責每個 task 的 GPU 綁定，不手動覆寫 `CUDA_VISIBLE_DEVICES`。account 預設 `GOV115094`，需變更時用 `sbatch --account=你的account ...` 覆寫。KataGo 的 `LD_LIBRARY_PATH` 沿用 `slurm/humansl.slurm` 的 `data/external/cuda-libs-12.8/{lib,stdcxx}`。若改為單卡，可加 `--ntasks=1 --mem=16G`，但既有分片數不得改變，須使用新輸出目錄。Slurm 自己的 stdout／stderr 合併至 `outputs/slurm-se-value-JOBID.out`（提交前確保 outputs 目錄存在），不混入 label 目錄。
+預設使用 `$HOME/.conda/envs/go/bin/python`，可透過 `PYTHON_BIN`、`CONFIG` 環境變數覆寫；工作目錄沿用既有腳本固定為 `/work/jason1122/go_aicup_2026`；Slurm 負責每個 task 的 GPU 綁定，不手動覆寫 `CUDA_VISIBLE_DEVICES`。account 預設 `GOV115094`，需變更時用 `sbatch --account=你的account ...` 覆寫。KataGo 的 `LD_LIBRARY_PATH` 沿用 `slurm/humansl.slurm` 的 `data/external/cuda-libs-12.8/{lib,stdcxx}`。若改為單卡，可加 `--ntasks=1 --gpus-per-node=1 --mem=16G`，但既有分片數不得改變，須使用新輸出目錄。Slurm 自己的 stdout／stderr 合併至 `outputs/slurm-se-value-JOBID.out`（提交前確保 outputs 目錄存在），不混入 label 目錄。
 
 本次僅撰寫 `.slurm`，未提交作業、執行計算或測試。
 
-腳本亦沿用既有環境變數寫法：`VISITS="$VISITS" RUN=data/processed/reproduce_paper/value_v1 SPLIT=both sbatch slurm/label_value.slurm`。位置參數仍可使用且優先於環境變數。`slurm/` 依既有 `.gitignore` 規則為本機腳本目錄，本次未變更忽略規則。
+腳本亦沿用既有環境變數寫法：`VISITS=1 RUN=data/processed/reproduce_paper/value_v1 SPLIT=train sbatch slurm/label_value.slurm`。位置參數仍可使用且優先於環境變數。`slurm/` 依既有 `.gitignore` 規則為本機腳本目錄，本次未變更忽略規則。
+
+Nano4 GPU partition 要求明確指定 `--gpus-per-node`；本腳本已加入 `#SBATCH --gpus-per-node=8`，與 8 tasks／每 task 1 GPU 一致。分析 srun 明確指定每節點 8 GPU，匯出 srun 指定 1 GPU，避免繼承完整八卡設定。

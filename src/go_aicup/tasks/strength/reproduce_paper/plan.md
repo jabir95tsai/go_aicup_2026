@@ -45,7 +45,7 @@
 | Loss | `L_BT + L_policy + L_value`，初始權重皆為 1 |
 | Optimizer | SGD，momentum=0.9、weight_decay=0.0001 |
 | Schedule | 32,500 optimizer updates；完成第 25,000 次後，LR 由 0.04 降至 0.02 |
-| Teacher | 既有 KataGo 強網路、日本規則／6.5；visits 由固定 training 小樣本短測決定 |
+| Teacher | 既有 KataGo 強網路、日本規則／6.5；visits=1（2026-11-01 使用者決定） |
 | Value | 黑方 `2*p_black-1`，白方取相反數；不將 soft target 硬分類 |
 | Centroid | 全部 800,000 盤 training 的全部有效位置，按位置等權；不使用 validation 擬合 |
 | 題目解碼 | 題內所有有效位置的 scalar score 平均後取最近 rank centroid |
@@ -124,9 +124,9 @@
 
 - 使用已登記強網路，記錄引擎／網路／config／程式 SHA-256、規則／貼目、visits、BLACK 視角；拒絕 HumanSL。
 - 合成測試涵蓋落子前時點、完整歷史、黑白轉換、失敗與續跑、分片混用拒絕、匯出及 dataset 對齊。包含完成清理、清理中斷續作及重複匯出；目前只新增測試程式，尚未執行，未宣稱通過。
-- 固定 training 小樣本用 `--limit-games`，不同 visits 使用不同輸出目錄比較相同盤面；量測穩定性、失敗率、positions/s，凍結 visits／品質政策。`teacher.visits=null` 保留未知，執行時須明確提供正整數。
+- 使用者已指定 `teacher.visits=1`，Slurm 預設同為 1。後續固定 training 小樣本可用 `--limit-games` 量測穩定性、失敗率、positions/s 與品質；本次不執行。
 - 全量成本須按全部有效位置數估算，不能沿用每局一次末盤的估時。短測後回報時間、GPU-hours、RAM、磁碟再啟動長作業。
-- train 與 valid 各自執行／匯出，同一 teacher 設定；valid 不用於選 visits 或品質門檻。
+- 2026-11-01 使用者決定本次只生成 training 標籤；Slurm 預設只處理 train。Validation 標籤不在本次執行範圍。
 
 操作見 README。本次只完成準備所有有效盤面 v 的程式，未產生任何實際 label。
 
@@ -216,6 +216,6 @@
 | 預設 run 輸出 | `outputs/rank/reproduce_paper/se_seed2026/` |
 | 實驗與外部資源紀錄 | `RESULTS.md`、`EXTERNAL_RESOURCES.md` |
 
-第一、二步原有程式、資料準備第二步的固定 split_seed／跨 run 共用切分，以及資料準備第五步的固定 validation 題組皆已完成，合計 24 項合成測試通過（7.17s）；第三步 script 與 dataset 接線已撰寫但未執行驗收，第四至八步尚未完成。Teacher visits／品質門檻、精度、BN／SyncBN、microbatch、監控與 checkpoint 頻率、正式成本，依後續查核與短測回填。既有官方全量資料準備、teacher 分析及正式訓練均尚未執行。
+第一、二步原有程式、資料準備第二步的固定 split_seed／跨 run 共用切分，以及資料準備第五步的固定 validation 題組皆已完成，合計 24 項合成測試通過（7.17s）；第三步 script 與 dataset 接線已撰寫但未執行驗收，第四至八步尚未完成。Teacher visits 已指定為 1；品質門檻、精度、BN／SyncBN、microbatch、監控與 checkpoint 頻率、正式成本，依後續查核與短測回填。既有官方全量資料準備、teacher 分析及正式訓練均尚未執行。
 
 下一步為第三步程式驗收與固定 training 小樣本短測（本次依指示不執行）；target 已確認為逐有效盤面，取得成本後再安排全量分析。

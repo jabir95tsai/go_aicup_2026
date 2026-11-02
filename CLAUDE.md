@@ -406,3 +406,13 @@ project/
 ### 2026-11-01：逐盤面 value 完成後只留 value.npy
 
 依使用者要求，reproduce_paper 的 `label_value --export` 在驗證全部位置並原子發布後，自動清除該 split 的分片、續跑狀態、log、暫存檔與 manifest，只留下 value.npy。未成功匯出保留續跑資料；清理中斷可重跑 export 接續。Dataset 改為單檔讀取，保留 shape／dtype／樣本值檢查；完成後不再保留來源或 teacher 雜湊驗證能力。僅修改程式與文件、補寫未執行的測試；沒有計算、測試或刪除既有產物。
+
+
+### 2026-11-01：value 標籤僅處理 training
+
+使用者指定本次只需要 training。`slurm/label_value.slurm` 預設改為 train，處理 800,000 局、76,763,475 個有效位置；完成後僅保留 training 的 value.npy。本次不生成 validation 標籤，未提交作業或執行計算／測試。
+
+
+### 2026-11-01：training value teacher 改用 1 visit
+
+依使用者決定，`configs/strength/se_seed2026.json` 的 teacher.visits 設為 1，`slurm/label_value.slurm` 預設亦為 1，可直接不帶參數提交。仍只處理 training；未執行計算、測試或提交作業，品質與實際耗時尚未驗收。

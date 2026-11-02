@@ -43,7 +43,7 @@
     "target": "per_effective_pre_action_position",
     "rules": "japanese",
     "komi": 6.5,
-    "visits": null
+    "visits": 1
   },
   "questions": {
     "validation": 10000

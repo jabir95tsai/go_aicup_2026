@@ -1446,3 +1446,18 @@ split 1／2 分開：保險單獨 0.9385／0.9343，融合 0.9865／0.9828，融
 
 
 
+
+
+### 2026-11-01：value 標籤僅處理 training
+
+使用者指定本次只需要 training。`slurm/label_value.slurm` 預設改為 train，處理 800,000 局、76,763,475 個有效位置；完成後僅保留 training 的 value.npy。本次不生成 validation 標籤，未提交作業或執行計算／測試。
+
+
+### 2026-11-01：training value teacher 改用 1 visit
+
+依使用者決定，`configs/strength/se_seed2026.json` 的 teacher.visits 設為 1，`slurm/label_value.slurm` 預設亦為 1，可直接不帶參數提交。仍只處理 training；未執行計算、測試或提交作業，品質與實際耗時尚未驗收。
+
+
+### 2026-11-01：修正 value Slurm GPU 資源提交欄位
+
+使用者提交收到 `GPU partition requires --gpus-per-node=<num>`。已在 `slurm/label_value.slurm` 明確新增每節點 8 GPU，保留 8 tasks／每 task 1 GPU；srun 分析與匯出亦分別明確指定每節點分片數 GPU／1 GPU。同步修正單卡覆寫指令。未重新提交或執行計算，排程器是否接受仍待使用者重提確認。
