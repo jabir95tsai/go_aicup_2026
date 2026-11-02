@@ -1479,3 +1479,10 @@ split 1／2 分開：保險單獨 0.9385／0.9343，融合 0.9865／0.9828，融
 驗證命令：`PYTHONPATH=src OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 /home/jason1122/.conda/envs/go/bin/python -m pytest tests/test_reproduce_paper_model_loss.py tests/test_reproduce_paper_data.py tests/test_reproduce_paper_questions.py tests/test_reproduce_paper_value.py -q -s`。結果 **67 passed（27.04s）**；直接公式絕對差通過 ≤1e-6，極端 score／BF16→FP32、各 head 梯度、錯誤輸入及 sampler→model→loss→backward 整合通過。兩程序 CPU Gloo、固定 BN running stats、FP32 小模型的全參數梯度向量相對 L2＝**1.37e-6**（gate ≤1e-5），最大絕對差＝**3.69e-7**，近零分量（參考梯度 abs≤1e-7）最大絕對差＝**2.68e-8**。未執行 CUDA／NCCL、SyncBN、正式模型 GPU forward、optimizer 訓練或標籤重算；k=5／10／15／20 分數、增益與正式成本未知。
 
 `plan.md`／README 已更新詳細架構、公式、介面與偏離；下一步第六步訓練器／checkpoint／H200 短測。外部來源與 Codex 貢獻同步登記 EXTERNAL_RESOURCES。
+
+
+### 2026-11-02：reproduce_paper 延長至 35,000 updates
+
+依使用者決定，維持第 1–25,000 步 LR=0.04、第 25,001–32,500 步 LR=0.02，新增第 32,501–35,000 步 LR=0.002。每步仍為 128 組，全程 4,480,000 組／313,600,000 次位置使用，較原預算增加 7.69%。同步修改 config、GroupBatchSampler 預設 updates、plan／README 與 CLAUDE.md；訓練器／scheduler 仍待第六步實作，計畫加入兩次 LR 邊界與停止／續跑驗收。
+
+驗證：`PYTHONPATH=src OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 /home/jason1122/.conda/envs/go/bin/python -m pytest tests/test_reproduce_paper_data.py -q`，**23 passed（17.94s）**，涵蓋設定值及 sampler 第 35,000 步終止。未啟動 GPU 或訓練；實際 LR scheduler、checkpoint 邊界續跑尚未驗收，k=5／10／15／20 增益與正式成本未知。

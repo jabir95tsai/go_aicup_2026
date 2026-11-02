@@ -280,6 +280,22 @@ def labelled(prepared, tmp_path):
     dataset.close()
 
 
+def test_training_budget_and_sampler_stop(labelled):
+    from go_aicup.tasks.strength.reproduce_paper.dataset import GroupBatchSampler
+    training = read_config()['training']
+    assert (training['updates'], training['groups_per_update']) == (35000, 128)
+    assert (training['lr'], training['lr_drop_after_updates'], training['lr_after_drop'],
+            training['final_lr_after_updates'], training['final_lr']) == (
+                0.04, 25000, 0.02, 32500, 0.002)
+    dataset, _ = labelled
+    sampler = GroupBatchSampler(dataset, start_step=34999)
+    assert sampler.updates == training['updates']
+    assert sampler.groups_per_update == training['groups_per_update']
+    assert len(sampler) == 1
+    assert len(list(sampler)) == 1
+    assert list(GroupBatchSampler(dataset, start_step=35000)) == []
+
+
 def test_group_batch_structure_and_value_alignment(labelled):
     from go_aicup.tasks.strength.reproduce_paper.dataset import GroupBatchSampler, collate_groups
     dataset, values = labelled

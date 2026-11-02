@@ -212,7 +212,7 @@ class GroupBatchSampler:
     RNG is keyed by (seed, step, global group), independent of workers/prefetch
     and world size. Iteration never advances a checkpoint cursor implicitly.
     """
-    def __init__(self, dataset, *, groups_per_update=128, updates=32500,
+    def __init__(self, dataset, *, groups_per_update=128, updates=35000,
                  start_step=0, rank=0, world_size=1):
         groups_per_update, updates, start_step, rank, world_size = map(
             operator.index, (groups_per_update, updates, start_step, rank, world_size))

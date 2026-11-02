@@ -44,7 +44,7 @@
 | 模型 | 256 channels、20 residual blocks、三頭；bias、post-add ReLU、BN／head 已依作者固定版本查核 |
 | Loss | `L_BT + L_policy + L_value`，初始權重皆為 1 |
 | Optimizer | SGD，momentum=0.9、weight_decay=0.0001 |
-| Schedule | 32,500 optimizer updates；完成第 25,000 次後，LR 由 0.04 降至 0.02 |
+| Schedule | 35,000 optimizer updates；第 1–25,000 步 LR=0.04，第 25,001–32,500 步 LR=0.02，第 32,501–35,000 步 LR=0.002 |
 | Teacher | 既有 KataGo 強網路、日本規則／6.5；visits=1（2026-11-01 使用者決定） |
 | Value | 黑方 `2*p_black-1`，白方取相反數；不將 soft target 硬分類 |
 | Centroid | 全部 800,000 盤 training 的全部有效位置，按位置等權；不使用 validation 擬合 |
@@ -67,10 +67,10 @@
 
 ### 128 組與四倍 LR 的最新決策
 
-2026-11-01 使用者指定以 128 組／update、LR ×4 為實作計畫，取代 512 組／10,000 updates。以作者 32 組／130,000 updates 為參考：
+2026-11-01 使用者指定以 128 組／update、LR ×4 為實作計畫，取代 512 組／10,000 updates；2026-11-02 另加 LR=0.002 的 2,500 步尾段。以作者 32 組／130,000 updates 為參考：
 
-- 128 組／update，32,500 updates，共 4,160,000 組；十級七手共 291,200,000 次位置使用。
-- 初始 LR=0.04；完成第 25,000 次更新後降為 0.02，保持原 schedule 的總組數與切換比例。
+- 128 組／update，35,000 updates，共 4,480,000 組；十級七手共 313,600,000 次位置使用。
+- 初始 LR=0.04；完成第 25,000 次更新後降為 0.02，完成第 32,500 次後降為 0.002，再跑 2,500 步（2026-11-02 使用者決定）。前 32,500 步保留原 schedule，新增尾段後總位置使用量增加 7.69%。
 - 8×H200 各 16 個完整組、1,120 個位置；三項 loss 維持平均，SGD momentum=0.9、weight_decay=0.0001 不變，未加入 warmup。
 - 此為接近四個小步的線性縮放近似，並非已證明等效；BN、momentum、更新時點與精度影響須短測。分 k 增益與正式加速比未知。
 
@@ -175,8 +175,8 @@
 
 驗收目標：
 
-- 一次 optimizer update 對應 128 個完整組；訓練停止條件為 32,500 updates，與 epoch／讀過多少不同棋局無關。
-- LR 在完成第 25,000 次更新後切換；checkpoint 保存模型、optimizer、scheduler、RNG、消費端 step、抽樣身分及 config／資料來源。
+- 一次 optimizer update 對應 128 個完整組；訓練停止條件為 35,000 updates，與 epoch／讀過多少不同棋局無關。
+- LR 在完成第 25,000／32,500 次更新後分別切換為 0.02／0.002；短測須直接驗證兩個邊界與第 35,000 步停止，含邊界前後續跑。Config 以 `lr_drop_after_updates`／`lr_after_drop` 表示第一段降率，`final_lr_after_updates`／`final_lr` 表示尾段降率；checkpoint 保存模型、optimizer、scheduler、RNG、消費端 step、抽樣身分及 config／資料來源。
 - 固定 seed 的中斷續跑與連續執行具有相同抽樣、增強、optimizer steps 及 LR；在固定 FP32／確定性短測條件下比較 loss 與參數差異。
 - 普通 BN／SyncBN、BF16 與必要 microbatch 的行為另行查核、記錄；不可把 BN 差異誤判為分組 loss 錯誤或宣稱跨硬體逐值一致。
 - 短測須檢查 LR=0.04 的三項 loss、梯度及參數更新是否有限且穩定；以相同 128 組資料比較四個 32 組／LR=0.01 小步與一個 128 組／LR=0.04 大步的參數更新方向及幅度，先控制 BN 再檢查正式設定。這是近似誤差診斷，不以單卡／DDP 正確性容差要求兩種優化軌跡相同。
@@ -204,13 +204,13 @@
 
 **狀態：待啟動。依賴：前七步工程驗收、所需全量標籤及長作業確認。**
 
-實作範圍：完成官方資料準備與 training teacher 標籤，執行正式 32,500 updates，使用最終模型完成全量 training centroid 與 validation 評估。
+實作範圍：完成官方資料準備與 training teacher 標籤，執行正式 35,000 updates，使用最終模型完成全量 training centroid 與 validation 評估。
 
 驗收目標：
 
 - 啟動前分開回報資料準備、teacher、訓練、training centroid 推論、validation 推論的估時與磁碟需求；總 GPU-hours 依實測估算，不套用論文 A5000 成本。
 - 每項長作業依 CLAUDE.md §9 回報並確認啟動；開始與完成後紀錄實際硬體、版本、耗時與失敗狀態。
-- 完成 32,500 次 optimizer updates；最終權重、有效 config、資料／teacher 身分、checkpoint 及訓練紀錄可以支援續跑與重建。
+- 完成 35,000 次 optimizer updates；最終權重、有效 config、資料／teacher 身分、checkpoint 及訓練紀錄可以支援續跑與重建。
 - 全量 training centroid 和固定 validation 報表可從保存產物重建；結果無論高低都寫入根目錄 `RESULTS.md`，來源及貢獻寫入 `EXTERNAL_RESOURCES.md`。
 - 分數解讀明記 game-disjoint、玩家可能重疊，以及 teacher 偽標籤等偏離；不能直接和主線 player-disjoint 成績宣稱優劣。
 
