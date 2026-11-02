@@ -35,3 +35,6 @@ build/
 ._*
 .DS_Store
 slurm/
+
+# local code intelligence index
+/.codegraph/

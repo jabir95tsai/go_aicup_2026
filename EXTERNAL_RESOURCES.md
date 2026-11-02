@@ -20,6 +20,8 @@
 | KataGo 原始碼（Python 部分） | v1.18.2 `v1.18.2.tar.gz`（sha256 `fefd554b…f8bf9`） | [github.com/lightvector/KataGo](https://github.com/lightvector/KataGo/archive/refs/tags/v1.18.2.tar.gz) | MIT | 執行時匯入 `python/katago`（Board、Features、SGFMetadata、model_pytorch、load_model）；profile metadata 依 `cpp/neuralnet/sgfmetadata.cpp` 重寫成 Python（`features/humansl_torch.py`）；未修改原始碼 | 使用中（實驗） | 見 PyTorch checkpoint 列 |
 | NVIDIA CUDA／cuDNN 執行期函式庫 | `nvidia-cublas-cu12==12.8.4.1`、`nvidia-cuda-runtime-cu12==12.8.90`、`nvidia-cuda-nvrtc-cu12==12.8.93`、`nvidia-cudnn-cu12==9.8.0.87`（PyPI wheel，只解出 `.so`） | [PyPI](https://pypi.org/project/nvidia-cudnn-cu12/) | NVIDIA 軟體授權（隨 wheel 附帶） | 讓 KataGo CUDA 12.8 版在 Nano4 執行（`data/external/cuda-libs-12.8/`）；另用 `go` 環境的 libstdc++ | 使用中（執行環境） | 環境依賴，非模型增益 |
 | scikit-learn | 1.7.2（`requirements.txt`） | [scikit-learn.org](https://scikit-learn.org/) | BSD-3 | B2 題目層級 logistic regression、PCA | 使用中 | 正式候選模型的分類器 |
+| Ponytail | 5.3.3 | [dietrichgebert/ponytail](https://github.com/dietrichgebert/ponytail) | MIT | Codex plugin，提供開發與程式審查 skills | 已安裝（2026-11-02；lifecycle hooks 待使用者於 Codex 信任） | 開發工具，無模型分數貢獻數字 |
+| CodeGraph | 1.6.2 | [colbymchenry/codegraph](https://github.com/colbymchenry/codegraph) | MIT | Codex MCP 本機程式碼索引與呼叫關係查詢；索引位於 `.codegraph/`，遙測已關閉 | 使用中（2026-11-02；109 個 Python 檔案索引與查詢通過） | 開發工具，無模型分數貢獻數字 |
 
 ## 外部資料
 
