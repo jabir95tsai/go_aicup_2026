@@ -200,6 +200,26 @@ run：`outputs/rank/reproduce_paper_2/se_seed2026_adamw70k/`。使用原 SE 的 
 
 **評分與重現來源：** [50k report.json](outputs/rank/reproduce_paper_2/se_seed2026_adamw70k/milestones/update_00050000/evaluation/report.json)、[70k report.json](outputs/rank/reproduce_paper_2/se_seed2026_adamw70k/evaluation/report.json)；各自 `evaluation/plot/` 保留 learning curve、centroid／分布與混淆矩陣等 10 張 PNG。實際設定見 [config.json](outputs/rank/reproduce_paper_2/se_seed2026_adamw70k/config.json)；操作見 `src/go_aicup/tasks/strength/reproduce_paper_2/README.md`，Slurm 為 `slurm/se_adamw70k.slurm`。本次僅讀取既有產物補登，沒有重新訓練或全量推論。
 
+### 2026-11-03：SE／SE2 論文式同級抽盤評估（CPU）
+
+使用者要求檢查「論文同級抽盤、競賽同玩家組題」是否造成差距。新增 `scripts/se_paper_eval.py`，只重用三個模型既有逐盤分數；N=1..100，每級每 N 有放回抽樣 500 次，各級等權、位置等權聚合、nearest-centroid，seed=2026。模型間共用抽樣。另從 validation 每級固定抽 100 candidate／900 query，棋局互斥、玩家可重疊；candidate 另建 centroid。沒有 GPU 訓練或新推論。
+
+下表為**完全正確率**，四欄依 N=5／10／15／20；不可與官方分數混用。
+
+| 模型／協定 | N=5 | N=10 | N=15 | N=20 | N=100 |
+|---|---:|---:|---:|---:|---:|
+| 原 SE，既有同玩家題組 | 0.3856 | 0.4268 | 0.4404 | 0.4760 | — |
+| 原 SE，同級抽盤＋原 training centroid | 0.4128 | 0.4926 | 0.5562 | 0.5766 | 0.7234 |
+| 原 SE，同級抽盤＋candidate100/query900 | 0.4246 | 0.5480 | 0.6238 | 0.6554 | 0.9126 |
+| SE2 50k，同級抽盤＋candidate100/query900 | 0.4198 | 0.5206 | 0.6062 | 0.6486 | 0.8778 |
+| SE2 70k，同級抽盤＋candidate100/query900 | 0.4126 | 0.5278 | 0.5910 | 0.6426 | 0.8810 |
+
+candidate100/query900 的官方分數 N=5／10／15／20：原 SE＝0.5784／0.6884／0.7473／0.7728；SE2 50k＝0.5700／0.6671／0.7358／0.7676；SE2 70k＝0.5665／0.6745／0.7255／0.7661。這些是同級混玩家的診斷，**不取代競賽同玩家成績，不升級提交候選**。
+
+**判讀與限制：** 同級抽盤可以解釋部分落差，centroid 來源亦有明顯影響；不能再把同玩家組題當成已證實的最大原因。原 SE N=15 仍只有 62.38%，低於論文約 80%。沿用指定玩家、ply>=30、BF16、無 D4 的既有 score；作者 candidate 平均雙方全部位置、query 每盤隨機顏色且預設 random rotation，故**本輪不是完整原版 eval**。只做一個固定 candidate/query split；Monte Carlo SE 只反映固定資料下抽題誤差；原同玩家題組的 eligible-player 分布也不同，兩者差值不是嚴格配對因果估計。
+
+完整曲線、within-1、官方分數、逐級與來源 hash：[報告](outputs/rank/paper_eval_20261103/README.md)、[summary.csv](outputs/rank/paper_eval_20261103/summary.csv)、[圖](outputs/rank/paper_eval_20261103/accuracy.png)。驗證：三個模型 checksum／資料共用檢查、位置加權與 nearest-centroid self-check、candidate/query 無重複與輸出指標恆等式檢查均通過；未重跑 GPU。
+
 ## 6. 已可產出的提交候選
 
 一鍵入口：`scripts/run_release.sh <raw-dir> <out-dir>`。`<part>` 為 public／private；檔案寫在指定輸出目錄。以下為管線輸出約定，正式提交格式仍待 11/04 確認；由使用者手動上傳。
