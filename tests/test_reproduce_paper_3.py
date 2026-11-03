@@ -77,7 +77,7 @@ def small_config(prepared3, tmp_path):
 
 def test_config_and_lr():
     c = read_config()
-    assert c['positions']['positions_per_rank'] == 20 and c['model']['blocks'] == 18
+    assert c['positions']['positions_per_rank'] == 15 and c['model']['blocks'] == 18
     assert c['positions']['min_ply'] == 30
     assert c['training']['updates'] == 100000
     optimizer = torch.optim.AdamW([torch.nn.Parameter(torch.ones(1))], lr=.01)
@@ -91,7 +91,7 @@ def test_config_and_lr():
     restored = trainer.scheduler_for(optimizer, c['training'])
     restored.load_state_dict(scheduler.state_dict())
     assert restored.last_epoch == 70000
-    for field, value in [('positions_per_rank', 7), ('positions_per_rank', 30)]:
+    for field, value in [('positions_per_rank', 7), ('positions_per_rank', 20), ('positions_per_rank', 30)]:
         bad = copy.deepcopy(c)
         bad['positions'][field] = value
         with pytest.raises(ValueError):
@@ -101,21 +101,22 @@ def test_config_and_lr():
 def test_model_loss_gradients_and_invalid_targets():
     torch.manual_seed(7)
     model = StrengthEstimator(channels=2, blocks=1)
-    x = torch.randn(1, 10, 20, 18, 19, 19)
+    x = torch.randn(1, 10, 15, 18, 19, 19)
     out = model(x)
-    assert out['rank_logits'].shape == (1, 10, 20, 10)
-    assert out['policy_logits'].shape == (1, 10, 20, 362)
-    rank = torch.arange(10).reshape(1, 10, 1).expand(1, 10, 20)
-    policy = torch.randint(362, (1, 10, 20))
-    value = torch.rand(1, 10, 20) * 2 - 1
+    assert out['rank_logits'].shape == (1, 10, 15, 10)
+    assert out['policy_logits'].shape == (1, 10, 15, 362)
+    rank = torch.arange(10).reshape(1, 10, 1).expand(1, 10, 15)
+    policy = torch.randint(362, (1, 10, 15))
+    value = torch.rand(1, 10, 15) * 2 - 1
     weights = torch.ones_like(value)
     terms = grouped_losses(out, rank, policy, value, weights)
     assert all(v.dtype == torch.float32 and torch.isfinite(v) for v in terms.values())
     torch.testing.assert_close(terms['strength'], torch.nn.functional.cross_entropy(out['rank_logits'].reshape(-1, 10), rank.reshape(-1)))
     terms['total'].backward()
     assert all(p.grad is not None and torch.isfinite(p.grad).all() for p in model.parameters())
-    with pytest.raises(ValueError):
-        model(torch.randn(1, 10, 7, 18, 19, 19))
+    for positions in (7, 20, 30):
+        with pytest.raises(ValueError):
+            model(torch.randn(1, 10, positions, 18, 19, 19))
     for target in (rank.float(), rank + 10):
         with pytest.raises(ValueError):
             grouped_losses(out, target, policy, value, weights)
@@ -139,8 +140,8 @@ def test_eight_rank_exhaustion_positions_and_resume():
         rows = []
         for step in range(epoch * 2, epoch * 2 + 2):
             for rank in range(8):
-                indices = np.array([i for i, _ in all_ranks[rank][step]]).reshape(-1, 20)
-                assert all(len(set(row)) == 20 for row in indices)
+                indices = np.array([i for i, _ in all_ranks[rank][step]]).reshape(-1, 15)
+                assert all(len(set(row)) == 15 for row in indices)
                 games = indices // 35
                 assert np.all(games == games[:, :1])
                 rows.extend(games[:, 0])
@@ -149,10 +150,10 @@ def test_eight_rank_exhaustion_positions_and_resume():
     assert epochs[0] != epochs[1]
     for rank in range(8):
         assert list(GroupBatchSampler(data, groups_per_update=8, updates=4, start_step=1, rank=rank, world_size=8)) == all_ranks[rank][1:]
-    exact = next(iter(GroupBatchSampler(fake_dataset(positions=20), groups_per_update=8, updates=1)))
-    assert len(exact) == 8 * 10 * 20
-    with pytest.raises(ValueError, match='twenty'):
-        GroupBatchSampler(fake_dataset(positions=19), groups_per_update=8)
+    exact = next(iter(GroupBatchSampler(fake_dataset(positions=15), groups_per_update=8, updates=1)))
+    assert len(exact) == 8 * 10 * 15
+    with pytest.raises(ValueError, match='fifteen'):
+        GroupBatchSampler(fake_dataset(positions=14), groups_per_update=8)
 
 
 def test_prepared_monitor_and_spawn_resume(prepared3, tmp_path):
@@ -161,15 +162,15 @@ def test_prepared_monitor_and_spawn_resume(prepared3, tmp_path):
     before = {p: (p.stat().st_mtime_ns, file_hash(p)) for p in root.iterdir()}
     identity = validate_prepared(c)
     assert identity['available_positions']['positions_per_rank'] == 7
-    assert identity['sampled_positions_per_game'] == 20
+    assert identity['sampled_positions_per_game'] == 15
     first = prepare_monitor(c)
     assert prepare_monitor(c) == first and first['questions'] == 40
     questions = pd.read_parquet(Path(c['paths']['output_dir']) / 'monitor/questions.parquet')
     assert (questions.groupby(['k', 'rank_id']).size() == 1).all()
     position = np.load(Path(c['paths']['output_dir']) / 'monitor/positions.npz')
-    assert position['samples'].shape == (first['unique_games'], 20)
-    assert first['identity']['positions_per_game'] == 20
-    assert all(len(set(row)) == 20 for row in position['samples'])
+    assert position['samples'].shape == (first['unique_games'], 15)
+    assert first['identity']['positions_per_game'] == 15
+    assert all(len(set(row)) == 15 for row in position['samples'])
     assert all((p.stat().st_mtime_ns, file_hash(p)) == value for p, value in before.items())
     data = PaperDataset(root, augment=True, label_dir=c['paths']['label_dir'], cache_dir=c['paths']['cache_dir'])
     def batches(start):
@@ -221,7 +222,7 @@ def test_game_equal_logp_argmax_and_scoring():
     values[0, :2] = [-2., 0.]
     games = pd.DataFrame(values, columns=LOGP)
     games['game_index'] = range(20)
-    games['position_count'] = [10000] + [20] * 19
+    games['position_count'] = [10000] + [15] * 19
     predicted = predict_questions(games, questions)
     assert (predicted.predicted_rank_id == 0).all()
     report = official_scores(predicted)
@@ -256,7 +257,7 @@ def test_training_exact_resume_and_full_evaluation(prepared3, tmp_path):
     assert set(report['buckets']) == {'5', '10', '15', '20'}
     assert evaluate(config, report_only=True) == report
     saved = pd.read_parquet(Path(config['paths']['output_dir']) / 'evaluation/validation_games.parquet')
-    assert saved.position_count.min() > 20 and len(saved) == 400
+    assert saved.position_count.min() > 15 and len(saved) == 400
     assert not (Path(config['paths']['output_dir']) / 'evaluation/centroids.npy').exists()
 
 
@@ -338,9 +339,9 @@ def test_monitor_restores_rng_and_batchnorm(prepared3, tmp_path):
 
 def _gradient_batch():
     torch.manual_seed(43)
-    return (torch.randn(2, 10, 20, 18, 19, 19),
-            torch.arange(10).reshape(1, 10, 1).expand(2, 10, 20),
-            torch.randint(362, (2, 10, 20)), torch.rand(2, 10, 20) * 2 - 1, torch.ones(2, 10, 20))
+    return (torch.randn(2, 10, 15, 18, 19, 19),
+            torch.arange(10).reshape(1, 10, 1).expand(2, 10, 15),
+            torch.randint(362, (2, 10, 15)), torch.rand(2, 10, 15) * 2 - 1, torch.ones(2, 10, 15))
 
 
 def _gloo_worker(rank, store, destination):
@@ -425,14 +426,14 @@ def test_config_mismatch_and_readonly_shortage(prepared3, tmp_path):
     root = tmp_path / 'short'
     shutil.copytree(c['paths']['dataset_dir'], root)
     offsets = np.load(root / 'train_offsets.npy')
-    offsets[1] = 19
+    offsets[1] = 14
     np.save(root / 'train_offsets.npy', offsets)
     record = json.loads((root / 'manifest.json').read_text())
     record['files']['train_offsets.npy'] = file_hash(root / 'train_offsets.npy')
     write_json(root / 'manifest.json', record)
     c['paths']['dataset_dir'] = str(root)
     before = file_hash(root / 'manifest.json')
-    with pytest.raises(ValueError, match='twenty'):
+    with pytest.raises(ValueError, match='fifteen'):
         validate_prepared(c)
     assert file_hash(root / 'manifest.json') == before
 

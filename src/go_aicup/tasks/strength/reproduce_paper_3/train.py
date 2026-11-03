@@ -295,7 +295,7 @@ def train(config, *, resume=None, stop_after=None, keep_distributed=False):
                 memory_format=torch.channels_last if options['channels_last'] else torch.contiguous_format)
             with autocast_context(config, device):
                 output = wrapped(planes)
-            output = {name: value.reshape(local_groups, 10, 20, *value.shape[1:]) for name, value in output.items()}
+            output = {name: value.reshape(local_groups, 10, 15, *value.shape[1:]) for name, value in output.items()}
             terms = grouped_losses(output, *(batch[name].to(device) for name in
                                    ('rank_id', 'policy_target', 'value_target', 'value_weight')))
             terms['total'].backward()

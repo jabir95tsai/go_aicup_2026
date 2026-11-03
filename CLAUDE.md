@@ -490,3 +490,12 @@ project/
 二十位置使用獨立 `outputs/rank/reproduce_paper_3/se3_seed2026_20pos/`、`se3_smoke100_20pos_8gpu/`，保留三十位置 smoke，不混用舊 checkpoint／監控。job 691911 已完成三十位置八卡 100 步與 5,000 題驗證，1.47 steps/s、allocated 峰值 63.56 GiB、監控 22.32s，k=5／10／15／20=0.1595／0.1516／0.1662／0.1639、Equal-k=0.1603；僅為歷史短測，不能視為二十位置效能。二十位置 GPU 顯存／吞吐／四桶分數與長程收斂未知，本次未提交 GPU 作業。現行操作見 SE3 README／plan §12。
 
 二十位置版本 CPU／Gloo 合成回歸 20 項通過（68.11s），包含二十位置抽樣／監控、十九位置拒絕、spawn 預取精確續跑及兩程序 loss／梯度／訓練／評估；兩份 config 與 Slurm 語法檢查通過。未重跑 GPU。
+
+
+### 2026-11-04：SE3 每盤抽樣改為十五位置
+
+依使用者最新要求，SE3 訓練與固定監控改為每盤十五個不同有效位置；config、sampler／collate、model／loss shape、train reshape 與監控身分同步更新，不足十五位置報錯。每組十級共 150 位置，global 128 組共 19,200 位置／update，八卡每卡 16 組／2,400 位置；十萬步最多使用 1,920,000,000 次位置樣本。min_ply=30、LR／組數／更新預算、split／teacher 及最終全量 validation 使用全部有效位置均沿用。
+
+十五位置改用獨立 `outputs/rank/reproduce_paper_3/se3_seed2026_15pos/`／`se3_smoke100_15pos_8gpu/`，保留舊三十／二十位置產物，不混用其 checkpoint／監控集合。二十位置 smoke job 692064 已完成八卡 100 步＋5,000 題監控，2.15 steps/s、allocated 峰值 42.55 GiB、監控 16.51s；四桶 0.1718／0.1685／0.1678／0.1577，Equal-k=0.1665，僅為歷史短測。十五位置 GPU 效能與分數未知；本次不提交 GPU 工作。現行規格及操作見 SE3 README／plan §13。
+
+十五位置版本 CPU／Gloo 回歸 20 項通過（47.81s），十五位置邊界、固定監控、worker 預取續跑與兩程序梯度／訓練／評估皆通過；兩份 config、Slurm 語法與三十／二十位置 smoke 保留檢查通過，未重跑 GPU。

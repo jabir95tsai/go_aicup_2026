@@ -6,10 +6,10 @@ from torch.nn import functional as F
 def grouped_losses(output, rank_target, policy_target, value_target, value_weight):
     rank, policy, value = (output[k] for k in ('rank_logits', 'policy_logits', 'value'))
     shape = value.shape
-    if (value.ndim != 3 or shape[0] < 1 or shape[1:] != (10, 20)
+    if (value.ndim != 3 or shape[0] < 1 or shape[1:] != (10, 15)
             or rank.shape != (*shape, 10) or policy.shape != (*shape, 362)
             or any(t.shape != shape for t in (rank_target, policy_target, value_target, value_weight))):
-        raise ValueError('expected aligned [G,10,20] groups and targets')
+        raise ValueError('expected aligned [G,10,15] groups and targets')
     tensors = (rank, policy, value, rank_target, policy_target, value_target, value_weight)
     if any(t.device != value.device for t in tensors):
         raise ValueError('outputs and targets must share a device')

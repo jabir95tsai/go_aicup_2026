@@ -5,7 +5,7 @@
   "paths": {
     "cache_dir": "data/processed/boards/strength_v1",
     "dataset_dir": "data/processed/reproduce_paper/seed2026",
-    "output_dir": "outputs/rank/reproduce_paper_3/se3_smoke100_20pos_8gpu",
+    "output_dir": "outputs/rank/reproduce_paper_3/se3_smoke100_15pos_8gpu",
     "label_dir": "data/processed/reproduce_paper/value_v1/train"
   },
   "split": {
@@ -14,7 +14,7 @@
   },
   "positions": {
     "min_ply": 30,
-    "positions_per_rank": 20
+    "positions_per_rank": 15
   },
   "loader": {
     "max_open_shards": 8

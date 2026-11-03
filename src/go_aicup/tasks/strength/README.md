@@ -95,4 +95,4 @@ python -m go_aicup.tasks.strength.v2.evaluate --run-dir outputs/v2_strength
 
 ## SE3 分類實驗
 
-獨立的 18-block／十級 CE＋policy／value、每盤二十位置、固定題組 early stopping 實作與操作見 [reproduce_paper_3/README.md](reproduce_paper_3/README.md)。CPU／Gloo 工程驗收已完成，八卡短測與正式分數尚未取得；使用獨立 `se3_*.json` 與輸出目錄。
+獨立的 18-block／十級 CE＋policy／value、每盤十五位置、固定題組 early stopping 實作與操作見 [reproduce_paper_3/README.md](reproduce_paper_3/README.md)。CPU／Gloo 工程驗收已完成，八卡短測與正式分數尚未取得；使用獨立 `se3_*.json` 與輸出目錄。

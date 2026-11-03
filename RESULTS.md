@@ -275,3 +275,19 @@ candidate100/query900 的官方分數 N=5／10／15／20：原 SE＝0.5784／0.6
 本次不提交 GPU 作業；二十位置的顯存／吞吐、收斂與增益仍未知。三十位置 smoke 棋力 CE 約 2.30，接近 ln(10)，只支持工程接線成功。變更與測試見 [SE3 README](src/go_aicup/tasks/strength/reproduce_paper_3/README.md)／[plan §12](src/go_aicup/tasks/strength/reproduce_paper_3/plan.md)。
 
 二十位置版本驗收：CPU／Gloo 合成回歸 **20 項通過（68.11s）**；檢查二十位置邊界、固定監控 shape、無重複抽樣、spawn 預取續跑、loss／全參數梯度、兩程序訓練續跑與最終評估。config 與 Slurm 語法檢查通過，既有三十位置 smoke 未修改。
+
+
+## 2026-11-04：SE3 每盤改抽十五位置
+
+依使用者最新要求，訓練與固定監控改為每盤無放回十五位置，完整組改為十級×十五＝150 位置；global 128 組／八卡各 16 組、LR 與十萬步預算沿用。每次更新由 25,600 降為 19,200 位置，每卡由 3,200 降為 2,400，位置數減少 25%；不宣稱顯存／吞吐等比例改善。既有 split／teacher 唯讀重用，min_ply=30；最終全量 validation 仍使用全部有效位置。使用新的 `*_15pos*` 輸出，保留既有三十／二十位置 checkpoint、監控與報表。
+
+二十位置歷史短測 692064：八卡 100 updates＋5,000 題監控成功（Slurm exit 0，wall 105s），約 0.465s/step／2.15 steps/s、allocated／reserved 峰值 42.55／43.04 GiB，單次監控 16.51s。Total loss 9.0779→7.2567，棋力 CE 2.3091→2.2941；模型／optimizer 有限值、checkpoint checksum、八份 RNG 與固定位置 shape 均驗證通過。這些是二十位置結果，不能作為十五位置效能與成績：
+
+| 版本／範圍 | k=5 | k=10 | k=15 | k=20 | Equal-k |
+|---|---|---|---|---|---|
+| 二十位置，100 步後固定 5,000 題監控 | 0.1718 | 0.1685 | 0.1678 | 0.1577 | 0.1665 |
+| 十五位置，新設定 | 未知 | 未知 | 未知 | 未知 | 未知 |
+
+本次不提交 GPU 短測／正式訓練；十五位置的 GPU 顯存、吞吐、四桶成績與長程收斂均未知。現行規格見 [SE3 plan §13](src/go_aicup/tasks/strength/reproduce_paper_3/plan.md)，操作見 [README](src/go_aicup/tasks/strength/reproduce_paper_3/README.md)。
+
+十五位置版本 CPU／Gloo 合成回歸 **20 項通過（47.81s）**，涵蓋十五位置抽樣與固定監控、十四位置拒絕、舊七／二十／三十位置設定與模型 shape 拒絕、spawn 預取精確續跑、全域 loss／梯度與兩程序訓練／評估；config、Slurm 語法及舊短測產物保留檢查通過。未提交 GPU 作業。

@@ -17,8 +17,8 @@ def validate_config(config):
         raise ValueError('smoke must be a boolean')
     if config['positions']['min_ply'] != 30:
         raise ValueError('SE3 requires min_ply=30')
-    if type(config['positions']['positions_per_rank']) is not int or config['positions']['positions_per_rank'] != 20:
-        raise ValueError('SE3 requires twenty positions per game')
+    if type(config['positions']['positions_per_rank']) is not int or config['positions']['positions_per_rank'] != 15:
+        raise ValueError('SE3 requires fifteen positions per game')
     t, m = config['training'], config['monitoring']
     for key in ('updates', 'groups_per_update', 'microbatch_groups', 'checkpoint_every', 'lr_drop_after_updates'):
         if type(t[key]) is not int or t[key] < 1:
