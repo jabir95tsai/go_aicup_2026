@@ -243,3 +243,19 @@ candidate100/query900 的官方分數 N=5／10／15／20：原 SE＝0.5784／0.6
 - 競賽二 L10（測試玩家是否在訓練集）、級別比例及 AH＋C／AH／全玩家版的 LB 差異。
 
 後續實驗先登記假設、gate、成本，完成後補四桶結果與處置；完整過程追加至 [歷史帳本](RESULTS_ARCHIVE.md)，本頁更新可比較的結果與現行候選。舊實驗編號保留，失敗也保留。
+
+
+## 2026-11-03：SE3 實作與工程驗收（尚無正式模型分數）
+
+**假設／成本：** 十級 CE 取代 scalar BT，保留 policy／value；同時改 18-block、每盤三十位置、AdamW 與訓練長度，不能歸因於單項。增益未知；計畫中的 +0.005 Equal-k／單桶退步不超過 0.01 是未獨立核准的比較建議，不作 early stopping 條件。滿十萬步舊外推約二十小時／160 H200 GPU-h，未經本版短測量測，且不含監控／最終推論。
+
+**完成：** 分五個小任務實作獨立 config／模型／loss、三十位置資料與固定監控、log-prob 分類推論／報表、可續跑訓練／early stopping／best 發布、測試／Slurm／文件。正式模型 21,754,485 parameters，raw state 87,094,068 bytes。舊 SE／SE2 原始碼與實驗產物不變。程式與操作：[SE3 README](src/go_aicup/tasks/strength/reproduce_paper_3/README.md)，逐項進度：[plan §11](src/go_aicup/tasks/strength/reproduce_paper_3/plan.md)。
+
+**數據與驗收：** 官方索引唯讀檢查 train 800,000／valid 200,000 盤，最少有效位置均為 35，不足三十均為 0。SE3 最終合成測試 20 項通過（52.34s）；既有 SE／SE2 相關回歸 87 項通過。較早合併一輪為 105 項／140.60s（SE3 當時 18 項），其後補 smoke／最終發布失敗檢查並重跑 SE3。涵蓋八 rank 全輪覆蓋、三十位置互異、spawn／prefetch 精確續跑、固定題組、log_softmax／盤間等權／argmax、LR 邊界、同分／patience、推論／best／結果／latest 四處失敗注入、RNG／BN 還原、最佳模型及報表重試。兩程序 Gloo 固定 BN 全域平均 loss／梯度檢查通過（relative L2<1e-5、max abs<1e-6），一般 BN 兩程序訓練／續跑／評估串接通過；不是八卡 SyncBN 驗收。
+
+| 評估範圍 | k=5 | k=10 | k=15 | k=20 | Equal-k |
+|---|---|---|---|---|---|
+| 固定最多 5,000 題、每盤三十位置監控 | 未知 | 未知 | 未知 | 未知 | 未知 |
+| 最佳模型、完整 validation 全位置、固定 10,000 題 | 未知 | 未知 | 未知 | 未知 | 未知 |
+
+**處置：** 僅完成工程實作及 CPU／Gloo 合成驗收；沒有 GPU 短測、正式訓練、官方全量評估或上傳，不新增提交候選。下一步為八卡 100 步＋一次固定監控，先報告顯存、吞吐與成本再確認正式長作業。game-disjoint、validation 玩家可能在 training，最終同切分也非獨立選模 holdout；不據此聲稱新玩家泛化。

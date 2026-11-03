@@ -472,3 +472,12 @@ project/
 每級各 80,000 盤分別 shuffle，8 卡按全域排列分配，每輪全部 800,000 棋局用完才重抽；每盤仍抽七個有效位置，不要求遍歷每盤所有位置。625 steps／輪，共 112 輪，第一段 80 輪、第二段 32 輪；依完成 step 重建輪次／游標，不以預取進度續跑。新增步數與累計步數分開記錄，最終分別為 70,000／105,000。沿用 game-disjoint；實際 validation 的 7,855 位玩家全在 training 的 8,007 位內，未驗證新玩家泛化。
 
 獨立設定 `configs/strength/se_seed2026_adamw70k.json`、入口 `python -m go_aicup.tasks.strength.reproduce_paper_2.train`、Slurm `slurm/se_adamw70k.slurm`（8 卡 6 小時），輸出 `outputs/rank/reproduce_paper_2/se_seed2026_adamw70k/`。新增 50,000 步發布 milestone 並做全量 centroid／validation，完成後續訓；70,000 步完訓後再全量評估。各階段共用 process group，避免中途重建通訊停滯。依使用者最新要求，SE2 訓練期間只留最新一份完整 checkpoint 供續跑，不保存最低 loss 的 best_1／best_2；最終 model.pt 驗證成功後才清除續跑狀態。原 run 唯讀，來源 best_1.pt 保留。原 SGD 速度外推純訓練約 3.57h／28.6 GPU-h，AdamW 實測成本與四桶增益未知。僅 CPU／合成資料驗證，不提交 GPU 作業；操作及驗證範圍見新套件 README。
+
+
+### 2026-11-03：reproduce_paper_3 十級 CE 實作
+
+依使用者核准的 SE3 plan，分五項完成獨立設定／18-block 三頭分類模型與 FP32 loss、每盤三十有效位置且全輪無重複棋局抽樣、固定分層監控與 log-prob 分類評估、AdamW 訓練／early stopping／可重試 best／latest 發布及 Slurm／文件。預設 seed=2026、channels=256、18 blocks、361→256→10；保留 policy／soft value 輔助 loss。正式八卡 global 128 組、每卡 4,800 位置，100,000 updates，前 70,000 LR=0.01、後 30,000 LR=0.005；每 5,000 步固定最多 5,000 題、每盤三十位置監控。盤內平均 log_softmax、題內各盤等權平均、argmax；同分更新較晚 best 並重設 patience，三次嚴格較低早停。早停／達預算皆發布最佳監控模型後，完整 validation 全部有效位置＋固定 10,000 題評估；不推論 training、不使用 centroid／score_rank。
+
+舊 prepared manifest 的七位置身分經完整驗證後唯讀重用，三十位置另記本 run 設定。官方 train 800,000／valid 200,000 盤最少有效位置均為 35，不足三十均為 0。SE3 CPU／Gloo 合成測試 20 項及既有相關回歸 87 項通過；涵蓋預取續跑、全域平均／梯度、四處驗證失敗注入、半行 log、早停／最佳模型發布／最終發布失敗及全量分類報表重試。未提交 GPU 短測、正式訓練、官方全量推論或上傳，真實四桶分數、CUDA／SyncBN、顯存／吞吐、長程 LR 穩定性未知。
+
+入口 `python -m go_aicup.tasks.strength.reproduce_paper_3.train`，正式／smoke 設定 `configs/strength/se3_seed2026.json`／`se3_smoke100.json`；獨立輸出 `outputs/rank/reproduce_paper_3/se3_seed2026/`／`se3_smoke100_8gpu/`。Slurm 為 `slurm/se3_train.slurm`／`se3_smoke100.slurm`，仍依現有規則被 Git 忽略。詳見新套件 README／plan 與 RESULTS；八卡短測實測估時後才確認長作業。原 SE／SE2 檔案未修改。
