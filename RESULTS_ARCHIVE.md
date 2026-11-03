@@ -1565,3 +1565,23 @@ Training 全部 800,000 盤／76,763,475 有效位置按位置等權，保存十
 驗證：tests/test_checkpoint_retention.py、tests/test_reproduce_paper_train.py、tests/test_reproduce_paper_infer.py、tests/test_reproduce_paper_evaluate.py 合計 31 passed（65.86s）。補上最佳索引發布失敗時合併 latest 的恢復路徑後，重跑 checkpoint retention 全檔及兩個複製／清理恢復測試，8 passed（5.59s），含 1 項新增測試；共 32 個測試分次驗證通過。涵蓋兩個全歷程最低 loss＋最新檔、同分取較晚步數、避免被相鄰刪除遺失、完整 .pt/state loss、只有一份時的行為、第二份複製失敗保留來源並重試、留存檔損壞拒絕清理、best index 發布失敗恢復、best_1.pt 推論，以及完訓／評估 CPU／兩程序回歸。git diff --check 通過。
 
 只修改程式／文件並使用合成資料驗證；未啟動 GPU 或正式訓練，也未對既有實驗產物做留存／刪除。歷史上已依舊規則清除的 checkpoint 無法復原。原先每份約 185.4 MiB 的估計下，完訓保留兩份約 370.8 MiB，另留暫存與最終模型空間；實際正式檔案大小與分 k 成績未知。
+
+
+### A-060 SE 論文架構重建正式完訓與全量評估（2026-11-03 補登）
+
+本次僅讀取 `outputs/rank/reproduce_paper/se_seed2026/` 既有產物，未訓練、推論、提交作業或上傳。`training_summary.json` 顯示 35,000 updates 完成、finite checks 通過；`model.complete.json` 與 `evaluation/report.json` 的模型 SHA-256 一致（`9c9ac81c95c45f0ae7acaa6c73eba70ce2b7ce4bfc5d4e8592f8ae1d5c52fc7d`）。
+
+設定：20 blocks／256 channels 三頭 ResNet，BT＋policy CE＋teacher value MSE 等權；global 128 組、每組十級七手，8×H200、BF16＋SyncBN、channels-last。SGD，35,000 步、LR 0.04→0.02→0.002。固定 split seed2026、game-disjoint；training 800,000 盤／76,763,475 位置，validation 200,000 盤／19,183,737 位置。全 training 位置等權建立 centroid，題內全部有效位置平均後 nearest-centroid 解碼。使用最後一步 model.pt，不以 validation 選 checkpoint。
+
+| 評估單位 | 數量 | 官方分數 | 完全正確率 | within-1 |
+|---|---:|---:|---:|---:|
+| k=5 | 2,500 題 | 0.5453 | 0.3856 | 0.8196 |
+| k=10 | 2,500 題 | 0.5922 | 0.4268 | 0.8764 |
+| k=15 | 2,500 題 | 0.6108 | 0.4404 | 0.9036 |
+| k=20 | 2,500 題 | 0.6432 | 0.4760 | 0.9304 |
+| **全部題目／Equal-k** | **10,000 題** | **0.5979** | **0.4322** | **0.8825** |
+| 單盤（診斷） | 200,000 盤 | 0.3894 | 0.2619 | 0.6084 |
+
+來源：`evaluation/report.json`、`official_scores.csv`、`validation_by_rank.csv`、`training_summary.json`、`model.complete.json`、`train.jsonl` 與 `best_checkpoints.json`。Training total loss 首末步為 8.4459／2.4190；紀錄時間為台灣時間 2026-11-02 17:21:09～19:08:17，約 1 小時 47 分（僅首末步 log 間隔）。各級題目分數 C 最高 0.6796、2D 最低 0.5076。保留 best_1（35,000 步）與 best_2（34,000 步），本次未重評任何權重。
+
+Equal-k 0.5979 高於 baseline 0.4631 約 +0.1348，四桶皆超過門檻；仍為本地 game-disjoint／玩家可能重疊的結果，不與 player-disjoint 主線排名，不視為原論文成績已重現。未驗收 GPU 中斷續跑一致性或正式 LB。本條補完先前「正式分數未知」的歷史狀態；舊紀錄保留。

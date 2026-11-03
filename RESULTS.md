@@ -1,6 +1,6 @@
 # 實驗結果總覽
 
-更新：2026-11-03。依既有紀錄整理，沒有新增訓練或重算分數。完整實驗、失敗紀錄、決策與驗證細節保留於 [RESULTS_ARCHIVE.md](RESULTS_ARCHIVE.md)；專案規則以 [CLAUDE.md](CLAUDE.md) 為準，後續工作見 [EXECUTION_PLAN.md](EXECUTION_PLAN.md)。
+更新：2026-11-03。依既有紀錄與保存產物整理，沒有新增訓練或重算分數。完整實驗、失敗紀錄、決策與驗證細節保留於 [RESULTS_ARCHIVE.md](RESULTS_ARCHIVE.md)；專案規則以 [CLAUDE.md](CLAUDE.md) 為準，後續工作見 [EXECUTION_PLAN.md](EXECUTION_PLAN.md)。
 
 ## 1. 目前做到哪裡
 
@@ -9,7 +9,7 @@
 | 共用資料 | 100 萬盤稽核、SGF 轉檔、盤面快取、玩家切分與合成題組 | 8,007 位玩家、221,894,008 手；訓練集無重複棋譜，解析錯誤 0 |
 | 競賽二：棋力預測 | 手工特徵、V1／V2 ResNet、HumanSL、級別向量、集成與微調實驗 | **首選 AH＋C＋B2：Valid-U Equal-k 0.6934**；AH 對照 0.6833，V2＋C2 備援 0.5553（題數不同，見下表） |
 | 競賽一：玩家辨識 | 開局計數模型、D4 正規化、GE2E 風格模型、融合與指派壓力測試 | **首選 D4 開局＋8×GE2E，不做指派：0.9846** |
-| SE 論文復現 | training value 標籤（使用者回報完成）、分組取樣、三頭模型／loss、8 卡短測、正式訓練／續跑／評估入口 | 已有短測效能，**帳本尚無正式 35,000 步完訓與棋力評分結果** |
+| SE 論文復現 | 三頭 ResNet、35,000 步正式訓練、全量 training centroid 與 validation 評估 | **Equal-k 0.5979**（10,000 題，game-disjoint）；單盤 0.3894，分數比較見第 3 節、訓練細節見第 5 節 |
 | 提交管線 | 兩賽一鍵流程、假官方 CSV 彩排、Day-0 稽核工具 | AH＋C 路徑彩排通過；正式格式與真實資料待 11/04 確認 |
 
 **以下全是本地驗證，不是官方 LB。** 官方測試集預定 11/04 11:00（台灣時間）發布，目前沒有正式測試成績。
@@ -24,18 +24,30 @@
 
 ## 3. 競賽二：棋力架構比較
 
+各架構的代表結果如下，便於一起查看；**驗證切分與題組不同，表中數字不構成受控排名**。後續小節保留同題對照與實驗細節。
+
+| 架構／代表版本 | 驗證條件 | k=5 | k=10 | k=15 | k=20 | Equal-k |
+|---|---|---:|---:|---:|---:|---:|
+| 手工特徵＋LR | 玩家互斥，f4＋holdout，14,000 題 | 0.350 | 0.398 | 0.440 | 0.459 | 0.412 |
+| V1 scalar ResNet，seed2028 | 棋局互斥、玩家可重疊，V1 題組 | 0.3002 | 0.3230 | 0.3523 | 0.3723 | 0.3370 |
+| V2 十類 ResNet＋C2 | 玩家互斥，Valid-U，10,000 題 | 0.5030 | 0.5501 | 0.5716 | 0.5965 | 0.5553 |
+| HumanSL＋B2（S-fit 擬合） | 玩家互斥，Valid-U，1,000 題 | 0.609 | 0.685 | 0.670 | 0.666 | 0.6572 |
+| V2＋HumanSL＋B2（AH） | 玩家互斥，Valid-U，1,000 題 | 0.6168 | 0.6792 | 0.7223 | 0.7147 | 0.6833 |
+| AH＋級別向量＋B2（AH＋C） | 玩家互斥，Valid-U，1,000 題 | 0.6244 | 0.6977 | 0.7303 | 0.7213 | 0.6934 |
+| **SE 論文三頭 ResNet，35,000 步** | **棋局互斥、玩家可重疊，10,000 題** | **0.5453** | **0.5922** | **0.6108** | **0.6432** | **0.5979** |
+
 ### 3.1 架構各自學什麼
 
 | 架構 | 輸入與訓練方式 | 題目如何預測 | 現況 |
 |---|---|---|---|
 | 手工特徵＋LR／LightGBM | 本人／對手的距離、應手、提子等統計 | k 盤統計聚合後分類 | 已測，未過 baseline |
-| V1 scalar ResNet | 18 層歷史盤面、256 channels／20 blocks；排序 loss，輸出一個實數 | 每盤平均 scalar＋training-only 切點 | 已有三個 seed 的歷史結果；game-disjoint，另表列出 |
+| V1 scalar ResNet | 18 層歷史盤面、256 channels／20 blocks；排序 loss，輸出一個實數 | 每盤平均 scalar＋training-only 切點 | 已有三個 seed 的歷史結果；game-disjoint，見第 3.6 節 |
 | V2 十類 ResNet（A） | 沿用盤面骨幹，十類 head＋逐手 CE，1 epoch | 每盤 log-prob 平均→題內各盤等權→C2 溫度校準→score_rank | 已完訓；主線特徵與備援模型 |
 | HumanSL（H）＋B2 | 凍結 KataGo HumanSL；15 種段位 profile 對真實著手的 likelihood，本人／對手共 30 維 | 先平均 k 盤特徵，每個 k 各一個 logistic regression（B2） | 題級 gate 通過，成為主線訊號 |
 | A＋H＋B2（AH） | V2 的 10 維平均 log-prob＋H 的 30 維特徵 | B2＋score_rank | 正式對照模型 |
 | A＋H＋級別向量＋B2（AH＋C） | 凍結 HumanSL，每個幽玄級別學本人／對手兩個條件向量；新增 20 維 likelihood，共 60 維 | B2＋score_rank | **目前首選** |
 | HumanSL 全網路微調（C4／C4b） | 解凍 policy 路徑；分別以生成式 NLL、NLL＋級別 CE 訓練 | 先以未見玩家單盤分數判 gate | 試跑未過，未擴大題級評估 |
-| SE 三頭 ResNet | 專用 20 blocks／256 channels；strength BT 排序＋policy CE＋teacher value MSE，三項等權 | 全 training 有效位置建立十級 centroid；題內所有位置平均後取最近 centroid | 入口與 CPU 工程驗證完成，正式分數未知 |
+| SE 三頭 ResNet | 專用 20 blocks／256 channels；strength BT 排序＋policy CE＋teacher value MSE，三項等權 | 全 training 有效位置建立十級 centroid；題內所有位置平均後取最近 centroid | 已完訓與全量評估，Equal-k 0.5979；game-disjoint，見第 3.6 節 |
 
 名詞注意：**V2 的 C2 是聚合／溫度校準規則；HumanSL 實驗的 C2 是級別條件向量（表中記為 C）。兩者不同。**
 
@@ -97,6 +109,21 @@
 | C4 全網路生成式微調 | Bm 單盤 0.5195→0.5187；門檻為 +0.02 | 停在試跑；A-057 |
 | C4b 加級別判別 loss | Bm 單盤 0.5195→0.5087 | 未過 gate，停止；A-057 |
 
+### 3.6 SE 論文架構重建：Validation 成績
+
+第 35,000 步最終模型，固定 10,000 題，每桶 2,500 題；同題同玩家同色。**game-disjoint、玩家可能重疊**；training centroid 與題目皆按有效位置等權。within-1 包含完全正確。訓練設定與產物見第 5 節。
+
+| 評估單位 | 數量 | 官方分數 | 完全正確率 | within-1 |
+|---|---:|---:|---:|---:|
+| k=5 | 2,500 題 | 0.5453 | 0.3856 | 0.8196 |
+| k=10 | 2,500 題 | 0.5922 | 0.4268 | 0.8764 |
+| k=15 | 2,500 題 | 0.6108 | 0.4404 | 0.9036 |
+| k=20 | 2,500 題 | 0.6432 | 0.4760 | 0.9304 |
+| **全部題目／Equal-k** | **10,000 題** | **0.5979** | **0.4322** | **0.8825** |
+| 單盤（診斷） | 200,000 盤 | 0.3894 | 0.2619 | 0.6084 |
+
+**判讀：** 四個 k 桶均超過官方 baseline 0.4631，Equal-k 高出約 **+0.1348**；這只代表本地驗證跨過分數門檻，不是正式 LB。隨盤數增加，官方分數由 0.5453 升至 0.6432；各級題目分數以 C 級 0.6796 最高、2D 0.5076 最低。此結果使用幽玄十級資料與本專案訓練設定，不能宣稱重現原論文的實驗成績，也未完成與主線同切分的受控比較。
+
 ## 4. 競賽一：玩家辨識架構比較
 
 以下採相同合成候選庫 split 1–2 平均：每組 400 人、每人 100 盤 gallery，另有 400 題查詢、每桶 100 題。超參／融合權重在 split 0 選，split 1–2 用於報分。
@@ -117,22 +144,26 @@
 
 **仍未解的風險：** 合成候選人都是至少有 120 盤黑棋的重度玩家，且合成題已飽和。零訓練分數約 0.93 與官方 baseline 0.2845 的落差未解，絕對分數與方法排序都不保證轉移。E0-001 的 NB 壓力測試顯示，raw 遇到逐盤隨機方位會由 0.929 降到 0.091；D4 正規化是針對這項風險的預設。開局漂移 S1 與對應融合 gate G3 尚未做。
 
-## 5. SE 論文復現：完成哪些、還沒有什麼結果
+## 5. SE 論文架構重建：訓練細節與產物
 
-SE 與主線獨立，固定 seed2026、每級 80,000／20,000 盤切分，**game-disjoint，玩家可能重疊**。即使之後有分數，也不能直接拿來與主線 Valid-U 排名。
+**35,000 步訓練與全量評估已完成，Equal-k 為 0.5979。** 本次讀取既有產物補登，沒有重跑。SE 與主線獨立，固定 split seed2026、每級 80,000／20,000 盤，屬 **game-disjoint、玩家可能重疊**；與 V2／HumanSL 的 player-disjoint Valid-U 不同，不能直接排名或計算架構增益。
 
-| 部分 | 已完成／目前紀錄 |
+### 設定與完成狀態
+
+| 項目 | 實際設定／結果 |
 |---|---|
-| 資料與 teacher | 固定 training 800,000 盤、validation 200,000 盤與 10,000 題；有效位置為指定玩家且 ply ≥30；training 76,763,475 個逐位置 value 標籤，使用者回報已取得，未逐值重新稽核 |
-| 模型與取樣 | strength／policy／value 三頭；每組十級、每級一盤七手；global 128 組，每卡 16 組／1,120 位置，8×H200 |
-| 短測與效能 | channels-last 實測 **5.133 steps/s、allocated 峰值 16.85 GiB**；加 cuDNN 搜尋為 5.152 steps/s、18.70 GiB，故採 channels-last、關搜尋 |
-| 正式訓練入口 | 35,000 updates；SGD；LR 0.04→0.02→0.002；checkpoint／中斷續跑／完訓發布已實作 |
-| 最終權重與保存 | model.pt 為最後一步；另留最低 training loss 的 best_1.pt／best_2.pt；自動評估使用最後一步，不自動改用最低 loss 權重 |
-| 評估入口 | 全量 training 建 centroid／分布，validation 固定題組按所有有效位置平均、nearest-centroid；輸出四桶官方分數、混淆矩陣與 learning curve |
-| 工程驗證 | 最新 checkpoint／訓練／推論／評估相關 CPU 合成與兩程序 Gloo 測試，32 項分次通過；不代表正式 8 卡續跑已驗收 |
-| 正式模型結果 | **帳本尚無完訓紀錄；k=5／10／15／20、Equal-k、相對增益均未知** |
+| 架構 | 專用 20 blocks／256 channels ResNet；strength scalar、362 類 policy、tanh value 三頭；BT 排序＋policy CE＋teacher value MSE，三項等權 |
+| 資料與 teacher | training 800,000 盤／76,763,475 有效位置，validation 200,000 盤／19,183,737 有效位置；指定玩家且 ply ≥30；training 使用逐位置 1-visit teacher value |
+| 取樣與訓練 | 每組十級、每級一盤七手；global 128 組，8×H200 每卡 16 組／1,120 位置；BF16＋SyncBN、channels-last；SGD，LR 0.04→0.02→0.002 |
+| 完訓證據 | `training_summary.json`：completed、35,000 updates、finite checks 通過；`model.complete.json`：最終模型為第 35,000 步 |
+| 訓練紀錄 | 2026-11-02 17:21:09～19:08:17（台灣時間），首末步 log 間隔約 1 小時 47 分；不含初始化、評估與 Slurm 完整配置時間 |
+| Training loss | 第 1→35,000 步：total 8.4459→2.4190；BT 1.6826→0.8597；policy 5.9657→1.4896；value 0.7975→0.0697；為不同 batch 的端點值 |
+| 評估規則 | 全 training 有效位置按位置等權建立十級 centroid；固定 validation 題組內所有有效位置平均，取最近 centroid（並列取較低級別）；BF16、8 卡、每卡 batch 2,240 |
+| 使用權重 | 評估採第 35,000 步 `model.pt`；另外保留最低 training loss 的 `best_1.pt`（35,000 步）與 `best_2.pt`（34,000 步），未另評 best_2 |
 
-以舊短測外推，35,000 步約 **1.894 小時／15.152 GPU-h**；既有推論 benchmark 外推全量約 **14.43 分鐘／1.92 GPU-h**。兩者都是估算，未含完整收尾／冷快取等成本，也不是正式訓練或評估已完成的證據。
+四桶分數、accuracy 與 within-1 統一列於第 3.6 節。
+
+**產物：** run 位於 `outputs/rank/reproduce_paper/se_seed2026/`。評分來源為 [report.json](outputs/rank/reproduce_paper/se_seed2026/evaluation/report.json) 與 [official_scores.csv](outputs/rank/reproduce_paper/se_seed2026/evaluation/official_scores.csv)；同目錄另有各級結果、centroid／分布、逐題預測、learning curve 與 `plot/` 圖表。完訓來源為 [training_summary.json](outputs/rank/reproduce_paper/se_seed2026/training_summary.json)。完整補登見歷史帳本 A-060。
 
 ## 6. 已可產出的提交候選
 
@@ -151,7 +182,7 @@ SE 與主線獨立，固定 seed2026、每級 80,000／20,000 盤切分，**game
 
 ## 7. 接下來尚待確認
 
-- SE 正式完訓、8 卡中斷續跑及全量評估結果；有結果後補四桶分數，不能以短測 loss 宣稱棋力改善。
+- SE 已完訓與評估；8 卡中斷續跑一致性、與主線同切分的架構比較及正式測試表現仍待確認。
 - 11/04 真實資料稽核：提交格式、SGF properties／pass／短局、重複盤、玩家重疊、k 分布、方位與開局集中度。
 - 競賽一是否一對一、合成驗證與 baseline 的巨大落差、開局漂移 S1／G3。
 - 競賽二 L10（測試玩家是否在訓練集）、級別比例及 AH＋C／AH／全玩家版的 LB 差異。
