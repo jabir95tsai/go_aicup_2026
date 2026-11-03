@@ -34,7 +34,7 @@ build/
 # OS
 ._*
 .DS_Store
-slurm/
+/slurm/
 
 # local code intelligence index
 /.codegraph/

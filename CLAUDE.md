@@ -344,7 +344,8 @@ H200 佇列限制**每張 GPU 最多 12 CPU 核心、200GB 主記憶體**；200G
 project/
 ├── CLAUDE.md                  # 本檔案（唯一事實來源；AGENTS.md 只指向這裡）
 ├── README.md                  # 新成員上手：安裝、資料放置、重建步驟、協作規則
-├── RESULTS.md                 # 實驗帳本（只增不刪，失敗也記）
+├── RESULTS.md                 # 結果總覽、架構比較與現行提交候選
+├── RESULTS_ARCHIVE.md         # 完整實驗帳本（只增不刪，失敗也記）
 ├── STRATEGY.md / EXECUTION_PLAN.md / EXTERNAL_RESOURCES.md / reference.md
 ├── pyproject.toml             # 讓 go_aicup 可 import：pip install -e .
 ├── requirements.txt           # 鎖版本，報告要用
