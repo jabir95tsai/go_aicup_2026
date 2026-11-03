@@ -52,7 +52,7 @@ def prepare_monitor(config):
     directory = Path(config['paths']['output_dir']) / 'monitor'
     identity = dict(questions_sha256=file_hash(root / 'validation_questions.parquet'),
                     prepared_sha256=file_hash(root / 'manifest.json'), monitoring=config['monitoring'],
-                    positions_per_game=30, code_sha256=file_hash(Path(__file__)))
+                    positions_per_game=20, code_sha256=file_hash(Path(__file__)))
     manifest = directory / 'manifest.json'
     if manifest.exists():
         record = json.loads(manifest.read_text())
@@ -85,10 +85,10 @@ def prepare_monitor(config):
     for game in games:
         row = lookup[int(game)]
         start, stop = offsets[row:row + 2]
-        if stop - start < 30:
-            raise ValueError(f'game_index={game}: needs thirty positions')
-        rng = np.random.default_rng(np.random.SeedSequence([config['monitoring']['seed'], int(game), 30]))
-        samples.append(np.sort(start + rng.choice(int(stop - start), 30, replace=False)))
+        if stop - start < 20:
+            raise ValueError(f'game_index={game}: needs twenty positions')
+        rng = np.random.default_rng(np.random.SeedSequence([config['monitoring']['seed'], int(game), 20]))
+        samples.append(np.sort(start + rng.choice(int(stop - start), 20, replace=False)))
     atomic_table(directory / 'questions.parquet', selected)
     temporary = directory / 'positions.npz.tmp'
     with temporary.open('wb') as handle:
@@ -265,7 +265,7 @@ def build_reports(config, games):
     validation = run / 'validation.jsonl'
     if validation.exists() and validation.stat().st_size:
         curve = pd.read_json(validation, lines=True)
-        axes[1].plot(curve.step, curve.equal_k, marker='o', label='monitor Equal-k (30 positions/game)')
+        axes[1].plot(curve.step, curve.equal_k, marker='o', label='monitor Equal-k (20 positions/game)')
         axes[1].legend()
     axes[0].set(ylabel='Training loss')
     axes[1].set(xlabel='Completed updates', ylabel='Monitor score')

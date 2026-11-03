@@ -259,3 +259,19 @@ candidate100/query900 的官方分數 N=5／10／15／20：原 SE＝0.5784／0.6
 | 最佳模型、完整 validation 全位置、固定 10,000 題 | 未知 | 未知 | 未知 | 未知 | 未知 |
 
 **處置：** 僅完成工程實作及 CPU／Gloo 合成驗收；沒有 GPU 短測、正式訓練、官方全量評估或上傳，不新增提交候選。下一步為八卡 100 步＋一次固定監控，先報告顯存、吞吐與成本再確認正式長作業。game-disjoint、validation 玩家可能在 training，最終同切分也非獨立選模 holdout；不據此聲稱新玩家泛化。
+
+
+## 2026-11-04：SE3 每盤改抽二十位置
+
+依使用者要求，訓練及固定監控均改為每盤無放回二十位置。global 128 組、八卡各 16 組、LR 與十萬步上限沿用；每步位置數由 38,400 降為 25,600、每卡由 4,800 降為 3,200，減少三分之一。實際吞吐／顯存不宣稱等比例改善，效果未知。最終全量 validation 仍使用全部有效位置，prepared／teacher 不重建。程式與設定使用獨立 `*_20pos*` 輸出，保留三十位置的 job 691911 及其 checkpoint／監控集合。
+
+三十位置歷史短測 691911：8×H200，100/100 updates＋5,000 題，Slurm COMPLETED／exit 0，wall 138s；穩定約 0.682s/step（1.47 steps/s）、峰值 allocated／reserved 63.56／64.35 GiB，監控 22.32s，latest／best／model 重載與八 rank RNG／optimizer 狀態驗證通過。四桶如下，不能作為二十位置版本分數：
+
+| 版本／範圍 | k=5 | k=10 | k=15 | k=20 | Equal-k |
+|---|---|---|---|---|---|
+| 三十位置，100 步後固定 5,000 題監控 | 0.1595 | 0.1516 | 0.1662 | 0.1639 | 0.1603 |
+| 二十位置，新設定 | 未知 | 未知 | 未知 | 未知 | 未知 |
+
+本次不提交 GPU 作業；二十位置的顯存／吞吐、收斂與增益仍未知。三十位置 smoke 棋力 CE 約 2.30，接近 ln(10)，只支持工程接線成功。變更與測試見 [SE3 README](src/go_aicup/tasks/strength/reproduce_paper_3/README.md)／[plan §12](src/go_aicup/tasks/strength/reproduce_paper_3/plan.md)。
+
+二十位置版本驗收：CPU／Gloo 合成回歸 **20 項通過（68.11s）**；檢查二十位置邊界、固定監控 shape、無重複抽樣、spawn 預取續跑、loss／全參數梯度、兩程序訓練續跑與最終評估。config 與 Slurm 語法檢查通過，既有三十位置 smoke 未修改。

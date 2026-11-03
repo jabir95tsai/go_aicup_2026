@@ -481,3 +481,12 @@ project/
 舊 prepared manifest 的七位置身分經完整驗證後唯讀重用，三十位置另記本 run 設定。官方 train 800,000／valid 200,000 盤最少有效位置均為 35，不足三十均為 0。SE3 CPU／Gloo 合成測試 20 項及既有相關回歸 87 項通過；涵蓋預取續跑、全域平均／梯度、四處驗證失敗注入、半行 log、早停／最佳模型發布／最終發布失敗及全量分類報表重試。未提交 GPU 短測、正式訓練、官方全量推論或上傳，真實四桶分數、CUDA／SyncBN、顯存／吞吐、長程 LR 穩定性未知。
 
 入口 `python -m go_aicup.tasks.strength.reproduce_paper_3.train`，正式／smoke 設定 `configs/strength/se3_seed2026.json`／`se3_smoke100.json`；獨立輸出 `outputs/rank/reproduce_paper_3/se3_seed2026/`／`se3_smoke100_8gpu/`。Slurm 為 `slurm/se3_train.slurm`／`se3_smoke100.slurm`，仍依現有規則被 Git 忽略。詳見新套件 README／plan 與 RESULTS；八卡短測實測估時後才確認長作業。原 SE／SE2 檔案未修改。
+
+
+### 2026-11-04：SE3 每盤抽樣改為二十位置
+
+依使用者要求，SE3 訓練與固定監控由每盤三十改為二十個無重複有效位置；config、sampler／collate、model／loss shape、trainer reshape 與監控身分同步修改。global 128 組／八卡各 16 組維持，每組 200、每步 25,600、每卡 3,200 位置，十萬步最多使用 2,560,000,000 次位置樣本。min_ply=30、teacher／split、LR／更新預算及最終全量 validation 使用全部有效位置均沿用。
+
+二十位置使用獨立 `outputs/rank/reproduce_paper_3/se3_seed2026_20pos/`、`se3_smoke100_20pos_8gpu/`，保留三十位置 smoke，不混用舊 checkpoint／監控。job 691911 已完成三十位置八卡 100 步與 5,000 題驗證，1.47 steps/s、allocated 峰值 63.56 GiB、監控 22.32s，k=5／10／15／20=0.1595／0.1516／0.1662／0.1639、Equal-k=0.1603；僅為歷史短測，不能視為二十位置效能。二十位置 GPU 顯存／吞吐／四桶分數與長程收斂未知，本次未提交 GPU 作業。現行操作見 SE3 README／plan §12。
+
+二十位置版本 CPU／Gloo 合成回歸 20 項通過（68.11s），包含二十位置抽樣／監控、十九位置拒絕、spawn 預取精確續跑及兩程序 loss／梯度／訓練／評估；兩份 config 與 Slurm 語法檢查通過。未重跑 GPU。

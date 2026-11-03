@@ -5,7 +5,7 @@ from go_aicup.tasks.strength.reproduce_paper.dataset import GroupBatchSampler as
 
 
 class GroupBatchSampler(RandomGroupSampler):
-    """Visit every game once per epoch while retaining ten-rank/thirty-ply groups."""
+    """Visit every game once per epoch while retaining ten-rank/twenty-ply groups."""
 
     def __init__(self, dataset, **kwargs):
         super().__init__(dataset, **kwargs)
@@ -15,8 +15,8 @@ class GroupBatchSampler(RandomGroupSampler):
         games = dataset._indices[0]
         if len(np.unique(games)) != len(games):
             raise ValueError('training game indices must be unique')
-        if np.any(np.diff(self.offsets) < 30):
-            raise ValueError('every training game needs thirty distinct effective positions')
+        if np.any(np.diff(self.offsets) < 20):
+            raise ValueError('every training game needs twenty distinct effective positions')
         self.steps_per_epoch = counts[0] // self.groups_per_update
 
     def __iter__(self):
@@ -36,28 +36,28 @@ class GroupBatchSampler(RandomGroupSampler):
                 for rows in permutations:
                     row = rows[within * self.groups_per_update + group]
                     start, stop = self.offsets[row:row + 2]
-                    indices = start + rng.choice(int(stop - start), size=30, replace=False)
+                    indices = start + rng.choice(int(stop - start), size=20, replace=False)
                     tasks.extend((int(index), step) for index in indices)
             yield tasks
 
 
 def collate_groups(samples):
-    """Validate complete ranking groups and retain [groups,10,30,...] axes."""
+    """Validate complete ranking groups and retain [groups,10,20,...] axes."""
     from torch.utils.data import default_collate
-    if not samples or len(samples) % 300:
-        raise ValueError('batch must contain complete ten-rank/thirty-position groups')
+    if not samples or len(samples) % 200:
+        raise ValueError('batch must contain complete ten-rank/twenty-position groups')
     if any('value_target' not in sample or 'value_weight' not in sample for sample in samples):
         raise ValueError('group batch requires teacher labels for every position')
     batch = default_collate(samples)
-    batch = {name: tensor.reshape(-1, 10, 30, *tensor.shape[1:]) for name, tensor in batch.items()}
+    batch = {name: tensor.reshape(-1, 10, 20, *tensor.shape[1:]) for name, tensor in batch.items()}
     import torch
     if not torch.all(batch['rank_id'] == torch.arange(10).reshape(1, 10, 1)):
         raise ValueError('group ranks must be ordered 0..9')
     for name in ('game_index', 'player_color'):
         if not torch.all(batch[name] == batch[name][..., :1]):
-            raise ValueError('thirty positions must share a game and player color')
+            raise ValueError('twenty positions must share a game and player color')
     if torch.any(batch['ply'].sort(dim=-1).values.diff(dim=-1) == 0):
-        raise ValueError('thirty positions must be distinct')
+        raise ValueError('twenty positions must be distinct')
     if (not torch.isfinite(batch['value_target']).all() or torch.any(batch['value_target'].abs() > 1)
             or not torch.all(batch['value_weight'] == 1)):
         raise ValueError('invalid teacher value or weight')
@@ -84,9 +84,9 @@ def validate_prepared(config, *, teacher=True):
     for split in ('train', 'valid'):
         offsets = np.load(directory / f'{split}_offsets.npy', mmap_mode='r')
         games = np.load(directory / f'{split}_game.npy', mmap_mode='r')
-        short = np.flatnonzero(np.diff(offsets) < 30)
+        short = np.flatnonzero(np.diff(offsets) < 20)
         if len(short):
-            raise ValueError(f'{split} game_index={int(games[short[0]])}: needs thirty effective positions')
+            raise ValueError(f'{split} game_index={int(games[short[0]])}: needs twenty effective positions')
     if teacher:
         data = PaperDataset(directory, cache_dir=config['paths']['cache_dir'], label_dir=config['paths']['label_dir'])
         try:
@@ -100,7 +100,7 @@ def validate_prepared(config, *, teacher=True):
     identity = dict(prepared_manifest_sha256=file_hash(directory / 'manifest.json'),
                     games_sha256=file_hash(directory / 'games.parquet'),
                     questions_sha256=file_hash(directory / 'validation_questions.parquet'),
-                    available_positions=record['identity']['positions'], sampled_positions_per_game=30)
+                    available_positions=record['identity']['positions'], sampled_positions_per_game=20)
     if teacher:
         identity['value_sha256'] = file_hash(Path(config['paths']['label_dir']) / 'value.npy')
     return identity

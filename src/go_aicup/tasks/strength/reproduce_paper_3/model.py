@@ -22,8 +22,8 @@ class StrengthEstimator(nn.Module):
 
     def forward(self, x):
         if (x.ndim not in (4, 6) or x.shape[-3:] != (18, 19, 19) or x.shape[0] == 0
-                or (x.ndim == 6 and x.shape[1:3] != (10, 30)) or not x.is_floating_point()):
-            raise ValueError('expected floating [B,18,19,19] or [G,10,30,18,19,19]')
+                or (x.ndim == 6 and x.shape[1:3] != (10, 20)) or not x.is_floating_point()):
+            raise ValueError('expected floating [B,18,19,19] or [G,10,20,18,19,19]')
         shape = x.shape[:-3]
         features = self.blocks(self.stem(x.reshape(-1, 18, 19, 19)))
         return dict(rank_logits=self.rank(features).reshape(*shape, 10),
