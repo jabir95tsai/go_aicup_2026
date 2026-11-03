@@ -165,6 +165,14 @@
 
 **產物：** run 位於 `outputs/rank/reproduce_paper/se_seed2026/`。評分來源為 [report.json](outputs/rank/reproduce_paper/se_seed2026/evaluation/report.json) 與 [official_scores.csv](outputs/rank/reproduce_paper/se_seed2026/evaluation/official_scores.csv)；同目錄另有各級結果、centroid／分布、逐題預測、learning curve 與 `plot/` 圖表。完訓來源為 [training_summary.json](outputs/rank/reproduce_paper/se_seed2026/training_summary.json)。完整補登見歷史帳本 A-060。
 
+### 下一實驗：SE2 AdamW＋完整棋局遍歷（2026-11-03，已實作、未訓練）
+
+使用 `se_seed2026/best_1.pt`（35,000 步）作模型起點，重建 AdamW；新增 70,000 步，前 50,000 LR=0.002、後 20,000 LR=0.001，betas=(0.9,0.999)、eps=1e-8、weight_decay=0.0001。每級 80,000 training 棋局 shuffle，8 卡全域輪內不重複；625 步完整遍歷一次，共 112 輪，每盤每次抽七個位置。其餘 SE 模型、loss、資料及題組沿用；新增 50,000／70,000 步分別重算全量 centroid 與 validation。實際 validation 玩家全在 training 內，不能確認新玩家泛化。
+
+假設為自適應更新及完整資料覆蓋可改善現有模型，增益未知；同時改三項因素，無法單獨歸因。原 k=5/10/15/20 為 0.5453／0.5922／0.6108／0.6432，Equal-k=0.5979；建議 gate 為 Equal-k≥0.6029、任一桶退步≤0.01，不作自動早停。原 SGD 吞吐外推純訓練 3.57h／28.6 H200 GPU-h，AdamW 實際速度未知；Slurm 預留 8 卡 6h。
+
+程式／操作見 `src/go_aicup/tasks/strength/reproduce_paper_2/README.md`；config=`configs/strength/se_seed2026_adamw70k.json`，Slurm=`slurm/se_adamw70k.slurm`，新輸出=`outputs/rank/reproduce_paper_2/se_seed2026_adamw70k/`。未啟動正式訓練，分 k 成績與 LB 未知。
+
 ## 6. 已可產出的提交候選
 
 一鍵入口：`scripts/run_release.sh <raw-dir> <out-dir>`。`<part>` 為 public／private；檔案寫在指定輸出目錄。以下為管線輸出約定，正式提交格式仍待 11/04 確認；由使用者手動上傳。

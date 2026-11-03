@@ -464,3 +464,11 @@ project/
 ### 2026-11-02：reproduce_paper 保留最低 loss 的兩個 checkpoint
 
 依使用者最新要求，取代先前相鄰比較及完訓刪除全部 checkpoint：正式訓練每次保存後保留全歷程 training total loss 保存窗口平均最低的兩份，另保留最新一份供續跑；loss 相同優先較晚 optimizer step。完訓先原子留存並驗證 best_1.pt／best_2.pt（完整 checkpoint）及 complete markers、best_checkpoints.json，成功後才刪來源 checkpoints/、last.json、best.json 與暫存；失敗保留來源並可重試，不增加更新。不足兩份時只留實際份數，舊規則已刪除的檔案無法還原。model.pt 仍是最後一步，完訓後自動 centroid／評估不切換至最佳 training loss 權重。V1／V2／probe 不傳 loss 時仍維持原 latest-only 行為；本輪不啟動 GPU 工作或對既有實驗檔操作。
+
+### 2026-11-03：reproduce_paper_2 AdamW＋全訓練集無重複棋局實驗
+
+使用者已核准實作，新增 src 全部置於 `src/go_aicup/tasks/strength/reproduce_paper_2/`，重用原 SE 模型、loss、資料及評估報表。來源固定為 `se_seed2026/best_1.pt`（35,000 步及 checksum）；載入模型／BN／每 rank RNG，重建 AdamW 狀態，抽樣從新一輪開始。新增 70,000 updates：前 50,000 LR=0.002、後 20,000 LR=0.001；betas=(0.9,0.999)、eps=1e-8、weight_decay=0.0001，無 warmup，其他模型／global 128 組／8 卡設定沿用。
+
+每級各 80,000 盤分別 shuffle，8 卡按全域排列分配，每輪全部 800,000 棋局用完才重抽；每盤仍抽七個有效位置，不要求遍歷每盤所有位置。625 steps／輪，共 112 輪，第一段 80 輪、第二段 32 輪；依完成 step 重建輪次／游標，不以預取進度續跑。新增步數與累計步數分開記錄，最終分別為 70,000／105,000。沿用 game-disjoint；實際 validation 的 7,855 位玩家全在 training 的 8,007 位內，未驗證新玩家泛化。
+
+獨立設定 `configs/strength/se_seed2026_adamw70k.json`、入口 `python -m go_aicup.tasks.strength.reproduce_paper_2.train`、Slurm `slurm/se_adamw70k.slurm`（8 卡 6 小時），輸出 `outputs/rank/reproduce_paper_2/se_seed2026_adamw70k/`。新增 50,000 步發布 milestone 並做全量 centroid／validation，完成後續訓；70,000 步完訓後再全量評估。各階段共用 process group，避免中途重建通訊停滯。保存／完訓留存政策沿用原 SE 的最低 training loss 兩份＋最新；原 run 唯讀。原 SGD 速度外推純訓練約 3.57h／28.6 GPU-h，AdamW 實測成本與四桶增益未知。僅 CPU／合成資料驗證，不提交 GPU 作業；操作及驗證範圍見新套件 README。

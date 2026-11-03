@@ -1585,3 +1585,19 @@ Training 全部 800,000 盤／76,763,475 有效位置按位置等權，保存十
 來源：`evaluation/report.json`、`official_scores.csv`、`validation_by_rank.csv`、`training_summary.json`、`model.complete.json`、`train.jsonl` 與 `best_checkpoints.json`。Training total loss 首末步為 8.4459／2.4190；紀錄時間為台灣時間 2026-11-02 17:21:09～19:08:17，約 1 小時 47 分（僅首末步 log 間隔）。各級題目分數 C 最高 0.6796、2D 最低 0.5076。保留 best_1（35,000 步）與 best_2（34,000 步），本次未重評任何權重。
 
 Equal-k 0.5979 高於 baseline 0.4631 約 +0.1348，四桶皆超過門檻；仍為本地 game-disjoint／玩家可能重疊的結果，不與 player-disjoint 主線排名，不視為原論文成績已重現。未驗收 GPU 中斷續跑一致性或正式 LB。本條補完先前「正式分數未知」的歷史狀態；舊紀錄保留。
+
+### A-061 SE2 AdamW＋每輪全 training 棋局無重複（2026-11-03，工程實作）
+
+使用者核准從 A-060 的 `best_1.pt`（35,000 步、SHA-256 `ec81eee81cba56b4d870a1c3a5ec7f31b873054d14a012175ca7700cf1dcded7`）載入模型／BN 與每 rank RNG，改用新建 AdamW，不轉移 SGD momentum。新增 70,000 步：前 50,000 LR=0.002，後 20,000 LR=0.001；betas=(0.9,0.999)、eps=1e-8、weight_decay=0.0001，無 warmup。累計結束為 105,000 步。
+
+依使用者限制，維持 global 128 組／每組十級七手，但不再獨立隨機抽棋局：每級各 80,000 盤全域 shuffle，所有 rank 共用排列，輪內無重複，625 steps 用完 800,000 棋局才重新 shuffle。70,000 步共 112 輪（80＋32）；棋局再次出現時仍抽新的七個有效位置與 D4，不要求遍歷同盤全部位置。完成 step 可重建排列、輪次、游標與樣本，worker 預取不推進 durable cursor。舊 SGD 抽樣不回溯套用此限制。
+
+新增 src 全置於 `src/go_aicup/tasks/strength/reproduce_paper_2/`：設定、sampler、訓練入口及保留 process group 的評估接線；原 SE 模型／loss／資料／報表 helpers 重用，原 SE src 未修改。新增 `configs/strength/se_seed2026_adamw70k.json`、`slurm/se_adamw70k.slurm`（8×H200、6h）及合成回歸測試。新輸出 `outputs/rank/reproduce_paper_2/se_seed2026_adamw70k/`，原 run 唯讀。Slurm 按現有 `.gitignore` 的 `/slurm/` 規則留在本機，未自動改忽略政策。
+
+新增 50,000 步發布獨立 milestone，完整重建 training centroids 與固定 validation 題組報表；以新 run 的 latest checkpoint 接續後 20,000 步，再完成最終全量評估。保存完整 AdamW／scheduler／每 rank RNG；每 1,000 步與正常停止保存，保留最低 training 窗口 loss 兩份＋最新。完訓原子發布 model、留存 best_1／best_2，再清理續跑來源；失敗不清理且可重試。新增步數與來源＋新增累計步數分開記錄。
+
+驗證中曾發現沿用原 evaluator 在中途銷毀並重建 process group 會造成兩程序 Gloo 停滯；改為整個入口共用通訊群組，原 evaluator 不變。修正後完整新測試 8 passed（115.57s）；另將兩程序測試改為先停在 midpoint、重新啟動後評估／續訓／最終評估，1 passed（118.26s）。CPU 唯讀驗證正式來源 checkpoint 成功：35,000 步、8 rank、318 model tensors，checksum、設定、資料與原訓練程式雜湊匹配。測試只用合成資料、CPU／Gloo；未提交 GPU 作業、未正式訓練、未改寫原 run。
+
+補上舊停止檔於入口重啟時清除、初始化後新停止要求不被清掉的處理後，單程序／抽樣回歸 7 passed、1 deselected（81.63s），涵蓋殘留停止要求的評估重試。新 Slurm 的 `bash -n`、新 Python 套件語法與 `git diff --check` 通過。
+
+原模型 k=5/10/15/20＝0.5453／0.5922／0.6108／0.6432，Equal-k=0.5979。假設為 AdamW 與完整資料覆蓋可改善模型，增益未知；建議 gate 為 Equal-k≥0.6029、各桶退步≤0.01，不作自動早停。一次改 optimizer、抽樣與長度，無法單獨歸因。沿用 game-disjoint；實際 validation 7,855 位玩家全部在 training 8,007 位內，不能證明新玩家泛化。依原 SGD 外推純訓練約 3.57h／28.6 GPU-h，AdamW 速度、正式分 k 成績與 LB 均未知，8 卡 CUDA／BF16／SyncBN 實際續跑仍待驗收。
