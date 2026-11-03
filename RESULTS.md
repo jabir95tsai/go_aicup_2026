@@ -10,6 +10,7 @@
 | 競賽二：棋力預測 | 手工特徵、V1／V2 ResNet、HumanSL、級別向量、集成與微調實驗 | **首選 AH＋C＋B2：Valid-U Equal-k 0.6934**；AH 對照 0.6833，V2＋C2 備援 0.5553（題數不同，見下表） |
 | 競賽一：玩家辨識 | 開局計數模型、D4 正規化、GE2E 風格模型、融合與指派壓力測試 | **首選 D4 開局＋8×GE2E，不做指派：0.9846** |
 | SE 論文復現 | 三頭 ResNet、35,000 步正式訓練、全量 training centroid 與 validation 評估 | **Equal-k 0.5979**（10,000 題，game-disjoint）；單盤 0.3894，分數比較見第 3 節、訓練細節見第 5 節 |
+| SE2 AdamW 續訓 | 新增 70,000 步（累計 105,000）、50k／70k 全量評估與權重保存 | **Equal-k 0.5746／0.5412**；均低於原 SE 0.5979，未過 gate，checkpoint 見第 5 節 |
 | 提交管線 | 兩賽一鍵流程、假官方 CSV 彩排、Day-0 稽核工具 | AH＋C 路徑彩排通過；正式格式與真實資料待 11/04 確認 |
 
 **以下全是本地驗證，不是官方 LB。** 官方測試集預定 11/04 11:00（台灣時間）發布，目前沒有正式測試成績。
@@ -35,6 +36,8 @@
 | V2＋HumanSL＋B2（AH） | 玩家互斥，Valid-U，1,000 題 | 0.6168 | 0.6792 | 0.7223 | 0.7147 | 0.6833 |
 | AH＋級別向量＋B2（AH＋C） | 玩家互斥，Valid-U，1,000 題 | 0.6244 | 0.6977 | 0.7303 | 0.7213 | 0.6934 |
 | **SE 論文三頭 ResNet，35,000 步** | **棋局互斥、玩家可重疊，10,000 題** | **0.5453** | **0.5922** | **0.6108** | **0.6432** | **0.5979** |
+| SE2 AdamW，新增 50,000 步（累計 85,000） | 同 SE 棋局切分與固定 10,000 題 | 0.5262 | 0.5679 | 0.5886 | 0.6155 | 0.5746 |
+| SE2 AdamW，新增 70,000 步（累計 105,000） | 同上 | 0.4949 | 0.5325 | 0.5686 | 0.5689 | 0.5412 |
 
 ### 3.1 架構各自學什麼
 
@@ -165,13 +168,37 @@
 
 **產物：** run 位於 `outputs/rank/reproduce_paper/se_seed2026/`。評分來源為 [report.json](outputs/rank/reproduce_paper/se_seed2026/evaluation/report.json) 與 [official_scores.csv](outputs/rank/reproduce_paper/se_seed2026/evaluation/official_scores.csv)；同目錄另有各級結果、centroid／分布、逐題預測、learning curve 與 `plot/` 圖表。完訓來源為 [training_summary.json](outputs/rank/reproduce_paper/se_seed2026/training_summary.json)。完整補登見歷史帳本 A-060。
 
-### 下一實驗：SE2 AdamW＋完整棋局遍歷（2026-11-03，已實作、未訓練）
+### SE2 AdamW＋完整棋局遍歷（2026-11-03，已完訓與評估）
 
-使用 `se_seed2026/best_1.pt`（35,000 步）作模型起點，重建 AdamW；新增 70,000 步，前 50,000 LR=0.002、後 20,000 LR=0.001，betas=(0.9,0.999)、eps=1e-8、weight_decay=0.0001。每級 80,000 training 棋局 shuffle，8 卡全域輪內不重複；625 步完整遍歷一次，共 112 輪，每盤每次抽七個位置。其餘 SE 模型、loss、資料及題組沿用；新增 50,000／70,000 步分別重算全量 centroid 與 validation。實際 validation 玩家全在 training 內，不能確認新玩家泛化。
+run：`outputs/rank/reproduce_paper_2/se_seed2026_adamw70k/`。使用原 SE 的 `se_seed2026/best_1.pt`（35,000 步）作模型起點，重建 AdamW；新增 70,000 步，前 50,000 LR=0.002、後 20,000 LR=0.001，betas=(0.9,0.999)、eps=1e-8、weight_decay=0.0001，無 warmup。每級 80,000 training 棋局 shuffle，8 卡全域輪內不重複；625 步完整遍歷一次，共 112 輪，每盤每次抽七個位置。其餘 SE 模型、loss、資料及題組沿用。
 
-假設為自適應更新及完整資料覆蓋可改善現有模型，增益未知；同時改三項因素，無法單獨歸因。原 k=5/10/15/20 為 0.5453／0.5922／0.6108／0.6432，Equal-k=0.5979；建議 gate 為 Equal-k≥0.6029、任一桶退步≤0.01，不作自動早停。原 SGD 吞吐外推純訓練 3.57h／28.6 H200 GPU-h，AdamW 實際速度未知；Slurm 預留 8 卡 6h。
+**完成證據：** [training_summary.json](outputs/rank/reproduce_paper_2/se_seed2026_adamw70k/training_summary.json) 為 completed、completed_updates=70,000、cumulative_updates=105,000、finite_checks_passed=true；最後 session 從新增 50,000 步接續完成 20,000 步。`train.jsonl` 共 70,000 筆，第 1～70,000 步時間為台灣時間 11/03 16:44:07～20:24:52，間隔約 3 小時 41 分，包含中途評估／接續間隔，不等於純訓練或 Slurm 配置時間。Training total loss 端點為 2.4179→2.1695（不同 batch）；實際 GPU-hours 未核算。
 
-程式／操作見 `src/go_aicup/tasks/strength/reproduce_paper_2/README.md`；config=`configs/strength/se_seed2026_adamw70k.json`，Slurm=`slurm/se_adamw70k.slurm`，新輸出=`outputs/rank/reproduce_paper_2/se_seed2026_adamw70k/`。依使用者最新要求，訓練僅留最新續跑 checkpoint，完訓驗證 model.pt 後清理；不留存 best_1／best_2。未啟動正式訓練，分 k 成績與 LB 未知。
+兩階段 report 都為 completed，dataset_id 與 questions_sha256 與原 SE 相同；training／validation 分別為 76,763,475／19,183,737 個有效位置，固定 10,000 題、每桶 2,500 題。各階段使用自己的全量 training centroid，題內位置等權平均後取最近 centroid；BF16、8 卡、每卡推論 batch 2,240。**game-disjoint；validation 的 7,855 位玩家全在 training 的 8,007 位內，未驗證新玩家泛化。**
+
+| 階段（新增／累計 updates） | k=5 | k=10 | k=15 | k=20 | Equal-k | 相對原 SE Δ |
+|---|---:|---:|---:|---:|---:|---:|
+| 原 SE（0／35,000） | 0.5453 | 0.5922 | 0.6108 | 0.6432 | 0.5979 | — |
+| SE2 milestone（50,000／85,000） | 0.5262 | 0.5679 | 0.5886 | 0.6155 | 0.5746 | −0.0233 |
+| SE2 最終（70,000／105,000） | 0.4949 | 0.5325 | 0.5686 | 0.5689 | 0.5412 | −0.0566 |
+
+| 階段 | 題目完全正確率 | 題目 within-1 | 單盤官方分數（200,000 盤） | 單盤完全正確率 | 單盤 within-1 |
+|---|---:|---:|---:|---:|---:|
+| 新增 50,000 步 | 0.4015 | 0.8719 | 0.3732 | 0.2477 | 0.5888 |
+| 新增 70,000 步 | 0.3579 | 0.8562 | 0.3680 | 0.2410 | 0.5862 |
+
+**判讀：** 兩階段四桶都低於原 SE，未達原建議 gate（Equal-k≥0.6029、任一桶退步≤0.01）；繼續由新增 50k 訓至 70k，Equal-k 再降 0.0333。Training loss 較低沒有帶來題目分數提升；本實驗同時改 optimizer、取樣及訓練長度，無法單獨歸因，退步機制未知。保留結果與權重，不取代原 SE 或現行 AH＋C 主線；以上均為本地成績，LB 未知。
+
+**保存 checkpoint／權重：** 以下兩個 `model.pt` 均實際存在，各 96,642,040 bytes；本次重新計算 SHA-256，與對應 `model.complete.json` 及 report 的 model_sha256 一致。步數為本次新增步數，累計需加來源 35,000 步。
+
+| 階段 | 權重路徑（相對 run） | SHA-256 |
+|---|---|---|
+| 新增 50,000／累計 85,000 | [milestones/update_00050000/model.pt](outputs/rank/reproduce_paper_2/se_seed2026_adamw70k/milestones/update_00050000/model.pt) | `f7dc1e905581d9726fd0c72e8b18ba2750e58f0d66e19022ac6eb4ad2333cb34` |
+| 新增 70,000／累計 105,000 | [model.pt](outputs/rank/reproduce_paper_2/se_seed2026_adamw70k/model.pt) | `bc78888a7b9272b092c6d36113eec2e0f9d5b89a7400d21a319ad40c5309b1c0` |
+
+來源權重：`outputs/rank/reproduce_paper/se_seed2026/best_1.pt`，SHA-256=`ec81eee81cba56b4d870a1c3a5ec7f31b873054d14a012175ca7700cf1dcded7`（[source.json](outputs/rank/reproduce_paper_2/se_seed2026_adamw70k/source.json) 紀錄）。SE2 依設定只保留最新續跑 checkpoint，完訓後已清除 `checkpoints/` 與 `last.json`；本 run 沒有 `best_1.pt`／`best_2.pt`，上述發布權重不應視為仍保有完整續跑狀態。
+
+**評分與重現來源：** [50k report.json](outputs/rank/reproduce_paper_2/se_seed2026_adamw70k/milestones/update_00050000/evaluation/report.json)、[70k report.json](outputs/rank/reproduce_paper_2/se_seed2026_adamw70k/evaluation/report.json)；各自 `evaluation/plot/` 保留 learning curve、centroid／分布與混淆矩陣等 10 張 PNG。實際設定見 [config.json](outputs/rank/reproduce_paper_2/se_seed2026_adamw70k/config.json)；操作見 `src/go_aicup/tasks/strength/reproduce_paper_2/README.md`，Slurm 為 `slurm/se_adamw70k.slurm`。本次僅讀取既有產物補登，沒有重新訓練或全量推論。
 
 ## 6. 已可產出的提交候選
 
@@ -190,7 +217,7 @@
 
 ## 7. 接下來尚待確認
 
-- SE 已完訓與評估；8 卡中斷續跑一致性、與主線同切分的架構比較及正式測試表現仍待確認。
+- SE／SE2 已完訓與評估，SE2 兩階段均退步；8 卡中斷續跑一致性、與主線同切分的架構比較及正式測試表現仍待確認。
 - 11/04 真實資料稽核：提交格式、SGF properties／pass／短局、重複盤、玩家重疊、k 分布、方位與開局集中度。
 - 競賽一是否一對一、合成驗證與 baseline 的巨大落差、開局漂移 S1／G3。
 - 競賽二 L10（測試玩家是否在訓練集）、級別比例及 AH＋C／AH／全玩家版的 LB 差異。
