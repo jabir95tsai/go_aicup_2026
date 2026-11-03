@@ -1601,3 +1601,11 @@ Equal-k 0.5979 高於 baseline 0.4631 約 +0.1348，四桶皆超過門檻；仍�
 補上舊停止檔於入口重啟時清除、初始化後新停止要求不被清掉的處理後，單程序／抽樣回歸 7 passed、1 deselected（81.63s），涵蓋殘留停止要求的評估重試。新 Slurm 的 `bash -n`、新 Python 套件語法與 `git diff --check` 通過。
 
 原模型 k=5/10/15/20＝0.5453／0.5922／0.6108／0.6432，Equal-k=0.5979。假設為 AdamW 與完整資料覆蓋可改善模型，增益未知；建議 gate 為 Equal-k≥0.6029、各桶退步≤0.01，不作自動早停。一次改 optimizer、抽樣與長度，無法單獨歸因。沿用 game-disjoint；實際 validation 7,855 位玩家全部在 training 8,007 位內，不能證明新玩家泛化。依原 SGD 外推純訓練約 3.57h／28.6 GPU-h，AdamW 速度、正式分 k 成績與 LB 均未知，8 卡 CUDA／BF16／SyncBN 實際續跑仍待驗收。
+
+### 2026-11-03：SE2 取消 best_1／best_2 留存
+
+使用者指定不保存 SE2 的最低 training loss 兩份完整 checkpoint。SE2 保存改用 shared checkpoint 的既有 latest-only 路徑，不建立 best.json、不做 loss 排名；每 1,000 步、停止與邊界仍保存最新完整 AdamW／scheduler／每 rank RNG 供續跑。新增本套件專用清理函式，先驗證最終 model.pt checksum、格式、步數與設定，成功後才刪 checkpoints/、last.json 及暫存；不呼叫原 SE 的 archive_best_checkpoints。最終模型發布／驗證失敗保留續跑資料，完成清理可重試。50,000 步 milestone、70,000 步最終模型與兩次完整評估保留。原 SE src 與來源 best_1.pt 不變，未對既有實驗產物執行刪除。
+
+同步更新 SE2 README、CLAUDE 與 RESULTS；測試改驗證訓練中僅留最新一份、完訓不產出 best*，並驗證最終模型 checksum／config 不合時拒絕清理。未啟動 GPU 或正式訓練。
+
+驗證：原有 8 項 SE2 回歸（含兩程序 Gloo 的停止／續訓／兩次全量評估）通過；新增清理保護測試修正合成模型設定一致性後單獨通過（1 passed，0.52s），共 9 項分次通過。確認 checksum／config 失敗保留續跑資料，成功與重試均不建立 best*；git diff --check 通過。未執行 CUDA 驗證或正式訓練。

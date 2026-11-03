@@ -44,7 +44,7 @@ python -m torch.distributed.run --standalone --nnodes=1 --nproc-per-node=8 \
 
 ## 保存與評估
 
-每 1,000 步、停止點及段落邊界保存完整 AdamW／scheduler／每 rank RNG；保留保存窗口平均 total training loss 最低兩份＋最新 checkpoint。完訓使用既有原子發布／驗證／留存流程，留下 `model.pt`、`best_1.pt`、`best_2.pt` 及 markers，再清理 checkpoints／last.json。最終模型是最後一步，不依 validation 選權重。
+每 1,000 步、停止點及段落邊界保存完整 AdamW／scheduler／每 rank RNG；訓練中只保留最新一份供續跑，不依 loss 排名或留存 `best_1.pt`／`best_2.pt`。完訓原子發布並驗證 `model.pt`／marker 後，清理 checkpoints／last.json；提前停止或最終發布／驗證失敗時保留續跑狀態。最終模型是最後一步，不依 validation 選權重。
 
 新增 50,000 步先發布獨立 `milestones/update_00050000/model.pt`（新增步數 50,000、累計 85,000），重用原 SE evaluate 完整重建 training centroids 與固定 validation 題組分數／圖表，再由剛保存的 AdamW checkpoint 接續第二段。這段恢復也還原 RNG，評估建立模型不影響下一批訓練。新增 70,000 步完成後，在 run 根目錄執行同樣評估。兩次報表分別在 milestone 的 `evaluation/` 與 run 的 `evaluation/`。
 

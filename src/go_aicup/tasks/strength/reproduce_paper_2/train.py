@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import shutil
 import time
 
 import torch
@@ -23,7 +24,7 @@ from go_aicup.tasks.strength.reproduce_paper.dataset import PaperDataset, collat
 from go_aicup.tasks.strength.reproduce_paper.model import StrengthEstimator
 from go_aicup.tasks.strength.reproduce_paper.losses import grouped_losses
 from go_aicup.tasks.strength.reproduce_paper.train import (
-    finalize_training, cleanup_training, trim_training_log)
+    finalize_training, trim_training_log)
 from .config import DEFAULT_CONFIG, read_config, validate_config
 from .dataset import GroupBatchSampler
 
@@ -92,6 +93,24 @@ def publish_milestone(config, model, manifest, code, identity):
     if source_log.exists():
         (directory / 'train.jsonl').write_bytes(source_log.read_bytes())
     finalize_training(directory, model, snapshot, manifest, code, step)
+
+
+def cleanup_training(directory, config):
+    """Remove latest-only resume state after verifying the published final model."""
+    path = resolve_checkpoint(directory / 'model.pt')
+    record = json.loads(path.with_suffix('.complete.json').read_text())
+    payload = torch.load(path, map_location='cpu', weights_only=False)
+    if (record.get('status') != 'completed'
+            or payload.get('artifact_format') != 'strength_estimator_1'
+            or payload['optimizer_steps'] != config['training']['updates']
+            or object_hash(payload['config']) != object_hash(config)):
+        raise ValueError('final model/config mismatch; refusing checkpoint cleanup')
+    checkpoints = directory / 'checkpoints'
+    if checkpoints.exists():
+        shutil.rmtree(checkpoints)
+    for name in ('last.json', 'last.json.tmp', '.stop-requested', 'train.tmp',
+                 'model.pt.tmp', 'model.complete.json.tmp'):
+        (directory / name).unlink(missing_ok=True)
 
 
 def train(config, *, resume=None, stop_after=None, keep_distributed=False):
@@ -263,7 +282,7 @@ def train(config, *, resume=None, stop_after=None, keep_distributed=False):
                 save_checkpoint(directory, model, optimizer, scheduler, scaler, config, manifest,
                     dict(optimizer_steps=completed, cumulative_steps=event['cumulative_step'], epoch=epoch,
                          next_batch=within, checkpoint_loss=checkpoint_loss, checkpoint_loss_updates=loss_count),
-                    device, rank, world, code_sha256=code, tag='adamw_training', loss=checkpoint_loss)
+                    device, rank, world, code_sha256=code, tag='adamw_training')
                 loss_sum, loss_count = 0.0, 0
             if stop.item():
                 stopping = True

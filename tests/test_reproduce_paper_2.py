@@ -142,6 +142,9 @@ def test_adamw_reset_and_exact_resume(continuation):
                for v in payload['optimizer']['state'].values())
     with (run / 'train.jsonl').open('a') as handle:
         handle.write('{"step":2,"total":999}\n{"step":')
+    assert trainer.train(config, resume=run / 'last.json')['status'] == 'milestone'
+    assert len(list((run / 'checkpoints').glob('*.pt'))) == 1
+    assert not (run / 'best.json').exists()
     finish(config, run / 'last.json')
     expected = torch.load(Path(full['paths']['output_dir']) / 'model.pt', weights_only=False)
     actual = torch.load(run / 'model.pt', weights_only=False)
@@ -152,7 +155,7 @@ def test_adamw_reset_and_exact_resume(continuation):
     assert [r['lr'] for r in rows] == [0.002, 0.002, 0.001, 0.001]
     assert [r['total'] for r in rows] == [r['total'] for r in expected_rows]
     assert [r['cumulative_step'] for r in rows] == [5, 6, 7, 8]
-    assert (run / 'best_1.pt').exists() and (run / 'best_2.pt').exists()
+    assert not list(run.glob('best*'))
     assert not (run / 'checkpoints').exists()
     assert trainer.train(config)['updates_this_session'] == 0
     assert not (run / '.writer.lock').exists()
@@ -261,12 +264,43 @@ def test_two_process_full_workflow(final_run, tmp_path):
         capture_output=True, text=True, timeout=120, env=env)
     assert result.returncode == 0, result.stdout + result.stderr
     run = Path(config['paths']['output_dir'])
-    assert torch.load(resolve_checkpoint(run / 'last.json'), weights_only=False)['state']['optimizer_steps'] == 2
+    payload = torch.load(resolve_checkpoint(run / 'last.json'), weights_only=False)
+    assert payload['state']['optimizer_steps'] == 2
+    assert payload['world_size'] == len(payload['rng_by_rank']) == 2
+    assert len(list((run / 'checkpoints').glob('*.pt'))) == 1
     result = subprocess.run(command + ['--resume', str(run / 'last.json')],
         capture_output=True, text=True, timeout=180, env=env)
     assert result.returncode == 0, result.stdout + result.stderr
-    payload = torch.load(run / 'best_1.pt', weights_only=False)
-    assert payload['world_size'] == len(payload['rng_by_rank']) == 2
+    assert not list(run.glob('best*'))
+    assert not (run / 'checkpoints').exists()
     assert json.loads((run / 'evaluation/report.json').read_text())['status'] == 'completed'
     snapshot = Path(trainer.milestone_config(config)['paths']['output_dir'])
     assert json.loads((snapshot / 'evaluation/report.json').read_text())['status'] == 'completed'
+
+
+def test_cleanup_requires_verified_final_model(tmp_path):
+    config = read_config()
+    config['model'].update(channels=2, blocks=1)
+    model = trainer.StrengthEstimator(**config['model'])
+    trainer.finalize_training(tmp_path, model, config,
+        dict(dataset_id='synthetic', cache_build_id='synthetic'), {}, config['training']['updates'])
+    checkpoints = tmp_path / 'checkpoints'
+    checkpoints.mkdir()
+    sentinel = checkpoints / 'latest.pt'
+    sentinel.write_bytes(b'resumable state')
+    bad = copy.deepcopy(config)
+    bad['training']['updates'] += 1
+    with pytest.raises(ValueError, match='refusing'):
+        trainer.cleanup_training(tmp_path, bad)
+    assert sentinel.exists()
+    path = tmp_path / 'model.pt'
+    valid_bytes = path.read_bytes()
+    path.write_bytes(b'broken model')
+    with pytest.raises(ValueError, match='hash mismatch'):
+        trainer.cleanup_training(tmp_path, config)
+    assert sentinel.exists()
+    path.write_bytes(valid_bytes)
+    trainer.cleanup_training(tmp_path, config)
+    assert not checkpoints.exists() and path.exists()
+    assert not list(tmp_path.glob('best*'))
+    trainer.cleanup_training(tmp_path, config)

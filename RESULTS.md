@@ -171,7 +171,7 @@
 
 假設為自適應更新及完整資料覆蓋可改善現有模型，增益未知；同時改三項因素，無法單獨歸因。原 k=5/10/15/20 為 0.5453／0.5922／0.6108／0.6432，Equal-k=0.5979；建議 gate 為 Equal-k≥0.6029、任一桶退步≤0.01，不作自動早停。原 SGD 吞吐外推純訓練 3.57h／28.6 H200 GPU-h，AdamW 實際速度未知；Slurm 預留 8 卡 6h。
 
-程式／操作見 `src/go_aicup/tasks/strength/reproduce_paper_2/README.md`；config=`configs/strength/se_seed2026_adamw70k.json`，Slurm=`slurm/se_adamw70k.slurm`，新輸出=`outputs/rank/reproduce_paper_2/se_seed2026_adamw70k/`。未啟動正式訓練，分 k 成績與 LB 未知。
+程式／操作見 `src/go_aicup/tasks/strength/reproduce_paper_2/README.md`；config=`configs/strength/se_seed2026_adamw70k.json`，Slurm=`slurm/se_adamw70k.slurm`，新輸出=`outputs/rank/reproduce_paper_2/se_seed2026_adamw70k/`。依使用者最新要求，訓練僅留最新續跑 checkpoint，完訓驗證 model.pt 後清理；不留存 best_1／best_2。未啟動正式訓練，分 k 成績與 LB 未知。
 
 ## 6. 已可產出的提交候選
 
