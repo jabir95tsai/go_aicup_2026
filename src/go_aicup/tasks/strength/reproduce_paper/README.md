@@ -593,7 +593,7 @@ Training 使用全部 800,000 盤的 76,763,475 有效位置，指定玩家且 p
 所有新產物在 `outputs/rank/reproduce_paper/se_seed2026/evaluation/`：
 
 - `rank_statistics.csv`、`centroids.npy`：十級位置數、mean／std／min／max 與平均分數。
-- `training_distributions.npz`：共用 128 bins、每級全部位置 histogram；`plot/training_score_distributions.png` 為十級分面圖，`plot/rank_centroids.png` 顯示各級平均。
+- `training_distributions.npz`：共用 128 bins、每級全部位置 histogram；`plot/training_score_distributions.png` 為十級疊加密度圖（同色虛線為各級平均），`plot/rank_centroids.png` 顯示各級平均。
 - `official_scores.csv`、`validation_by_rank.csv`、`report.json`：分 k=5／10／15／20 的官方公式 score、exact、within1 及 Equal-k，另存單盤診斷及各級題目成績。within1 包含 exact；是本地 game-disjoint validation，並非官方 LB。
 - `confusion_*.npy` 與 `plot/confusion_*.png`：單盤、全部題目及各 k 的 6 組矩陣；列真值、欄預測，圖中數量標記／真值列正規化顏色。
 - `learning_curve.csv`、`plot/learning_curve.png`：全部 updates 的 training total／BT／policy／value loss，原始值及 trailing-100 平均；沒有中途 validation 曲線。
