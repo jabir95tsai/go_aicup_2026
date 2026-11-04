@@ -1,6 +1,6 @@
 # 實驗結果總覽
 
-更新：2026-11-03。依既有紀錄與保存產物整理，沒有新增訓練或重算分數。完整實驗、失敗紀錄、決策與驗證細節保留於 [RESULTS_ARCHIVE.md](RESULTS_ARCHIVE.md)；專案規則以 [CLAUDE.md](CLAUDE.md) 為準，後續工作見 [EXECUTION_PLAN.md](EXECUTION_PLAN.md)。
+更新：2026-11-04。依既有紀錄與保存產物整理，沒有新增訓練或重算分數。完整實驗、失敗紀錄、決策與驗證細節保留於 [RESULTS_ARCHIVE.md](RESULTS_ARCHIVE.md)；專案規則以 [CLAUDE.md](CLAUDE.md) 為準，後續工作見 [EXECUTION_PLAN.md](EXECUTION_PLAN.md)。
 
 ## 1. 目前做到哪裡
 
@@ -11,6 +11,7 @@
 | 競賽一：玩家辨識 | 開局計數模型、D4 正規化、GE2E 風格模型、融合與指派壓力測試 | **首選 D4 開局＋8×GE2E，不做指派：0.9846** |
 | SE 論文復現 | 三頭 ResNet、35,000 步正式訓練、全量 training centroid 與 validation 評估 | **Equal-k 0.5979**（10,000 題，game-disjoint）；單盤 0.3894，分數比較見第 3 節、訓練細節見第 5 節 |
 | SE2 AdamW 續訓 | 新增 70,000 步（累計 105,000）、50k／70k 全量評估與權重保存 | **Equal-k 0.5746／0.5412**；均低於原 SE 0.5979，未過 gate，checkpoint 見第 5 節 |
+| SE3 十級 CE，十五位置 | 第 45,000 步 early stopping，發布第 30,000 步最佳監控模型並完成全量 validation 評估 | **Equal-k 0.623873**（固定 10,000 題，game-disjoint）；單盤 0.415296，模型對應與來源見文末補登 |
 | 提交管線 | 兩賽一鍵流程、假官方 CSV 彩排、Day-0 稽核工具 | AH＋C 路徑彩排通過；正式格式與真實資料待 11/04 確認 |
 
 **以下全是本地驗證，不是官方 LB。** 官方測試集預定 11/04 11:00（台灣時間）發布，目前沒有正式測試成績。
@@ -38,6 +39,7 @@
 | **SE 論文三頭 ResNet，35,000 步** | **棋局互斥、玩家可重疊，10,000 題** | **0.5453** | **0.5922** | **0.6108** | **0.6432** | **0.5979** |
 | SE2 AdamW，新增 50,000 步（累計 85,000） | 同 SE 棋局切分與固定 10,000 題 | 0.5262 | 0.5679 | 0.5886 | 0.6155 | 0.5746 |
 | SE2 AdamW，新增 70,000 步（累計 105,000） | 同上 | 0.4949 | 0.5325 | 0.5686 | 0.5689 | 0.5412 |
+| SE3 十級 CE，十五位置，best 30,000 步 | 同 SE 棋局切分與固定 10,000 題；全有效位置、盤間等權 | 0.574675 | 0.624762 | 0.628528 | 0.667525 | 0.623873 |
 
 ### 3.1 架構各自學什麼
 
@@ -51,6 +53,7 @@
 | A＋H＋級別向量＋B2（AH＋C） | 凍結 HumanSL，每個幽玄級別學本人／對手兩個條件向量；新增 20 維 likelihood，共 60 維 | B2＋score_rank | **目前首選** |
 | HumanSL 全網路微調（C4／C4b） | 解凍 policy 路徑；分別以生成式 NLL、NLL＋級別 CE 訓練 | 先以未見玩家單盤分數判 gate | 試跑未過，未擴大題級評估 |
 | SE 三頭 ResNet | 專用 20 blocks／256 channels；strength BT 排序＋policy CE＋teacher value MSE，三項等權 | 全 training 有效位置建立十級 centroid；題內所有位置平均後取最近 centroid | 已完訓與全量評估，Equal-k 0.5979；game-disjoint，見第 3.6 節 |
+| SE3 十級 CE 三頭 ResNet | 18 blocks／256 channels；strength 十級 CE＋policy CE＋teacher value MSE；AdamW、每盤抽十五位置 | 盤內平均 log_softmax→題內各盤等權平均→argmax；不使用 centroid／score_rank | best 第 30,000 步，全量 validation Equal-k 0.623873；game-disjoint，見文末補登 |
 
 名詞注意：**V2 的 C2 是聚合／溫度校準規則；HumanSL 實驗的 C2 是級別條件向量（表中記為 C）。兩者不同。**
 
@@ -291,3 +294,22 @@ candidate100/query900 的官方分數 N=5／10／15／20：原 SE＝0.5784／0.6
 本次不提交 GPU 短測／正式訓練；十五位置的 GPU 顯存、吞吐、四桶成績與長程收斂均未知。現行規格見 [SE3 plan §13](src/go_aicup/tasks/strength/reproduce_paper_3/plan.md)，操作見 [README](src/go_aicup/tasks/strength/reproduce_paper_3/README.md)。
 
 十五位置版本 CPU／Gloo 合成回歸 **20 項通過（47.81s）**，涵蓋十五位置抽樣與固定監控、十四位置拒絕、舊七／二十／三十位置設定與模型 shape 拒絕、spawn 預取精確續跑、全域 loss／梯度與兩程序訓練／評估；config、Slurm 語法及舊短測產物保留檢查通過。未提交 GPU 作業。
+
+## 2026-11-04：SE3 十五位置正式訓練與最佳模型評估（既有產物補登）
+
+run：`outputs/rank/reproduce_paper_3/se3_seed2026_15pos/`（Slurm job 692203）。本節補登後續完成結果；前述「尚無正式模型分數」與十五位置「未知」為當時狀態。
+
+**完成與選模：** [training_summary.json](outputs/rank/reproduce_paper_3/se3_seed2026_15pos/training_summary.json) 記錄 completed、45,000 updates、stop_reason=patience；最佳固定監控模型為第 **30,000 步**，5,000 題、每盤十五位置的監控 Equal-k 為 **0.6228357894**。第 35k／40k／45k 三次監控嚴格較低而早停。summary 記錄 15,980.56 秒（約 4.44 小時）／35.5124 GPU-h，為 trainer session 計時，不等於完整 Slurm 配置與最終評估成本。
+
+**`evaluation/` 使用哪個模型：** [best.json](outputs/rank/reproduce_paper_3/se3_seed2026_15pos/best.json) 指向 `best/best_00030000.pt`；完訓將其發布為根目錄 [model.pt](outputs/rank/reproduce_paper_3/se3_seed2026_15pos/model.pt)，並加入停止步數等完成資訊。全量評估讀取此 `model.pt`，使用的是第 30,000 步最佳權重。已重新計算 `model.pt` SHA-256=`74c65097c53d85897c8e4239e910415eec1b8f3b474945b1d3357925a95a8cd0`，與 [model.complete.json](outputs/rank/reproduce_paper_3/se3_seed2026_15pos/model.complete.json) 及 [evaluation/manifest.json](outputs/rank/reproduce_paper_3/se3_seed2026_15pos/evaluation/manifest.json) 一致。
+
+**完整驗證：** validation 200,000 盤，使用指定玩家且 ply≥30 的全部有效位置，固定 10,000 題、每桶 2,500 題。盤內平均 log_softmax，題內各盤等權平均後 argmax；不使用 centroid／score_rank。分數來源為 [evaluation/result.json](outputs/rank/reproduce_paper_3/se3_seed2026_15pos/evaluation/result.json)：
+
+| 評估範圍 | k=5 | k=10 | k=15 | k=20 | Equal-k |
+|---|---:|---:|---:|---:|---:|
+| 第 30,000 步固定監控，5,000 題／每盤十五位置 | 0.571475 | 0.625332 | 0.629166 | 0.665369 | 0.622836 |
+| 同模型完整 validation 全有效位置，10,000 題 | 0.574675 | 0.624762 | 0.628528 | 0.667525 | **0.623873** |
+
+全量 Equal-k 未四捨五入值為 **0.6238725773478886**；單盤官方公式分數為 **0.41529552023865274**（200,000 盤，診斷）。四桶均超過 baseline 0.4631；沿用 SE 的 game-disjoint 切分與固定題組，玩家可重疊，且同一 validation 用於選模，不能視為獨立 holdout 或新玩家泛化成績，也不能與 HumanSL 主線的 Valid-U 直接排名。SE3 同時改模型、loss、取樣、optimizer 與訓練長度，無法將差異歸因於單項。
+
+本次只讀取既有產物並補登，未重新訓練、推論或上傳；以上為本地依官方公式計算的分數，平台 LB 未知。
