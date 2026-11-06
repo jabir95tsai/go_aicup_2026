@@ -7,7 +7,7 @@ import subprocess
 import pytest
 
 
-SCRIPT = Path('src/go_aicup/tasks/strength/SE_H_C_B2/slurm/train.slurm').resolve()
+SCRIPT = Path('slurm/SE3_H_C_B2/train.slurm').resolve()
 
 
 @pytest.mark.parametrize('gate,failed', [(True, False), (False, False), (True, True)])

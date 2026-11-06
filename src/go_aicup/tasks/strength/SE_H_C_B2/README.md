@@ -17,7 +17,7 @@
 在 repo 根目錄執行一次：
 
 ```bash
-sbatch src/go_aicup/tasks/strength/SE_H_C_B2/slurm/train.slurm
+sbatch slurm/SE3_H_C_B2/train.slurm
 ```
 
 任務依序完成 `prepare`、八卡補算開發 SE3 特徵、兩臂開發 B2 訓練、S-select 評估；若開發 gate 通過，再補算最終 SE3／新棋局 H／C 特徵、重新訓練兩臂並評估 `U_newgames`。全部 k 退步時依計畫停止，保留開發報表；Slurm 顯示完成，log 會明確寫出 gate 停止。任何子程序失敗則任務失敗並指出 log 路徑。已完成分片與訓練 checkpoint 會在重新提交同一命令時重用；因強制終止留下的 lock，須確認舊作業結束後依上節處理。
@@ -45,7 +45,7 @@ PYTHON_BIN="${HOME}/.conda/envs/go/bin/python"
 若希望在正式任務前另外量測，可先執行：
 
 ```bash
-sbatch src/go_aicup/tasks/strength/SE_H_C_B2/slurm/benchmark.slurm
+sbatch slurm/SE3_H_C_B2/benchmark.slurm
 ```
 
 八卡共用全域分層 limit：SE3 從開發缺失池取最多 1,000 盤，H／C 從新題組缺失池各取最多 100 盤。已完成 feature shards 可重用。`features/train/<component>/timing_XX.json` 記錄各 worker 的遊戲數、位置數、end-to-end 秒數、吞吐與 PyTorch allocated 顯存。時間包含載入／編譯／I/O，不宣稱穩態速度；H engine 的顯存不在 PyTorch 計數中。估總 wall time 時用最慢 worker 與實際完成量，GPU-h 以實際配置的八卡 wall hours×8 記帳。
@@ -57,7 +57,7 @@ sbatch src/go_aicup/tasks/strength/SE_H_C_B2/slurm/benchmark.slurm
 確認補算成本後，只補開發題目及 S-select 所需的 SE3 特徵，舊 A／H／C 可重用：
 
 ```bash
-COMPONENT=se3 SCOPE=dev sbatch src/go_aicup/tasks/strength/SE_H_C_B2/slurm/extract.slurm
+COMPONENT=se3 SCOPE=dev sbatch slurm/SE3_H_C_B2/extract.slurm
 "$PYTHON_BIN" -m go_aicup.tasks.strength.SE_H_C_B2 train --stage dev --arm a
 "$PYTHON_BIN" -m go_aicup.tasks.strength.SE_H_C_B2 train --stage dev --arm se3
 "$PYTHON_BIN" -m go_aicup.tasks.strength.SE_H_C_B2 evaluate --stage dev --role select
@@ -72,9 +72,9 @@ COMPONENT=se3 SCOPE=dev sbatch src/go_aicup/tasks/strength/SE_H_C_B2/slurm/extra
 開發通過繼續條件且確認成本後：
 
 ```bash
-COMPONENT=se3 SCOPE=fit sbatch src/go_aicup/tasks/strength/SE_H_C_B2/slurm/extract.slurm
-COMPONENT=h SCOPE=newgames sbatch src/go_aicup/tasks/strength/SE_H_C_B2/slurm/extract.slurm
-COMPONENT=c SCOPE=newgames sbatch src/go_aicup/tasks/strength/SE_H_C_B2/slurm/extract.slurm
+COMPONENT=se3 SCOPE=fit sbatch slurm/SE3_H_C_B2/extract.slurm
+COMPONENT=h SCOPE=newgames sbatch slurm/SE3_H_C_B2/extract.slurm
+COMPONENT=c SCOPE=newgames sbatch slurm/SE3_H_C_B2/extract.slurm
 "$PYTHON_BIN" -m go_aicup.tasks.strength.SE_H_C_B2 train --stage final --arm a
 "$PYTHON_BIN" -m go_aicup.tasks.strength.SE_H_C_B2 train --stage final --arm se3
 "$PYTHON_BIN" -m go_aicup.tasks.strength.SE_H_C_B2 evaluate --stage final --role newgames
@@ -87,7 +87,7 @@ COMPONENT=c SCOPE=newgames sbatch src/go_aicup/tasks/strength/SE_H_C_B2/slurm/ex
 舊 U 僅作受污染診斷，若要報告需另補其 SE3 缺失特徵：
 
 ```bash
-COMPONENT=se3 SCOPE=old_u sbatch src/go_aicup/tasks/strength/SE_H_C_B2/slurm/extract.slurm
+COMPONENT=se3 SCOPE=old_u sbatch slurm/SE3_H_C_B2/extract.slurm
 "$PYTHON_BIN" -m go_aicup.tasks.strength.SE_H_C_B2 evaluate --stage final --role old_u
 ```
 
@@ -101,7 +101,7 @@ SE3 看過評估玩家的其他棋局，且 B2 fitting 大部分是 SE3 已訓�
 
 ```bash
 BASE_WORK=outputs/rank_test_ahc_<job-id>/rank \
-  sbatch src/go_aicup/tasks/strength/SE_H_C_B2/slurm/predict.slurm
+  sbatch slurm/SE3_H_C_B2/predict.slurm
 ```
 
 新 SE3 推論沿用同一 BoardCache、本人視角、全部 ply≥30 落子前盤面，沒有 V2 十維。每個測試題必須有完整 k 盤六十維特徵；缺任一盤時整題使用相同 ID、相同 k 的既有完整 AH＋C posterior。fallback 本身若有 V2／其他 fallback 或縮題會拒絕；沒有合格 fallback 也直接失敗。fallback 題數／原因保存在逐題結果與 marker，禁止手動改預測。
