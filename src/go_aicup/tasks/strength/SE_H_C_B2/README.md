@@ -8,9 +8,25 @@
 
 設定為 `configs/strength/se3_hc_b2.json`，所有路徑相對 repo root 解讀。預設輸出 `outputs/rank/se3_hc_b2/se3_30k_mlp32_seed2027/`。SE3／A／C 權重有固定 SHA-256；HumanSL bin／checkpoint、engine、analysis config、上游與本目錄程式、版本、dataset／board manifest、重用特徵與題組均記錄身分。檔案損壞或來源改變會失敗，不自動重抽、搬移或覆寫舊 run。
 
-變更來源／程式後，使用獨立 output 重新 prepare；不要刪 manifest 來繞過來源檢查。多個程序可以讀同一 prepared，寫入同一 head／同一 feature worker 會被 lock 拒絕。SIGKILL 可能留下 `.writer.lock`，只能在確認舊程序結束後人工移除。checkpoint 與舊 pickle／torch 權重只應讀本專案可信產物。
+變更來源／程式後，使用獨立 output 重新 prepare；不要刪 manifest 來繞過來源檢查。多個程序可以讀同一 prepared，寫入同一 head／同一 feature worker 會被 lock 拒絕。作業收到 SIGTERM 或 SIGKILL 時可能留下 `.writer.lock`，只能在確認舊程序結束後人工移除。checkpoint 與舊 pickle／torch 權重只應讀本專案可信產物。
 
 上游全程 eval／no-grad，凍結檢查包含 BN buffers；C 向量也檢查不變。訓練 B2 只讀快取，不載入 teacher 或上游 optimizer。SE3 使用指定玩家、ply≥30 的全部有效位置及落子前本人／對手八步歷史；H／C 維持原位置範圍。
+
+## 一次提交訓練任務
+
+在 repo 根目錄執行一次：
+
+```bash
+sbatch src/go_aicup/tasks/strength/SE_H_C_B2/slurm/train.slurm
+```
+
+任務依序完成 `prepare`、八卡補算開發 SE3 特徵、兩臂開發 B2 訓練、S-select 評估；若開發 gate 通過，再補算最終 SE3／新棋局 H／C 特徵、重新訓練兩臂並評估 `U_newgames`。全部 k 退步時依計畫停止，保留開發報表；Slurm 顯示完成，log 會明確寫出 gate 停止。任何子程序失敗則任務失敗並指出 log 路徑。已完成分片與訓練 checkpoint 會在重新提交同一命令時重用；因強制終止留下的 lock，須確認舊作業結束後依上節處理。
+
+預設配置是單節點 8×H200、96 CPU、128 GB、`8gpus` 佇列與 12 小時上限，即配置上限 **96 GPU-h**；CPU 準備及 B2 訓練期間也占用這八張卡。可用 `sbatch --time=HH:MM:SS .../train.slurm` 依量測調整上限。這是一次提交的配置上限，實際耗時及 SU 消耗未知；目前沒有此流程的 GPU 短測數據。
+
+供排程參考：以現有 seed2027 題組與快取唯讀估算，新棋局 H／C 各缺 **6,642 盤、1,481,462 個落子前位置**。若假設八卡負載均衡且能達舊實驗單卡吞吐，H 的 15 profiles 約需 **9.5–13.2 分鐘**，C 約需 **3.1–3.2 分鐘**。這只是歷史吞吐的算術外推，不含 SE3 補算、CPU 準備／訓練、I/O、各批 engine 啟動、編譯及排隊；本流程與舊實驗的設定不同，無法據此可靠預測總耗時或保證在 12 小時內完成。任務只產生模型與評估報表，不產生正式測試 CSV 或上傳。
+
+主 log 在 `outputs/slurm-se3-hc-b2-train-<job-id>.out`；八卡補算的各程序 log 在 run 目錄的 `slurm_logs/<job-id>/`。完整結果位於 `reports/final_newgames/result.json`，若開發 gate 停止則查看 `reports/dev_select/result.json`。若要自訂 config，可在提交時設定 `CONFIG` 環境變數；執行者不需先啟動其他作業。
 
 ## 執行順序
 
@@ -26,7 +42,7 @@ PYTHON_BIN="${HOME}/.conda/envs/go/bin/python"
 
 `prepare` 固定兩份各 80,000 道 synthetic fitting questions（每 k 20,000）、原 S-select／舊 U 及新 1,000 題 U_newgames，寫入 manifest／audit 後即可唯讀重用。題內同玩家、同色、不同棋局；U_newgames 排除 SE3 training、SE3 monitor 全棋局及 C 學習／監控棋局，與 B2 fit 玩家互斥。樣本不足、某 k 缺十類或玩家重疊會拒絕，沒有縮 k 或換 training 棋局的替代路徑。
 
-核准短測並取得配置後，先量測，不直接跑完整補算：
+若希望在正式任務前另外量測，可先執行：
 
 ```bash
 sbatch src/go_aicup/tasks/strength/SE_H_C_B2/slurm/benchmark.slurm
@@ -49,7 +65,7 @@ COMPONENT=se3 SCOPE=dev sbatch src/go_aicup/tasks/strength/SE_H_C_B2/slurm/extra
 
 模型從 S-fit＋S-extra 的 38,589 盤合成題目訓練；S-select 1,000 題選模。每 k 的 AdamW lr=0.001、weight_decay=0.0001、batch=512、最多 100 epochs／4,000 updates，cosine 至 0.00001，無 warmup。每 epoch 以該 k 官方得分選 best，並列保留較早 epoch，十次未提高早停。尾批保留；latest 保存 AdamW／scheduler／generator／shuffle order／cursor／best／patience，可精確接續已提交的進度。重跑相同命令即可續跑／重試最後模型發布。
 
-查看 `reports/dev_select/result.json`。若所有 k 退步且 Equal-k Δ≤0，停止擴大新 H／C 推論；保留失敗結果。程式將階段拆成明確命令，不會自動繼續耗用 GPU。
+查看 `reports/dev_select/result.json`。若所有 k 退步且 Equal-k Δ≤0，停止擴大新 H／C 推論；保留失敗結果。上述分步命令須自行啟動下一步；一次提交的訓練腳本會依 gate 自動繼續或停止。
 
 ### 最終重訓與主要評估
 
@@ -110,7 +126,7 @@ BASE_WORK=outputs/rank_test_ahc_<job-id>/rank \
 
 ```bash
 PYTHONPATH=src OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
-  "$PYTHON_BIN" -m pytest tests/test_se_h_c_b2.py tests/test_release_pipeline.py tests/test_reproduce_paper_3.py -q
+  "$PYTHON_BIN" -m pytest tests/test_se_h_c_b2.py tests/test_se_h_c_b2_slurm.py tests/test_release_pipeline.py tests/test_reproduce_paper_3.py -q
 ```
 
 涵蓋真實小型 SE3／黑白 pre-action encoder、逐位置 log_softmax／不同盤長均值、抽題與玩家／棋局邊界、不可變資料、凍結 BN buffers、NaN／缺類／錯欄／缺盤拒絕、AdamW／cosine／尾批／精確續跑、早停並列、最終固定 epoch、權重重載、配對 bootstrap、整題 fallback 與 sample 排序合併 CSV。測試只使用合成資料與 CPU；不載入官方權重做新推論，不模擬為 CUDA／KataGo 工程驗收。

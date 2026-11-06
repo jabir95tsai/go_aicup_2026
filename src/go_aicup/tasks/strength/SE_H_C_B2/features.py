@@ -132,7 +132,7 @@ def context(config, release=None):
     return metadata, cache, directory, identity
 
 
-def read_component(config, kind, *, release=None, ctx=None):
+def read_component(config, kind, *, release=None, ctx=None, include_extracted=True):
     metadata, cache, directory, identity = context(config, release) if ctx is None else ctx
     parts = []
     root = Path(config['paths']['human_root'])
@@ -150,7 +150,7 @@ def read_component(config, kind, *, release=None, ctx=None):
             parts.append(legacy_h(Path(release) / 'humansl', metadata))
         elif kind == 'c':
             parts.append(legacy_c(Path(release) / 'rankvec', metadata))
-    for path in sorted((directory / kind).glob('*.parquet')):
+    for path in sorted((directory / kind).glob('*.parquet')) if include_extracted else ():
         if not path.with_suffix('.json').exists():
             continue
         frame = load_table(path, dict(**identity, component=kind))
@@ -260,13 +260,15 @@ def extract(config, kind, scope='fit', *, release=None, shard=0, shards=1, limit
         ids = np.unique(np.concatenate([np.concatenate(questions(config, n).games) for n in names]))
     else:
         ids = metadata.game_index.to_numpy()
-    pending = metadata[metadata.game_index.isin(set(ids) - set(existing.index))].sort_values('game_index')
+    pending = metadata[metadata.game_index.isin(ids)].sort_values('game_index')
     if limit is not None:
+        baseline = read_component(config, kind, release=release, ctx=ctx, include_extracted=False)
+        pending = pending[~pending.game_index.isin(baseline.index)]
         # Round-robin shuffled rank/color cells, before distributing over workers.
         groups = ['rank_id', 'player_color'] if release is None else ['player_color']
         pending = pending.sample(frac=1, random_state=config['seed'])
         pending = pending.assign(_n=pending.groupby(groups).cumcount()).sort_values('_n').head(limit).drop(columns='_n')
-    pending = pending.iloc[shard::shards]
+    pending = pending[(pending.game_index % shards == shard) & ~pending.game_index.isin(existing.index)]
     paths = {k: Path(v) for k, v in config['paths'].items()}
     target = directory / kind
     target.mkdir(parents=True, exist_ok=True)

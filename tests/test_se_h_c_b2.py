@@ -314,7 +314,8 @@ def test_full_cpu_training_and_evaluation(experiment, monkeypatch):
     assert result['bootstrap']['intervals']['equal_k'] == [0., 0.]
 
 
-def test_selected_se3_extract_cpu_and_reuse(tmp_path, monkeypatch):
+@pytest.mark.parametrize('limit', [None, 2])
+def test_selected_se3_extract_cpu_and_reuse(tmp_path, monkeypatch, limit):
     lengths = [50, 61]
     moves = np.concatenate([np.arange(n) + 19 * 8 for n in lengths]).astype(np.int16)
     colors = np.concatenate([np.arange(n) % 2 for n in lengths]).astype(np.int8)
@@ -333,12 +334,15 @@ def test_selected_se3_extract_cpu_and_reuse(tmp_path, monkeypatch):
     monkeypatch.setattr(features, 'context', lambda *_: (metadata, cache, directory, identity))
     def read(config, kind, **kwargs):
         parts = []
-        for p in (directory / 'se3').glob('*.parquet'):
-            parts.append(common.load_table(p, dict(**identity, component='se3')).drop(columns='position_count'))
+        if kwargs.get('include_extracted', True):
+            for p in (directory / 'se3').glob('*.parquet'):
+                parts.append(common.load_table(p, dict(**identity, component='se3')).drop(columns='position_count'))
         return common.checked_features(features.merge_features(parts, common.S), common.S)
     monkeypatch.setattr(features, 'read_component', read)
-    result = features.extract(config, 'se3', release=tmp_path, device='cpu')
-    assert result['games'] == 2 and result['positions'] == 25
+    first = features.extract(config, 'se3', release=tmp_path, device='cpu', shard=0, shards=2, limit=limit)
+    second = features.extract(config, 'se3', release=tmp_path, device='cpu', shard=1, shards=2, limit=limit)
+    assert (first['games'], first['positions']) == (1, 10)
+    assert (second['games'], second['positions']) == (1, 15)
     frame = read(config, 'se3')
     assert frame.shape == (2, 10) and np.isfinite(frame.to_numpy()).all()
     assert features.extract(config, 'se3', release=tmp_path, device='cpu')['games'] == 0

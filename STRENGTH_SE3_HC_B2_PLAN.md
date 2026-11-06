@@ -222,6 +222,8 @@ SE3 延用 BF16、channels-last、batch=2240、無 D4／無 TF32；H／C 各自�
 
 ## 9. 執行順序與完成定義
 
+使用者要求一次提交後，已新增 `src/go_aicup/tasks/strength/SE_H_C_B2/slurm/train.slurm`，將以下 prepare、開發、gate、最終訓練與新棋局評估串成單一任務；開發 gate 不通過時保留報表並停止。預設 8 GPU、12 小時上限＝最多 96 GPU-h，包含 CPU 階段；實際耗時未測，仍以短測或現場記錄重估。各階段原子分片與 checkpoint 供重新提交時重用，操作見套件 README。
+
 1. 確認計畫後，先做獨立設定、metadata／模型身分 audit 與固定 synthetic／`U_newgames` 題組；本輪唯讀數字在執行時重驗。
 2. 實作最小特徵接線與合成驗收；既有產物與他人未提交變更保持原狀。
 3. 進行短推論、回報全量估時，確認後只補缺失特徵。
@@ -229,4 +231,4 @@ SE3 延用 BF16、channels-last、batch=2240、無 D4／無 TF32；H／C 各自�
 5. 固定各臂／各 k 的最佳 epoch，以全部 Valid-S 重擬合 scaler 並從零重訓分類頭，不再早停；一次評估固定 `U_newgames`，另附原 U 的受污染診斷及 bootstrap。
 6. 通過候選 gate 才產正式兩份候選、完整彩排、登記結果；未過亦保留報表與模型，不取代現行主線。
 
-實作完成後可依新目錄 README 逐步重建 frozen-feature B2、配對四桶結果與 CSV；GPU 階段刻意維持明確步驟，避免未回報估時就自動接續長作業。本次交付為程式與 CPU 合成驗收，不代表正式實驗已執行完成。新模型各 k 分數、融合增益、LB、純推論吞吐與完整 GPU 成本目前全部未知。
+實作完成後可依新目錄 README 逐步重建 frozen-feature B2、配對四桶結果與 CSV；訓練與評估也可由單一 Slurm 任務依開發 gate 自動接續，正式測試 CSV 仍使用獨立流程。CPU 合成驗收不代表正式實驗已執行完成；新模型各 k 分數、融合增益、LB、純推論吞吐與完整 GPU 成本目前全部未知。

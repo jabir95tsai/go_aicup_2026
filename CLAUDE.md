@@ -504,3 +504,7 @@ project/
 ### 2026-11-06：SE3＋H＋C＋B2 兩層分類頭實作
 
 使用者已核准實作，目錄依指定為 `src/go_aicup/tasks/strength/SE_H_C_B2/`（加號改為底線）。凍結 SE3／HumanSL／C，四個 k 各使用 `Linear(60,32) → ReLU → Linear(32,10)`，訓練 CE 接原始 logits、推論 Softmax＋score_rank；僅訓練分類頭與擬合 scaler。獨立設定、同色固定題組／來源稽核、凍結特徵重用與分片補算、CPU AdamW／cosine／逐 k 早停／續跑／固定 epoch 最終重訓、配對 bootstrap／報表、整題 AH＋C fallback、官方 Public／Private 合併 CSV 及套件內可追蹤 Slurm 已建立。計畫見 [STRENGTH_SE3_HC_B2_PLAN.md](STRENGTH_SE3_HC_B2_PLAN.md)，操作／驗證與成本限制見 [新目錄 README](src/go_aicup/tasks/strength/SE_H_C_B2/README.md)。CPU 合成與既有 release／SE3 回歸共 41 項通過（71.21 秒），來源／快取格式唯讀查核通過；未發布正式題組、啟動官方 GPU 推論、B2 正式訓練、提交作業或上傳。SE3 玩家重疊與 B2 in-sample 信心分布偏移限制保留，分 k 增益、LB、CUDA／KataGo 接線及完整成本未知；完整 GPU 作業前仍先回報短測估時。
+
+### 2026-11-06：SE3＋H＋C＋B2 單次提交訓練
+
+依使用者要求，新增可追蹤的 `src/go_aicup/tasks/strength/SE_H_C_B2/slurm/train.slurm`，一次提交依序執行 prepare、八卡開發 SE3 特徵、兩臂 B2 開發訓練／S-select、開發 gate，再視結果補算最終 SE3／H／C、最終兩臂訓練與 U_newgames 評估；gate 不通過時保留開發報表並結束。預設 8 卡／12 小時上限，即最多 96 GPU-h（含 CPU 階段）；實際總耗時與 SU 未知。修正特徵補算在多程序啟動時間不同時可能漏分片的問題，以固定 game_index 分配；含既有完整／限量分片及單一作業成功、gate 停止、worker 失敗的 21 項 CPU 測試通過。未提交 Slurm、執行 GPU 推論或正式訓練；歷史吞吐的局部估算與重跑限制見該目錄 README。
