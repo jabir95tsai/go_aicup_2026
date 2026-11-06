@@ -301,6 +301,15 @@ python scripts/plot_rank_v1.py --run-dir outputs/rank_cnn_v1_seed2027 --skip-con
 
 ## 提交管線（T1，2026-10-22）
 
+正式棋力測試集 AH＋C＋B2（2026-11-06）：
+
+```bash
+sbatch slurm/rank_ahc_predict.slurm
+```
+
+單節點八卡，沿用既有凍結模型，不重新擬合。預設讀 `data/raw/tests/`，中間結果放 `outputs/rank_test_ahc_<jobid>/`，輸出 `submissions/rank/submission_rank_ah_c_b2_<jobid>.csv`。Public／Private 合併 800 列，欄位 `question_id,pred_rank` 與 ID 順序照 sample；缺盤或 fallback 會停止，不發布提交檔。可在 `sbatch` 前設定 `RAW_DIR`、`WORK_DIR`、`SUBMISSION`。本次只交付腳本，完整八卡流程尚未驗收。
+
+
 官方 CSV → GameStore → 兩賽各自的模型 → 暫定格式提交檔。**提交格式要到 11/04 sample_submission 才知道**，目前寫的是暫定格式（競賽二 `question_id,rank`；競賽一 `question_id,prediction`，top-5 以空白分隔），屆時只改輸出那一段。
 
 ```bash

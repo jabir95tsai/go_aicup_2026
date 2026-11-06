@@ -141,7 +141,7 @@ H200 佇列限制**每張 GPU 最多 12 CPU 核心、200GB 主記憶體**；200G
 
 ## 1. 資料
 
-來源：日本棋院幽玄網站 19 路圍棋棋譜（已授權），2021–2023。官方發布：[AILAB-NDHU/aicup2026-go-dataset](https://github.com/AILAB-NDHU/aicup2026-go-dataset) Releases v1.0，`aicup2026_go_training.tar.xz`，SHA-256 `959ebc602b9638d665cb063a6269e0d5aef73956b77913e725763eb335ced94b`；解壓出的 `training/` 放到 `data/training/`。資料僅限本競賽使用。已匿名化——**移除姓名、段位、勝負、註解，只留棋盤設定與落子**；玩家代號不可回推身分。
+來源：日本棋院幽玄網站 19 路圍棋棋譜（已授權），2021–2023。官方發布：[AILAB-NDHU/aicup2026-go-dataset](https://github.com/AILAB-NDHU/aicup2026-go-dataset)。**2026-11-06 已更新為 [v1.1](https://github.com/AILAB-NDHU/aicup2026-go-dataset/releases/tag/v1.1)**，`aicup2026_go_training_v1.1.tar.xz`，SHA-256 `e0880a3e8723f776e931ecce7fbc09eace9a0dd42b18a1d8ebac4a1628d2395e`；解壓出的十份 CSV 位於 `data/raw/training/`，另有 `handicap.csv`／`handicap_manifest.json`。已全量確認移除新增 `HD[n]` 後與原始資料逐列相同；既有 processed／teacher 不重建，尚未將 HD 接入訓練特徵。舊 v1.0 壓縮檔 SHA-256 `959ebc602b9638d665cb063a6269e0d5aef73956b77913e725763eb335ced94b` 留作來源紀錄。資料僅限本競賽使用。已匿名化——**移除姓名、段位、勝負、註解，只留棋盤設定與落子**；玩家代號不可回推身分。
 
 **棋力 10 級（由弱至強，ordinal）：** `D < C < B < A < 1D < 2D < 3D < 4D < 5D < 6D` → 內部一律編碼為 `0..9`
 
@@ -149,7 +149,7 @@ H200 佇列限制**每張 GPU 最多 12 CPU 核心、200GB 主記憶體**；200G
 
 | 檔案 | 內容 | 規模 | 欄位 |
 |------|------|------|------|
-| `data/training/train_{D,C,B,A,1D..6D}.csv` | 訓練集（兩賽共用） | 共 1,000,000 盤；每級 100,000 盤；黑白各半；**8,007 位玩家** | `player_id, game_id, rank, color, sgf_content` |
+| `data/raw/training/train_{D,C,B,A,1D..6D}.csv` | 訓練集（兩賽共用，v1.1 含 HD） | 共 1,000,000 盤；每級 100,000 盤；黑白各半；**8,007 位玩家** | `player_id, game_id, rank, color, sgf_content` |
 | `player_identification_candidates_public.csv` | 競賽一 Public 候選庫 | 400 人 × 100 盤 = 40,000 盤，**全黑** | `game_id, player_id, sgf_content, color(=B)` |
 | `player_identification_candidates_private.csv` | 競賽一 Private 候選庫 | 同上，**另外 400 人** | 同上 |
 | `player_identification_test_public.csv` | 競賽一 Public 測試題 | 400 題 | `question_id, num_games, sgf_1..sgf_20, color_1..color_20(恆 B)` |
@@ -163,7 +163,7 @@ H200 佇列限制**每張 GPU 最多 12 CPU 核心、200GB 主記憶體**；200G
 
 ### 稽核已確認的事實（2026-09-24，見 `RESULTS.md` A-001）
 
-- **訓練集 SGF 僅有 `SZ[19]` 與落子。** 無讓子（`HA`）、貼目（`KM`）、日期（`DT`）、時間（`TM`/`OT`）、結果（`RE`）、軟體（`AP`）等 metadata，也沒有 AB/AW setup 石 → 棋力與風格訊號必須從落子序列與盤面推導；候選庫／測試集發布後仍須另行稽核
+- **v1.0 訓練集 SGF 僅有 `SZ[19]` 與落子（歷史結果）。** v1.1 新增 `HD[n]`，其餘內容相同；仍無 `HA`、`KM`、`AB/AW`。2026-11-06 稽核：訓練 HD=0／1／≥2 分別 792,610／170,969／36,421 盤；棋力 Public／Private 各 5,000 盤皆有 HD，且全部為 0／1。讓子表以 `(rank, game_id)` join，不能只用 game_id。`HD≥2` 的起始擺子、`HD=1` 的貼目意義未知，禁止直接補星位或改 teacher 貼目；分析、重跑方式與待確認實驗見 [HANDICAP_V11.md](HANDICAP_V11.md)。
 - **唯一鍵是 `(rank, game_id)`**，不是 `game_id`——1M 列只有 100,000 個 distinct `game_id`。只用 `game_id` join/去重會 10:1 靜默塌縮
 - **100 萬盤來自 8,007 位玩家，每人只屬於一個 rank**（跨 rank 玩家數為 0）→ 棋力標籤是玩家級屬性，評估跨玩家泛化時的獨立單位是玩家，不能把 100 萬盤當成獨立樣本；須留意模型記住玩家習慣而非學會棋力的風險
 - **各 rank 玩家數差 3.6 倍**（1D 僅 433 位、A 有 1,582 位）→ 少數 rank 極易被「記住玩家」而非「學會棋力」
@@ -225,7 +225,7 @@ H200 佇列限制**每張 GPU 最多 12 CPU 核心、200GB 主記憶體**；200G
 
 ### 本賽專屬
 - [ ] **SGF header 稽核**：parse 出所有 SGF property 並列表。特別檢查 `HA`(讓子)、`KM`(貼目)、`TM`/`OT`(時間)、`DT`(日期)、`AP`(軟體)、`SZ`、`RE`(結果，宣稱已移除)。
-      → **已稽核（2026-09-24）：train 側只有 `SZ`，`HA`/`KM`/`DT`/`AP`/`TM` 全數不存在，也沒有 AB/AW setup 石。L3 作廢。** 測試檔發布後仍要重跑一次確認 test 側也是純落手。
+      → **v1.0 歷史稽核（2026-09-24）只有 `SZ`；2026-11-06 已確認 v1.1 train 與棋力 Public／Private 都有 `HD`。** `HA`／`KM`／`AB/AW` 仍缺。L3 可重新評估；HD 尚未加入 feature policy 白名單或任何模型，須依 §9 先確認實驗。玩家辨識候選庫／測試檔本次未提供，HD 覆蓋未知。
 - [ ] **檔名 / `game_id` / `player_id` 不得成為特徵。** test 題目只有 `question_id`，這些欄位根本不存在 → 任何用到它們的 CV 分數都是假的。（已確認 `game_id` 在 10 個 rank 檔之間重複使用，唯一鍵是 `(rank, game_id)`。）
 - [ ] **玩家記憶 = 本賽的頭號過擬合風險（競賽二）。** rank 是玩家級屬性且 1D 只有 433 位玩家，模型很容易學成「這是玩家 X → X 是 1D」。測試玩家未見過就崩盤。對策：player-adversarial 頭（gradient reversal）或每批次每位玩家只取一盤，並嚴格用 player-disjoint 驗證。
 - [ ] **重複盤稽核**（合法且必做）：檢查測試題的 SGF 是否逐字出現在候選庫／訓練集；檢查 `player_id` 空間在 train 與兩個候選庫之間是否重疊。這不是作弊，是必要的資料理解。結果無論如何都要寫進 `RESULTS.md`。
@@ -350,8 +350,8 @@ project/
 ├── pyproject.toml             # 讓 go_aicup 可 import：pip install -e .
 ├── requirements.txt           # 鎖版本，報告要用
 ├── data/                      # 不進 git
-│   ├── training/              # 官方訓練集 train_*.csv
-│   ├── raw/                   # 其他官方原始檔（11/04 的候選庫、測試題）
+│   ├── raw/training/          # 官方 v1.1 train_*.csv 與擷取的 handicap.csv
+│   ├── raw/tests/             # 官方候選庫／測試題（依實際下載檔案）
 │   └── processed/             # SGF → int16 memmap + metadata parquet；cv/ 切分表；eda/
 ├── src/go_aicup/              # 可重用程式（import 用），兩人分工以子目錄為界
 │   ├── paths.py               # repo 路徑只在這裡算一次
@@ -499,3 +499,8 @@ project/
 十五位置改用獨立 `outputs/rank/reproduce_paper_3/se3_seed2026_15pos/`／`se3_smoke100_15pos_8gpu/`，保留舊三十／二十位置產物，不混用其 checkpoint／監控集合。二十位置 smoke job 692064 已完成八卡 100 步＋5,000 題監控，2.15 steps/s、allocated 峰值 42.55 GiB、監控 16.51s；四桶 0.1718／0.1685／0.1678／0.1577，Equal-k=0.1665，僅為歷史短測。十五位置 GPU 效能與分數未知；本次不提交 GPU 工作。現行規格及操作見 SE3 README／plan §13。
 
 十五位置版本 CPU／Gloo 回歸 20 項通過（47.81s），十五位置邊界、固定監控、worker 預取續跑與兩程序梯度／訓練／評估皆通過；兩份 config、Slurm 語法與三十／二十位置 smoke 保留檢查通過，未重跑 GPU。
+
+
+### 2026-11-06：SE3＋H＋C＋B2 兩層分類頭實作
+
+使用者已核准實作，目錄依指定為 `src/go_aicup/tasks/strength/SE_H_C_B2/`（加號改為底線）。凍結 SE3／HumanSL／C，四個 k 各使用 `Linear(60,32) → ReLU → Linear(32,10)`，訓練 CE 接原始 logits、推論 Softmax＋score_rank；僅訓練分類頭與擬合 scaler。獨立設定、同色固定題組／來源稽核、凍結特徵重用與分片補算、CPU AdamW／cosine／逐 k 早停／續跑／固定 epoch 最終重訓、配對 bootstrap／報表、整題 AH＋C fallback、官方 Public／Private 合併 CSV 及套件內可追蹤 Slurm 已建立。計畫見 [STRENGTH_SE3_HC_B2_PLAN.md](STRENGTH_SE3_HC_B2_PLAN.md)，操作／驗證與成本限制見 [新目錄 README](src/go_aicup/tasks/strength/SE_H_C_B2/README.md)。CPU 合成與既有 release／SE3 回歸共 41 項通過（71.21 秒），來源／快取格式唯讀查核通過；未發布正式題組、啟動官方 GPU 推論、B2 正式訓練、提交作業或上傳。SE3 玩家重疊與 B2 in-sample 信心分布偏移限制保留，分 k 增益、LB、CUDA／KataGo 接線及完整成本未知；完整 GPU 作業前仍先回報短測估時。

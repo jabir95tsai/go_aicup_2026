@@ -326,3 +326,49 @@ candidate100/query900 的官方分數 N=5／10／15／20：原 SE＝0.5784／0.6
 本次不提交 GPU 短測／正式訓練；十五位置的 GPU 顯存、吞吐、四桶成績與長程收斂均未知。現行規格見 [SE3 plan §13](src/go_aicup/tasks/strength/reproduce_paper_3/plan.md)，操作見 [README](src/go_aicup/tasks/strength/reproduce_paper_3/README.md)。
 
 十五位置版本 CPU／Gloo 合成回歸 **20 項通過（47.81s）**，涵蓋十五位置抽樣與固定監控、十四位置拒絕、舊七／二十／三十位置設定與模型 shape 拒絕、spawn 預取精確續跑、全域 loss／梯度與兩程序訓練／評估；config、Slurm 語法及舊短測產物保留檢查通過。未提交 GPU 作業。
+
+## 2026-11-06：官方 v1.1 讓子資料更新與稽核
+
+已核對[官方 release](https://github.com/AILAB-NDHU/aicup2026-go-dataset/releases/tag/v1.1) 壓縮檔 SHA-256 `e0880a3e8723f776e931ecce7fbc09eace9a0dd42b18a1d8ebac4a1628d2395e`，更新 `data/raw/training/train_*.csv` 並擷取 `handicap.csv`（1,000,000 列）及 `handicap_manifest.json`。全量逐列比對確認移除 root `HD[n]` 後內容與 v1.0 相同；sidecar 的 `(rank, game_id)`、player_id、color、source_row 與現有 SE prepared 全部對齊。共用 SGF 嚴格 parser 已相容可選 HD，未新增 setup 石或模型特徵；既有 processed／teacher／checkpoint 未修改。
+
+訓練 HD=0／1／≥2 為 **792,610／170,969／36,421**；棋力 Public／Private 各 5,000 盤全部有 HD，且僅有 0／1，HD=1 為 **1,155／1,125** 盤。各級 HD≥2 比例介於 B 的 1.320% 與 6D 的 8.317%。既有 SE3 預測只做分層診斷，沒有擬合或改預測：
+
+| k | 全部 HD≤1 題數／得分 | 含 HD≥2 題數／得分 |
+|---|---|---|
+| 5 | 2,233／0.579656 | 267／0.533020 |
+| 10 | 2,161／0.623552 | 339／0.632477 |
+| 15 | 2,169／0.630277 | 331／0.617067 |
+| 20 | 2,074／0.663429 | 426／0.687466 |
+
+組間玩家／rank 分布不同，且沒有四桶一致退步，不能推論刪除 HD≥2 一定有益。建議先以既有 log-prob 做按玩家切分的 HD＋執色 CPU 校正（0 GPU-h），再測 training 抽樣只保留 HD≤1（770,832 盤）；皆尚待確認，增益未知，不改現行 SE3 run。完整分布、產物、重跑命令、gate 與未知語意見 [HANDICAP_V11.md](HANDICAP_V11.md)；機器報告位於 `outputs/rank_handicap_audit_v11/`。未重訓、重建快取、生成 teacher 或上傳。
+
+驗證：SGF／盤面轉換、preprocess／release、擷取與 board cache CPU 回歸 **84 項通過（15.01s）**，`git diff --check` 通過。官方全量執行的範圍為下載、解壓、原始列比對與 metadata 對齊，沒有執行全量盤面重播或 GPU 工作。
+
+
+## 2026-11-06：AH＋C＋B2 正式棋力測試集推論
+
+依使用者要求，沿用現有凍結的 A-024 V2、HumanSL 15 profiles、C 級別向量與 Valid-S 擬合的 B2；明確指定搬移後的 `outputs/rank/v2/`、`outputs/rank/humansl/` 模型路徑，未重新訓練或擬合。既有程式入口為 `go_aicup.data.preprocess`、`go_aicup.tasks.strength.v2.predict`、`go_aicup.features.humansl`、`go_aicup.features.humansl_rankvec`、`go_aicup.tasks.strength.humansl_predict.aggregate`。
+
+正式 sample 已確認：Public／Private 各 400 題合併為 **800 列、`question_id,pred_rank`**，ID 與順序完全照 `data/raw/tests/sample_submission_rank.csv`。本次輸出目標為 `submissions/rank/submission_rank_ah_c_b2_20261106.csv`；執行與格式驗證指令位於 `outputs/rank_release_20261106/{run.sh,audit.py,finish.py}`，記錄與來源 SHA-256 見 `input_audit.json`、`jobs.txt`。原提交流程仍輸出暫定欄位，本次在最後匯出時依 sample 轉換與合併，不修改模型預測。
+
+前處理稽核：兩份各 **5,000 盤**，k=5／10／15／20 各 **100 題**；解析錯誤、pass、非交替均為 **0**，皆僅有 `HD,SZ`。Public／Private 共 2,222,151 手；各自盤內重複、兩份交集、與原始訓練全盤落子 hash 交集皆為 **0**。沿用既有方法，不把 HD 加入特徵、不改日本規則／貼目 6.5。
+
+| tag／狀態 | k=5 本地參考 | k=10 | k=15 | k=20 | Equal-k | 預期 LB／假設 |
+|---|---|---|---|---|---|---|
+| AH_C_B2_20261106；等待使用者自行提交 | 0.6244 | 0.6977 | 0.7303 | 0.7213 | 0.6934 | LB 未知；沿用 A-055／A-056 正式模型測試真實資料轉移 |
+
+使用者後續要求「編寫 slurm 讓我丟任務就好」，已停止本次未完成的提交，未重新提交。prep **713340**、V2 **713341** 已完成；八卡特徵 **713342** 因同節點執行緒不足而停止，合併驗證 **713346** 隨依賴取消，沒有產出最終 submission。目前排程中沒有本次作業。已完成的前處理／V2 與失敗日誌保留在 `outputs/rank_release_20261106/`。重提交通訊曾回報 `get_api_token` 錯誤；查核後無新增作業。
+
+交付入口：`sbatch slurm/rank_ahc_predict.slurm`（單節點八卡、96 CPU、800GB RAM、時限 90 分鐘；此檔依既有 Git 規則忽略）。沿用上述模型與特徵程式，八個分片使用各自 GPU；引擎 analysis threads 改 64，BLAS／OMP／編譯各限制一個執行緒，以避開同節點 2,048-thread 上限，尚未重跑 GPU 驗收。預設 work 為 `outputs/rank_test_ahc_<jobid>/`，最終檔為 `submissions/rank/submission_rank_ah_c_b2_<jobid>.csv`。可於提交前設定 `WORK_DIR=outputs/rank_release_20261106` 重用本次已完成的前處理／V2，H／C 仍會重算。
+
+新增 `scripts/export_rank_submission.py` 只負責最終合併，要求全部題目都有完整 AH＋C 特徵、無 fallback、機率有限且歸一、段位合法、ID／順序／欄位與 sample 一致，通過後才原子發布 CSV。小型 CPU 匯出邊界測試 **6 項通過（0.50s）**，包含 sample 排序、重複／缺題 ID、非法段位、缺盤、fallback 與非有限機率；`bash -n` 與 `git diff --check` 通過。沒有上傳；完整八卡流程尚未完成驗收，上述分數僅為既有 Valid-U 本地成績，並非正式測試得分。
+
+## 2026-11-06：SE3＋H＋C＋B2 兩層分類頭實作與 CPU 驗收
+
+使用者核准後完成獨立實驗，實作目錄依指定為 `src/go_aicup/tasks/strength/SE_H_C_B2/`（加號改為底線）。四個 k 各使用 `Linear(60,32) → ReLU → Linear(32,10)`，原始 logits 接 CE、推論 Softmax＋score_rank；SE3／H／C 凍結。已建立設定、同色固定題組與來源檢查、舊特徵重用／缺失分片補算、CPU AdamW／cosine／早停／精確續跑／固定 epoch 最終重訓、配對玩家 bootstrap、逐題／分 k／各級／confusion 報表、完整 AH＋C 整題 fallback、官方 Public／Private 合併 CSV 及套件內三份可追蹤 Slurm。操作見 [README](src/go_aicup/tasks/strength/SE_H_C_B2/README.md)，完整設計見 [計畫](STRENGTH_SE3_HC_B2_PLAN.md)。
+
+**驗收：** `tests/test_se_h_c_b2.py`（17 項）＋`tests/test_release_pipeline.py`（4 項）＋`tests/test_reproduce_paper_3.py`（20 項），**41 項通過，71.21 秒**。全為 CPU／合成資料，既有 SE3 測試含兩程序 Gloo；涵蓋兩層架構／CE、同色抽題／玩家與棋局邊界、來源／缺類／NaN／欄位拒絕、尾批／LR／patience／最終固定 epoch、逐步續跑完全一致、BN buffers 凍結、小型真實 SE3 黑白 pre-action 推論與平均、C 本人／對手順序及失敗略過後整題 fallback、分片未完成重試／損壞拒絕、權重重載、bootstrap 及 sample 排序的合併 CSV。三份 launcher 的 `bash -n`、CLI help 與 `git diff --check` 通過。
+
+**既有來源唯讀查核：** 固定模型 SHA-256 全部符合，SE3 有 200,000 盤、A 有 248,411 盤、H／C 各 76,989 盤快取可讀。真實 metadata 的開發／最終擬合池為 38,589／65,223 盤；新評估池 16,439 盤、673 位玩家。在記憶體驗證 seed2027 可生成 1,000 題、每 k 250 題，引用 7,292 盤不同棋局；這不是已發布的正式題組。
+
+**未執行：** 正式 prepare／題組發布、官方 GPU 補算、B2 正式訓練、Slurm 提交與上傳。CUDA／KataGo 實際接線與吞吐、正式四桶增益、LB 與完整 GPU 成本未知；GPU 短測與全量工作另先回報估時。SE3 已見評估玩家的其他棋局，B2 擬合亦有上游 in-sample 信心偏移，不能據此宣稱 unseen-player 泛化。既有模型、棋盤／teacher 與其他工作區修改保留。

@@ -1,0 +1,42 @@
+{
+  "seed": 2027,
+  "synthetic_per_k": 20000,
+  "evaluation_per_cell": 25,
+  "bootstrap": 2000,
+  "paths": {
+    "output": "outputs/rank/se3_hc_b2/se3_30k_mlp32_seed2027",
+    "dataset": "data/processed/reproduce_paper/seed2026",
+    "cache": "data/processed/boards/strength_v1",
+    "se3_model": "outputs/rank/reproduce_paper_3/se3_seed2026_15pos/model.pt",
+    "se3_evaluation": "outputs/rank/reproduce_paper_3/se3_seed2026_15pos/evaluation",
+    "se3_monitor": "outputs/rank/reproduce_paper_3/se3_seed2026_15pos/monitor/positions.npz",
+    "human_root": "outputs/rank/humansl",
+    "a_model": "outputs/rank/v2/v2_strength/model.pt",
+    "a_run": "outputs/rank/v2/v2_strength",
+    "vectors": "outputs/rank/humansl/humansl_rankvec/vectors.pt",
+    "human_model": "data/external/humansl-v0/b18c384nbt-humanv0.bin.gz",
+    "human_checkpoint": "data/external/humansl-v0/b18c384nbt-humanv0.ckpt",
+    "engine": "data/external/katago-v1.18.2/katago",
+    "analysis_config": "configs/strength/humansl_analysis.cfg"
+  },
+  "expected_sha256": {
+    "se3_model": "74c65097c53d85897c8e4239e910415eec1b8f3b474945b1d3357925a95a8cd0",
+    "a_model": "5b9f4bade366b8d770db0507f13c96c6a94ab9abd83d4ca62216ad258619a3d9",
+    "vectors": "a9c5b4586f8409054d6919ce0ed659feac05b383d30cacedef96a99fadc85886"
+  },
+  "training": {
+    "epochs": 100,
+    "batch_size": 512,
+    "lr": 0.001,
+    "min_lr": 1e-05,
+    "weight_decay": 0.0001,
+    "patience": 10,
+    "threads": 1
+  },
+  "inference": {
+    "batch_size": 2240,
+    "games_per_shard": 64,
+    "workers": 8,
+    "device": "cuda"
+  }
+}
