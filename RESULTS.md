@@ -399,3 +399,14 @@ candidate100/query900 的官方分數 N=5／10／15／20：原 SE＝0.5784／0.6
 新增 `src/go_aicup/tasks/strength/SE_H_C_B2/slurm/train.slurm`，一次提交串接準備、八卡特徵補算、兩臂開發／gate、最終訓練與新棋局評估；gate 不通過時保留開發結果並停止。預設 8 卡、12 小時上限＝最多 96 GPU-h，CPU 階段也占用 GPU；實際耗時、SU 與 CUDA 接線未知。唯讀查核既有 A 特徵涵蓋全部 65,223 盤最終擬合池與 16,439 盤新棋局評估池；固定新題組 H／C 各缺 6,642 盤、1,481,462 個位置。依舊實驗單卡吞吐、假設八卡均衡算術外推，H 約 9.5–13.2 分鐘、C 約 3.1–3.2 分鐘；不含 SE3、CPU、啟動／編譯、I/O、排隊與環境差異，不能視為總耗時估計。
 
 補算程序原先在各 worker 啟動期間快取變化可能造成分片遺漏，已改按 `game_index % shards` 固定歸屬，限量抽樣從固定舊快取基準選擇。`tests/test_se_h_c_b2.py` 與新 `tests/test_se_h_c_b2_slurm.py` 共 **21 項通過（9.58 秒）**，涵蓋串行模擬快取增長、完整與限量補算、單一作業正常完成、gate 停止與 worker 失敗；`bash -n` 與 `git diff --check` 通過。未提交 Slurm、執行 GPU 推論或正式訓練。
+
+## 2026-11-06：SE3＋H＋C＋B2 dev／final 測試集候選
+
+依使用者要求，以 job **715640** 在 8×H200 共用一次 SE3 測試特徵，沿用 `outputs/rank_test_ahc_713770/rank/` 既有 H／C 分片；來源與棋局 metadata 經既有程式檢查。Public／Private 各 5,000 盤、400 題，兩模型均無 fallback。作業 COMPLETED、耗時 75 秒（配置約 0.167 GPU-h，不含排隊；SU 未知）。兩份 CSV 均以官方 sample 順序輸出 800 題，欄位、ID、機率與解碼經既有匯出驗證；dev 載入 dev 權重後共用同一完整題目檢查，來源與產物見 `outputs/rank/se3_hc_b2/test_713770/`，final 逐題結果位於既有 release 工作目錄。
+
+| 候選／等待使用者自行上傳 | k=5 本地參考 | k=10 | k=15 | k=20 | Equal-k | 預期 LB／假設 |
+|---|---:|---:|---:|---:|---:|---|
+| `submissions/rank/submission_rank_se3_hc_b2_dev_713770.csv` | 0.7006 | 0.8175 | 0.8165 | 0.7836 | 0.7796 | 未知；S-select 用於選模，非獨立成績 |
+| `submissions/rank/submission_rank_se3_hc_b2_final_713770.csv` | 0.5947 | 0.6326 | 0.7089 | 0.6888 | 0.6562 | 未知；U_newgames，SE3 玩家重疊，測試集轉移未知 |
+
+final 在 U_newgames 的候選 gate 未通過，對照 AH＋C 的 k=5／10／15／20 差異為 −0.0006／−0.0474／+0.0596／−0.0082，Equal-k +0.0008；不可將其視為已驗證優於對照。兩模型本地分數來自不同題組，不可直接比較。未上傳。
