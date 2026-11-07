@@ -26,7 +26,10 @@ AH+C vs AH+C plus [HD1 & player black, HD1 & player white]; HD is part of the
 test SGF, so it is an input, not a leak. fit_hd01 saves the P1 hd01 arm (seed
 2027) as an LB-probe model in the production pickle format.
 
-    python scripts/humansl_hd_filter.py p1 | p2 | fit_hd01
+P12 combines both changes (HD<=1 fitting games plus the HD1 columns) against the
+production setup, same sets, gate and seeds.
+
+    python scripts/humansl_hd_filter.py p1 | p2 | p12 | fit_hd01
 """
 from __future__ import annotations
 
@@ -205,6 +208,19 @@ def p2() -> None:
     compare(fit, eval_games, sets, arms, "hd1feat", result, "result_p2.json")
 
 
+def p12() -> None:
+    """P1+P2: Valid-S HD<=1 games and the two HD1 columns vs the production setup."""
+    games, fit, eval_games, x_fit, x_eval = setup()
+    sets = question_sets(games, rebuild=False)
+    hd01 = (fit["handicap"] <= 1).to_numpy()
+    arms = {"all": (np.ones(len(fit), bool), x_fit, x_eval),
+            "hd01_hd1feat": (hd01, np.hstack([x_fit, hd1_columns(fit)]), np.hstack([x_eval, hd1_columns(eval_games)]))}
+    result = {"fit_games": {"all": int(len(fit)), "hd01_hd1feat": int(hd01.sum())},
+              "questions": {name: {str(b): int((q["k"] == b).sum()) for b in K_BUCKETS} for name, q in sets.items()},
+              "seeds": {}}
+    compare(fit, eval_games, sets, arms, "hd01_hd1feat", result, "result_p12.json")
+
+
 def fit_hd01() -> None:
     """LB-probe model: the P1 hd01 arm at seed 2027 (production columns and format)."""
     games, fit, eval_games, x_fit, x_eval = setup()
@@ -226,8 +242,8 @@ def fit_hd01() -> None:
 def main() -> int:
     import argparse
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("command", choices=("p1", "p2", "fit_hd01"))
-    {"p1": p1, "p2": p2, "fit_hd01": fit_hd01}[parser.parse_args().command]()
+    parser.add_argument("command", choices=("p1", "p2", "p12", "fit_hd01"))
+    {"p1": p1, "p2": p2, "p12": p12, "fit_hd01": fit_hd01}[parser.parse_args().command]()
     return 0
 
 
