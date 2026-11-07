@@ -29,7 +29,10 @@ test SGF, so it is an input, not a leak. fit_hd01 saves the P1 hd01 arm (seed
 P12 combines both changes (HD<=1 fitting games plus the HD1 columns) against the
 production setup, same sets, gate and seeds.
 
-    python scripts/humansl_hd_filter.py p1 | p2 | p12 | fit_hd01
+fit_p12 saves the P1+P2 arm (seed 2027) as a submission model; aggregate it with
+humansl_predict aggregate --raw-csv <official question CSV>.
+
+    python scripts/humansl_hd_filter.py p1 | p2 | p12 | fit_hd01 | fit_p12
 """
 from __future__ import annotations
 
@@ -239,11 +242,32 @@ def fit_hd01() -> None:
     print(f"saved {OUT / 'model_hd01.pkl'}")
 
 
+def fit_p12() -> None:
+    """Submission model: the P1+P2 arm at seed 2027; columns = production + HD1 flags."""
+    from go_aicup.tasks.strength.humansl_predict import HD1_COLUMNS
+    games, fit, eval_games, x_fit, x_eval = setup()
+    hd01 = (fit["handicap"] <= 1).to_numpy()
+    with PRODUCTION.open("rb") as handle:
+        info = pickle.load(handle)["info"]
+    hs.SEED = SEED
+    model = RankModel("B2").fit(fit[hd01].reset_index(drop=True), pd.DataFrame(),
+                                np.hstack([x_fit, hd1_columns(fit)])[hd01])
+    e2 = pd.read_parquet(OUT / "questions_e2_hd01.parquet")
+    score = by_k(predict(model, eval_games, np.hstack([x_eval, hd1_columns(eval_games)]), e2), e2["k"].to_numpy())
+    print("P1+P2 model on E2", score, flush=True)
+    model.save(OUT / "model_p12.pkl", method="B2", columns=info["columns"] + HD1_COLUMNS, fit_games=int(hd01.sum()),
+               fit_players=int(fit.loc[hd01, "player_id"].nunique()),
+               fit_rule="Valid-S games with HD<=1, plus HD1 flags by player colour (P1+P2)",
+               a024_run=str(A024), features=str(STANDARD), seed=SEED, e2=score,
+               rankvec_vectors=info.get("rankvec_vectors"))
+    print(f"saved {OUT / 'model_p12.pkl'}")
+
+
 def main() -> int:
     import argparse
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("command", choices=("p1", "p2", "p12", "fit_hd01"))
-    {"p1": p1, "p2": p2, "p12": p12, "fit_hd01": fit_hd01}[parser.parse_args().command]()
+    parser.add_argument("command", choices=("p1", "p2", "p12", "fit_hd01", "fit_p12"))
+    {"p1": p1, "p2": p2, "p12": p12, "fit_hd01": fit_hd01, "fit_p12": fit_p12}[parser.parse_args().command]()
     return 0
 
 
