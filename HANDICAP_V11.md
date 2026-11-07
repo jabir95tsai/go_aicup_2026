@@ -102,6 +102,8 @@ SE3 現有預測分層如下。這是同一模型的事後診斷，兩組玩家�
 
 **P1 結果（2026-11-07，Slurm 721980）：gate 未通過。** E2 Equal-k 0.7150→0.7225（+0.0075；五個抽樣 seed +0.0075～+0.0102），k=15／20 約 +0.02，但 k=5 −0.0115，bootstrap [−0.0037, +0.0191]。列 LB 探針候選；細節見 RESULTS.md。E2（`outputs/rank/humansl/hd_filter/questions_e2_hd01.parquet`）作為之後 HD 相關比較的評估題組。
 
+**P2 結果（2026-11-07，Slurm 722045）：gate 差 0.0004 未通過。** E2 0.7150→0.7196（+0.0046；五個 seed +0.0042～+0.0085），各 k 不退步，k=5 每個 seed 都為正，與 P1 互補。P1 hd01 臂已輸出探針提交檔 `submissions/rank/submission_rank_ah_c_b2_hd01_722045.csv`。
+
 建議順序 P1→P2→P3：P1 同時決定之後比較所用的驗證題。上方 11/06 提案 2（訓練只留 HD≤1）與 P1 方向相同，現在有了機制依據。另一個做法是依 Q13 修正 HD≥2 的顏色與讓子石後重建盤面；但測試題沒有 HD≥2，對棋力賽的效益預期低於直接排除。
 
 驗證：`PYTHONPATH=src python -m pytest -q tests/test_sgf_planes.py tests/test_foundation.py tests/test_release_pipeline.py tests/test_training_handicap.py tests/test_board_cache.py`，**84 項通過（15.01s）**。未重新重播官方全部盤面，也未啟動 GPU 工作。

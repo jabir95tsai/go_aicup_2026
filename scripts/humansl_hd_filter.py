@@ -21,7 +21,12 @@ Pre-registered gate (HANDICAP_V11.md): on E2, Equal-k(hd01) - Equal-k(all)
 an interval spanning zero only makes a candidate. B2 draws synthetic questions
 at random, so both arms are also refitted with 5 synthetic seeds to show that noise.
 
-    python scripts/humansl_hd_filter.py
+P2 (same sets, gate and seeds; E2 is read back, not rebuilt): every Valid-S game,
+AH+C vs AH+C plus [HD1 & player black, HD1 & player white]; HD is part of the
+test SGF, so it is an input, not a leak. fit_hd01 saves the P1 hd01 arm (seed
+2027) as an LB-probe model in the production pickle format.
+
+    python scripts/humansl_hd_filter.py p1 | p2 | fit_hd01
 """
 from __future__ import annotations
 
@@ -109,46 +114,52 @@ def bootstrap(a, b, questions) -> list[float]:
     return [round(float(q), 4) for q in np.quantile(draws, [0.025, 0.975])]
 
 
-def main() -> int:
+def hd1_columns(games: pd.DataFrame) -> np.ndarray:
+    """P2: per game [HD1 and player black, HD1 and player white]; a question mean is
+    the HD1 share on the player's colour (questions are single-colour)."""
+    hd1 = (games["handicap"] == 1).to_numpy()
+    black = (games["player_color"] == 0).to_numpy()
+    return np.stack([hd1 & black, hd1 & ~black], axis=1).astype(float)
+
+
+def setup():
     games, x = load_games()
     fit_rows = np.flatnonzero(games["role"] == "S")
     eval_rows = np.flatnonzero(games["role"] == "U")
     fit, eval_games = games.iloc[fit_rows].reset_index(drop=True), games.iloc[eval_rows].reset_index(drop=True)
-    x_fit, x_eval = x[fit_rows], x[eval_rows]
-    hd01 = (fit["handicap"] <= 1).to_numpy()
+    return games, fit, eval_games, x[fit_rows], x[eval_rows]
 
+
+def question_sets(games: pd.DataFrame, rebuild: bool) -> dict:
     hd = games.set_index("game_index")["handicap"]
     e1 = pd.read_parquet(Q1000)
     e1 = e1[e1["role"] == "U"].reset_index(drop=True)
     e1_clean = e1[e1["games"].map(lambda g: bool((hd.loc[list(g)] <= 1).all()))].reset_index(drop=True)
-    e2 = build_e2(games)
-    OUT.mkdir(parents=True, exist_ok=True)
-    e2.to_parquet(OUT / "questions_e2_hd01.parquet")
-    sets = {"E1": e1, "E1_hd01": e1_clean, "E2": e2}
+    if rebuild:
+        e2 = build_e2(games)
+        OUT.mkdir(parents=True, exist_ok=True)
+        e2.to_parquet(OUT / "questions_e2_hd01.parquet")
+    else:
+        e2 = pd.read_parquet(OUT / "questions_e2_hd01.parquet")
+    return {"E1": e1, "E1_hd01": e1_clean, "E2": e2}
 
-    with PRODUCTION.open("rb") as handle:
-        production = pickle.load(handle)["model"]
-    check = by_k(predict(production, eval_games, x_eval, e1), e1["k"].to_numpy())
-    print("production model on E1", check, flush=True)
 
-    result = {"fit_games": {"all": int(len(fit)), "hd01": int(hd01.sum())},
-              "fit_players": {"all": int(fit["player_id"].nunique()), "hd01": int(fit.loc[hd01, "player_id"].nunique())},
-              "questions": {name: {str(b): int((q["k"] == b).sum()) for b in K_BUCKETS} for name, q in sets.items()},
-              "production_on_E1": check, "seeds": {}}
+def compare(fit, eval_games, sets, arms: dict, treatment: str, result: dict, out_name: str) -> None:
+    """arms: name -> (fit row mask, x_fit, x_eval); 'all' is the reference arm."""
     for seed in SEEDS:
         hs.SEED = seed  # B2 synthetic-question draws; everything else is unchanged
-        models = {"all": RankModel("B2").fit(fit, pd.DataFrame(), x_fit),
-                  "hd01": RankModel("B2").fit(fit[hd01].reset_index(drop=True), pd.DataFrame(), x_fit[hd01])}
+        models = {arm: (RankModel("B2").fit(fit[mask].reset_index(drop=True), pd.DataFrame(), x_fit[mask]), x_eval)
+                  for arm, (mask, x_fit, x_eval) in arms.items()}
         entry = {}
         for name, q in sets.items():
             k = q["k"].to_numpy()
-            scores = {arm: predict(m, eval_games, x_eval, q) for arm, m in models.items()}
+            scores = {arm: predict(m, eval_games, x_eval, q) for arm, (m, x_eval) in models.items()}
             entry[name] = {arm: by_k(s, k) for arm, s in scores.items()}
-            entry[name]["diff_by_k"] = {str(b): round(float(scores["hd01"][k == b].mean() - scores["all"][k == b].mean()), 4)
+            entry[name]["diff_by_k"] = {str(b): round(float(scores[treatment][k == b].mean() - scores["all"][k == b].mean()), 4)
                                        for b in K_BUCKETS}
-            entry[name]["diff_equal_k"] = round(equal_k(scores["hd01"], k) - equal_k(scores["all"], k), 4)
+            entry[name]["diff_equal_k"] = round(equal_k(scores[treatment], k) - equal_k(scores["all"], k), 4)
             if seed == SEED:
-                entry[name]["bootstrap_95"] = bootstrap(scores["all"], scores["hd01"], q)
+                entry[name]["bootstrap_95"] = bootstrap(scores["all"], scores[treatment], q)
         result["seeds"][str(seed)] = entry
         print(seed, json.dumps({n: (e["diff_equal_k"], e["diff_by_k"]) for n, e in entry.items()}), flush=True)
 
@@ -159,7 +170,64 @@ def main() -> int:
                       "mean_diff_equal_k_over_seeds": round(mean_diff, 4),
                       "pass": bool(primary["diff_equal_k"] >= MIN_GAIN and min(primary["diff_by_k"].values()) >= -MAX_DROP)}
     print(json.dumps(result["gate"]))
-    (OUT / "result.json").write_text(json.dumps(result, indent=1))
+    (OUT / out_name).write_text(json.dumps(result, indent=1))
+
+
+def p1() -> None:
+    games, fit, eval_games, x_fit, x_eval = setup()
+    hd01 = (fit["handicap"] <= 1).to_numpy()
+    sets = question_sets(games, rebuild=True)
+    with PRODUCTION.open("rb") as handle:
+        production = pickle.load(handle)["model"]
+    check = by_k(predict(production, eval_games, x_eval, sets["E1"]), sets["E1"]["k"].to_numpy())
+    print("production model on E1", check, flush=True)
+    result = {"fit_games": {"all": int(len(fit)), "hd01": int(hd01.sum())},
+              "fit_players": {"all": int(fit["player_id"].nunique()), "hd01": int(fit.loc[hd01, "player_id"].nunique())},
+              "questions": {name: {str(b): int((q["k"] == b).sum()) for b in K_BUCKETS} for name, q in sets.items()},
+              "production_on_E1": check, "seeds": {}}
+    every = np.ones(len(fit), bool)
+    compare(fit, eval_games, sets, {"all": (every, x_fit, x_eval), "hd01": (hd01, x_fit, x_eval)}, "hd01",
+            result, "result.json")
+
+
+def p2() -> None:
+    """P2: all Valid-S games; AH+C vs AH+C + the two HD1 columns."""
+    games, fit, eval_games, x_fit, x_eval = setup()
+    sets = question_sets(games, rebuild=False)
+    every = np.ones(len(fit), bool)
+    arms = {"all": (every, x_fit, x_eval),
+            "hd1feat": (every, np.hstack([x_fit, hd1_columns(fit)]), np.hstack([x_eval, hd1_columns(eval_games)]))}
+    share = {f"{role}_{c}": round(float(v), 4) for role, frame in (("S", fit), ("U", eval_games))
+             for c, v in zip(("hd1_black", "hd1_white"), hd1_columns(frame).mean(axis=0))}
+    result = {"fit_games": int(len(fit)), "hd1_share": share,
+              "questions": {name: {str(b): int((q["k"] == b).sum()) for b in K_BUCKETS} for name, q in sets.items()},
+              "seeds": {}}
+    compare(fit, eval_games, sets, arms, "hd1feat", result, "result_p2.json")
+
+
+def fit_hd01() -> None:
+    """LB-probe model: the P1 hd01 arm at seed 2027 (production columns and format)."""
+    games, fit, eval_games, x_fit, x_eval = setup()
+    hd01 = (fit["handicap"] <= 1).to_numpy()
+    with PRODUCTION.open("rb") as handle:
+        info = pickle.load(handle)["info"]
+    hs.SEED = SEED
+    model = RankModel("B2").fit(fit[hd01].reset_index(drop=True), pd.DataFrame(), x_fit[hd01])
+    e2 = pd.read_parquet(OUT / "questions_e2_hd01.parquet")
+    score = by_k(predict(model, eval_games, x_eval, e2), e2["k"].to_numpy())
+    print("hd01 model on E2", score, flush=True)
+    model.save(OUT / "model_hd01.pkl", method="B2", columns=info["columns"], fit_games=int(hd01.sum()),
+               fit_players=int(fit.loc[hd01, "player_id"].nunique()), fit_rule="Valid-S games with HD<=1 (P1)",
+               a024_run=str(A024), features=str(STANDARD), seed=SEED, e2=score,
+               rankvec_vectors=info.get("rankvec_vectors"))
+    print(f"saved {OUT / 'model_hd01.pkl'}")
+
+
+def main() -> int:
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("command", choices=("p1", "p2", "fit_hd01"))
+    {"p1": p1, "p2": p2, "fit_hd01": fit_hd01}[parser.parse_args().command]()
     return 0
 
 
