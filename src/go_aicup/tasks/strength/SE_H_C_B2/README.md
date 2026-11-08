@@ -115,7 +115,7 @@ BASE_WORK=outputs/rank_test_ahc_<job-id>/rank \
 # Private 做同樣流程後：
 "$PYTHON_BIN" -m go_aicup.tasks.strength.SE_H_C_B2 export --work-root "$BASE_WORK" \
   --sample data/raw/tests/sample_submission_rank.csv \
-  --output submissions/rank/submission_rank_se3_hc_b2.csv
+  --output submissions/rank/se3hc_rank.csv
 ```
 
 官方要求 Public＋Private 合併成一份 **800 列**，欄位 **question_id,pred_rank**。export 驗證兩邊使用相同新模型、posterior／rank 一致、ID 與 sample 完全相等，依 sample 順序原子輸出 CRLF CSV。只有使用者手動上傳；正式產檔後另在 RESULTS 登記本地四桶、fallback 與預期 LB（未知）。

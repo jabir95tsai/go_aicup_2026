@@ -244,7 +244,7 @@ def _monitor_games(run: Path, model, vectors, data, monitor) -> dict:
 
 
 def extract(table: pd.DataFrame, vectors_path: Path, out: Path, cache: Path, workers: int,
-            batch_positions: int = 409) -> dict:
+            batch_positions: int = 409, komi: float | None = None) -> dict:
     """Positions of consecutive games are pooled into fixed batches (batch_positions x RANKS
     evaluations) for torch.compile: 10.5k vs 4.5k evaluations/s eager on an H200 (A-055)."""
     import torch
@@ -274,7 +274,7 @@ def extract(table: pd.DataFrame, vectors_path: Path, out: Path, cache: Path, wor
 
     started = last = time.monotonic()
     positions = waiting = 0
-    with mp.get_context("spawn").Pool(workers, initializer=_init_worker, initargs=(model.config,)) as pool:
+    with mp.get_context("spawn").Pool(workers, initializer=_init_worker, initargs=(model.config, komi)) as pool:
         for g, encoded in enumerate(pool.imap(_encode_or_none, games, chunksize=4)):
             own = games[g][1] == table["player_color"].iloc[g]
             if encoded is None or not own.any() or own.all():
@@ -303,7 +303,8 @@ def extract(table: pd.DataFrame, vectors_path: Path, out: Path, cache: Path, wor
     meta = {"columns": [f"own_r{r}" for r in range(RANKS)] + [f"opp_r{r}" for r in range(RANKS)],
             "games": len(table), "games_complete": int(done.sum()), "positions": positions,
             "seconds": round(seconds, 1), "positions_per_second": round(positions / seconds, 1),
-            "vectors": str(vectors_path), "precision": "tf32, torch.compile"}
+            "vectors": str(vectors_path), "precision": "tf32, torch.compile",
+            "komi": 6.5 if komi is None else komi}
     (out / "meta.json").write_text(json.dumps(meta, indent=1))
     return meta
 
@@ -338,6 +339,7 @@ def main(argv=None) -> int:
     parser.add_argument("--lr", type=float, default=3e-3)
     parser.add_argument("--monitor-positions", type=int, default=50_000)
     parser.add_argument("--every", type=int, default=500)
+    parser.add_argument("--komi", type=float, help="extract: white komi of the input features (default rules: 6.5)")
     args = parser.parse_args(argv)
     if args.command == "train":
         result = train(args.run, epochs=args.epochs, batch=args.batch, lr=args.lr,
@@ -348,7 +350,7 @@ def main(argv=None) -> int:
     if args.command == "pack":
         meta = pack(table, args.out, args.cache, args.workers)
     else:
-        meta = extract(table, args.vectors, args.out, args.cache, args.workers)
+        meta = extract(table, args.vectors, args.out, args.cache, args.workers, komi=args.komi)
     print(json.dumps(meta), flush=True)
     return 0
 

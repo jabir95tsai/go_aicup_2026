@@ -30,6 +30,7 @@ EXTRA=()
 [[ -n "${LIMIT:-}" ]] && EXTRA+=(--limit "$LIMIT")
 [[ -n "${WORKERS:-}" ]] && EXTRA+=(--workers "$WORKERS")
 [[ -n "${CACHE:-}" ]] && EXTRA+=(--cache "$CACHE")
+[[ -n "${KOMI:-}" ]] && EXTRA+=(--komi "$KOMI")
 start=$(date +%s)
 case "$MODE" in
     check)   "$PYTHON_BIN" scripts/humansl_rankvec.py check ;;

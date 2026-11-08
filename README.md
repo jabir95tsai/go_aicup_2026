@@ -307,7 +307,7 @@ python scripts/plot_rank_v1.py --run-dir outputs/rank_cnn_v1_seed2027 --skip-con
 sbatch slurm/rank_ahc_predict.slurm
 ```
 
-單節點八卡，沿用既有凍結模型，不重新擬合。預設讀 `data/raw/tests/`，中間結果放 `outputs/rank_test_ahc_<jobid>/`，輸出 `submissions/rank/submission_rank_ah_c_b2_<jobid>.csv`。Public／Private 合併 800 列，欄位 `question_id,pred_rank` 與 ID 順序照 sample；缺盤或 fallback 會停止，不發布提交檔。可在 `sbatch` 前設定 `RAW_DIR`、`WORK_DIR`、`SUBMISSION`。本次只交付腳本，完整八卡流程尚未驗收。
+單節點八卡，沿用既有凍結模型，不重新擬合。預設讀 `data/raw/tests/`，中間結果放 `outputs/rank_test_ahc_<jobid>/`，輸出 `submissions/rank/ahc_<jobid>_rank.csv`。Public／Private 合併 800 列，欄位 `question_id,pred_rank` 與 ID 順序照 sample；缺盤或 fallback 會停止，不發布提交檔。可在 `sbatch` 前設定 `RAW_DIR`、`WORK_DIR`、`SUBMISSION`。本次只交付腳本，完整八卡流程尚未驗收。
 
 
 官方 CSV → GameStore → 兩賽各自的模型 → 暫定格式提交檔。**提交格式要到 11/04 sample_submission 才知道**，目前寫的是暫定格式（競賽二 `question_id,rank`；競賽一 `question_id,prediction`，top-5 以空白分隔），屆時只改輸出那一段。
@@ -367,7 +367,7 @@ python -m go_aicup.tasks.strength.humansl_predict aggregate --work $W --submissi
 2. push 前先 `git pull --rebase`
 3. **`RESULTS.md` 只在檔尾新增**，不改別人的舊紀錄；編號接續（A-xxx 稽核、L-xxx 文獻、實驗用 tag）
 4. 資料、快取、權重、提交檔一律不進 git（`.gitignore` 已擋）；外部資源一用就登記到 `EXTERNAL_RESOURCES.md`
-5. **AI CUP 提交只用同一個帳號**（帳號：**待定**）。兩人都可以操作上傳，但**絕不能用各自的個人帳號**（規則：隊員各自上傳 = 多重帳號 → 喪失資格）。
+5. **AI CUP 提交**：隊員都可用自己的帳號上傳；每日 5 次額度全隊共用，上傳前先在 `RESULTS.md` 登記，避免互相蓋掉「最後一次」。
    每日 5 次額度兩人共用、計分看最後一次上傳 → 上傳前先在 `RESULTS.md` 登記 tag／預期分數，11/24 當天先講好由誰做最後一次
 6. 隊伍之間不分享程式與特徵；repo 保持 private
 
