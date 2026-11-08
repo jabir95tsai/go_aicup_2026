@@ -36,9 +36,18 @@ from go_aicup.paths import ROOT
 from go_aicup.tasks.identity import assign, data, opening
 
 PLIES = 60
-SUMMARY = {"d4": ROOT / "outputs" / "pid_opening_v1_d4" / "summary.json",
-           "raw": ROOT / "outputs" / "pid_opening_v1" / "summary.json"}
+SUMMARY = {"d4": ROOT / "outputs" / "pid" / "opening" / "pid_opening_v1_d4" / "summary.json",
+           "raw": ROOT / "outputs" / "pid" / "opening" / "pid_opening_v1" / "summary.json"}
 PAD = np.int16(361)  # never a board point; only sits beyond a short game's end
+
+
+def handicap_ok(meta: pd.DataFrame) -> np.ndarray:
+    """False for HD>=2 games: their B/W labels are reversed and the handicap stones are
+    missing (Q&A Q13), so the "black" plies would be the opponent's. Stores without an
+    hd column (written before 2026-11-08) keep every game."""
+    if "hd" not in meta:
+        return np.ones(len(meta), bool)
+    return meta["hd"].to_numpy() <= 1
 
 
 def black_plies(moves: int) -> np.ndarray:
@@ -96,8 +105,33 @@ def opening_scores(prefix, gallery_games, query_games, population, params) -> np
     return scores + opening.slot_nb(prefix, gallery_games, query_games, slot_plies, slot_pop, params["alpha"])
 
 
+def hd_scores(pool_hd: np.ndarray, pool_players: np.ndarray, candidates: np.ndarray, q_hd: np.ndarray,
+              question_rows: list[np.ndarray], smoothing: float = 1.0) -> np.ndarray:
+    """[questions, candidates] sum over a question's games of log P_c(HD of the game).
+
+    P_c is the candidate's HD histogram over their pool games (HD 0..9, -1 = absent),
+    smoothed toward the pooled histogram with `smoothing` pseudo-games. How often and
+    how many stones a player takes is part of their identity and is independent of
+    board orientation."""
+    values = np.arange(-1, 10)
+    index = {v: i for i, v in enumerate(values)}
+    code = lambda hd: np.array([index[int(v)] for v in hd])
+    pool_code, q_code = code(pool_hd), code(q_hd)
+    prior = np.bincount(pool_code, minlength=len(values)) + 1.0
+    prior /= prior.sum()
+    logp = np.empty((len(candidates), len(values)))
+    for j, c in enumerate(candidates):
+        counts = np.bincount(pool_code[pool_players == c], minlength=len(values))
+        logp[j] = np.log((counts + smoothing * prior) / (counts.sum() + smoothing))
+    return np.stack([logp[:, q_code[rows]].sum(axis=1) for rows in question_rows])
+
+
 def predict(store_dir: Path, pool_name: str, question_name: str, orient: str, method: str,
-            params: dict | None = None, insurance_dir: Path | None = None):
+            params: dict | None = None, insurance_dir: Path | None = None,
+            hd2plus: str = "keep", hd_weight: float = 0.0):
+    """hd2plus: "keep" scores HD>=2 games like any other (their mislabelled plies are
+    consistent between pool and questions, A-053 behaviour); "drop" leaves them out.
+    hd_weight: weight of the HD-histogram term (hd_scores); 0 = off."""
     params = params or load_params(orient)
     min_plies = 2 * max(params["moves"], params["slot_moves"])
     train_meta, train_pre = train_prefix(orient)
@@ -105,6 +139,12 @@ def predict(store_dir: Path, pool_name: str, question_name: str, orient: str, me
     q_moves, q_colors, q_meta = load_store(question_name, store_dir, mmap=False)
     pool_pre, pool_ok = store_prefix(pool_moves, pool_colors, pool_meta, orient, min_plies)
     q_pre, q_ok = store_prefix(q_moves, q_colors, q_meta, orient, min_plies)
+    if hd2plus == "drop":
+        pool_hd, q_hd = handicap_ok(pool_meta), handicap_ok(q_meta)
+    else:
+        pool_hd, q_hd = np.ones(len(pool_meta), bool), np.ones(len(q_meta), bool)
+    pool_ok &= pool_hd
+    q_ok &= q_hd
 
     pool_players = pool_meta["player_id"].astype(str).to_numpy()
     candidates = np.array(sorted(set(pool_players)))
@@ -129,7 +169,11 @@ def predict(store_dir: Path, pool_name: str, question_name: str, orient: str, me
     if insurance_dir is not None:
         from go_aicup.tasks.identity.insurance import fused_scores
         scores, insurance_info = fused_scores(scores, insurance_dir, pool_name, question_name, candidates,
-                                              pool_players, [rows_by_q[q] for q in question_ids])
+                                              pool_players, [rows_by_q[q][q_hd[rows_by_q[q]]] for q in question_ids],
+                                              pool_keep=pool_hd)
+    if hd_weight and "hd" in pool_meta and "hd" in q_meta:
+        scores = scores + hd_weight * hd_scores(pool_meta["hd"].to_numpy(), pool_players, candidates,
+                                                q_meta["hd"].to_numpy(), [rows_by_q[q] for q in question_ids])
     if method == "none":
         ranked = assign.top5(scores)
     else:
@@ -138,6 +182,9 @@ def predict(store_dir: Path, pool_name: str, question_name: str, orient: str, me
     info = {"questions": len(question_ids), "candidates": len(candidates),
             "unscored_questions": int((~scored).sum()), "unusable_pool_games": int((~pool_ok).sum()),
             "unusable_query_games": int((~q_ok).sum()),
+            "hd2plus": hd2plus, "hd_weight": hd_weight,
+            "hd2plus_pool_games": int((handicap_ok(pool_meta) == 0).sum()),
+            "hd2plus_query_games": int((handicap_ok(q_meta) == 0).sum()),
             "empty_candidates": int(sum(len(g) == 0 for g in gallery_games)),
             "population_games": n_pop, "candidates_seen_in_train": overlap,
             "orient": orient, "assign": method, **params, **insurance_info}
@@ -160,9 +207,13 @@ def main(argv=None) -> int:
     parser.add_argument("--assign", choices=("hungarian", "sinkhorn", "none"), default="hungarian")
     parser.add_argument("--submission", type=Path, help="default <out-dir>/submission.csv")
     parser.add_argument("--insurance-dir", type=Path, help="identity/insurance.py work dir; fuse GE2E (A-053)")
+    parser.add_argument("--hd2plus", choices=("keep", "drop"), default="keep",
+                        help="HD>=2 games (reversed labels, no stones): keep as A-053 or leave out")
+    parser.add_argument("--hd-weight", type=float, default=0.0, help="weight of the HD-histogram term; 0 = off")
     args = parser.parse_args(argv)
     table, scores, candidates, info = predict(args.store_dir, args.pool, args.questions, args.orient, args.assign,
-                                              insurance_dir=args.insurance_dir)
+                                              insurance_dir=args.insurance_dir, hd2plus=args.hd2plus,
+                                              hd_weight=args.hd_weight)
     args.out_dir.mkdir(parents=True, exist_ok=True)
     np.save(args.out_dir / "scores.npy", scores)
     np.save(args.out_dir / "candidates.npy", candidates)

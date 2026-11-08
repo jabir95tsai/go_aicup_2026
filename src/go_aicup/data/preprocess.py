@@ -79,6 +79,7 @@ def _parse_batch(contents: list[str], lenient: bool = False):
     first_color = np.full(len(contents), -1, dtype=np.int8)
     hashes = np.zeros(len(contents), dtype=np.int64)
     passes = np.zeros(len(contents), dtype=np.int16)
+    handicap = np.full(len(contents), -1, dtype=np.int8)   # HD[n] value; -1 when the SGF has none
     props = []
     for i, content in enumerate(contents):
         game = sgflib.parse_lenient(content) if lenient else sgflib.parse(content)
@@ -86,6 +87,8 @@ def _parse_batch(contents: list[str], lenient: bool = False):
             raise ValueError(f"batch game {i}: {'; '.join(game.errors)}")
         passes[i] = int(game.props.get("_passes", ["0"])[0])
         props.append(",".join(sorted(k for k in game.props if not k.startswith("_"))))
+        if game.props.get("HD"):
+            handicap[i] = int(game.props["HD"][0])
         moves.append(game.moves)
         colors.append(game.colors)
         lengths[i] = game.n_moves
@@ -98,7 +101,7 @@ def _parse_batch(contents: list[str], lenient: bool = False):
     flat_moves = np.concatenate(moves) if moves else np.empty(0, np.int16)
     flat_colors = np.concatenate(colors) if colors else np.empty(0, np.int8)
     return (flat_moves, flat_colors, lengths, n_errors, alternating, first_color, hashes, passes,
-            np.asarray(props, dtype=object))
+            np.asarray(props, dtype=object), handicap)
 
 
 def parse_many(contents: list[str], workers: int, batch: int = 5_000, lenient: bool = False):
@@ -121,12 +124,13 @@ def parse_many(contents: list[str], workers: int, batch: int = 5_000, lenient: b
         np.concatenate(parts[6]),
         np.concatenate(parts[7]),
         np.concatenate(parts[8]),
+        np.concatenate(parts[9]),
     )
 
 
 def _to_store(frame: pd.DataFrame, contents: list[str], workers: int, lenient: bool = False):
     """Parse `contents` (aligned with `frame`) into (moves, colors, meta)."""
-    moves, colors, lengths, n_errors, alternating, first_color, hashes, passes, props = parse_many(
+    moves, colors, lengths, n_errors, alternating, first_color, hashes, passes, props, handicap = parse_many(
         contents, workers, lenient=lenient
     )
     meta = frame.reset_index(drop=True).copy()
@@ -137,6 +141,8 @@ def _to_store(frame: pd.DataFrame, contents: list[str], workers: int, lenient: b
     meta["sgf_hash"] = hashes
     meta["n_passes"] = passes
     meta["props"] = props  # SGF property names other than B/W, for the Day-0 audit
+    # HD[n] (v1.1, Q&A Q13): HD>=2 games have reversed B/W labels and no handicap stones
+    meta["hd"] = handicap
     return moves, colors, meta
 
 

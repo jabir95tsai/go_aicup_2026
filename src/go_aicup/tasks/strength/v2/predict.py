@@ -33,8 +33,8 @@ from go_aicup.metrics import K_BUCKETS
 from go_aicup.paths import ROOT
 from go_aicup.tasks.strength.v2.aggregate import N_RANKS, decode_questions, tempered_probabilities
 
-DEFAULT_RUN = ROOT / "outputs" / "v2_strength"
-DEFAULT_CALIBRATION = ROOT / "outputs" / "v2_agg_calibration" / "result.json"
+DEFAULT_RUN = ROOT / "outputs" / "rank" / "v2" / "v2_strength"
+DEFAULT_CALIBRATION = ROOT / "outputs" / "rank" / "v2" / "v2_agg_calibration" / "result.json"
 PREFIX = "test"
 STEPS = ("prepare", "infer", "aggregate")
 

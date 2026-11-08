@@ -11,7 +11,9 @@
 #   pid        1 GPU competition 1: GE2E insurance vectors, then opening + insurance per pool (A-053).
 #              Default assumes questions and candidates are NOT one-to-one (A-059, user decision
 #              2026-10-27): pid_<part>.csv has no L6 assignment. LB-probe variants: pid_<part>_hungarian /
-#              _sinkhorn (fused + L6) and pid_<part>_opening_only (no insurance, no assignment)
+#              _sinkhorn (fused + L6) and pid_<part>_opening_only (no insurance, no assignment).
+#              2026-11-08: main and assignment files add the HD-histogram term (--hd-weight 2);
+#              pid_<part>_nohd.csv is the A-053 fusion without it.
 #   rank-v2    1 GPU competition 2 fallback path: V2 prepare / infer / C2 aggregate (A-030)
 #   rank-hsl   8 x 1 GPU HumanSL extraction, 4 shards per question file (A-042)
 #   rank-c     8 x 1 GPU C2 rank-vector extraction (A-055), 4 shards per question file
@@ -55,9 +57,12 @@ PID=$(submit pid --dependency=afterok:$PREP --gres=gpu:1 -c 12 --mem=150G -t 01:
     "if $PY -m go_aicup.tasks.identity.insurance --store-dir $STORE --name pid_public pid_private pool_public pool_private --work-dir $OUT/pid/insurance; \
      then INS='--insurance-dir $OUT/pid/insurance'; else echo 'insurance failed: opening only'; INS=''; fi; \
      for part in public private; do $PY -m go_aicup.tasks.identity.predict --store-dir $STORE --pool pool_\$part --questions pid_\$part \
-       \$INS --assign none --out-dir $OUT/pid/\$part --submission $OUT/submissions/pid_\$part.csv; done; \
+       \$INS --assign none --hd-weight 2 --out-dir $OUT/pid/\$part --submission $OUT/submissions/pid_\$part.csv; \
+       $PY -m go_aicup.tasks.identity.predict --store-dir $STORE --pool pool_\$part --questions pid_\$part \
+       \$INS --assign none --out-dir $OUT/pid/\${part}_nohd --submission $OUT/submissions/pid_\${part}_nohd.csv \
+       || echo \"no-HD variant failed for \$part\"; done; \
      for part in public private; do for a in hungarian sinkhorn; do $PY -m go_aicup.tasks.identity.predict --store-dir $STORE \
-       --pool pool_\$part --questions pid_\$part \$INS --assign \$a --out-dir $OUT/pid/\${part}_\$a \
+       --pool pool_\$part --questions pid_\$part \$INS --assign \$a --hd-weight 2 --out-dir $OUT/pid/\${part}_\$a \
        --submission $OUT/submissions/pid_\${part}_\$a.csv || echo \"variant \$a failed for \$part\"; done; \
        $PY -m go_aicup.tasks.identity.predict --store-dir $STORE --pool pool_\$part --questions pid_\$part --assign none \
        --out-dir $OUT/pid/\${part}_opening_only --submission $OUT/submissions/pid_\${part}_opening_only.csv \
@@ -91,12 +96,12 @@ FINISH=$(submit finish --dependency=afterany:$DEPS:$PID --gres=gpu:1 -c 8 --mem=
     "for name in rank_public rank_private; do $PY -m go_aicup.tasks.strength.humansl_predict aggregate --work $OUT/rank/\$name \
        --submission $OUT/submissions/\${name}_ah.csv || echo \"HumanSL aggregate failed for \$name\"; \
        $PY -m go_aicup.tasks.strength.humansl_predict aggregate --work $OUT/rank/\$name \
-         --model outputs/humansl_rankvec_model/model.pkl --predictions rankvec_predictions.parquet \
+         --model outputs/rank/humansl/humansl_rankvec_model/model.pkl --predictions rankvec_predictions.parquet \
          --fallback humansl_predictions.parquet --submission $OUT/submissions/\$name.csv \
        || { echo \"AH+C aggregate failed for \$name: primary = AH\"; cp $OUT/submissions/\${name}_ah.csv $OUT/submissions/\$name.csv; } \
        || echo \"no AH submission for \$name\"; \
        $PY -m go_aicup.tasks.strength.humansl_predict aggregate --work $OUT/rank/\$name \
-         --model outputs/humansl_allplayers_model/model.pkl --predictions allplayers_predictions.parquet \
+         --model outputs/rank/humansl/humansl_allplayers_model/model.pkl --predictions allplayers_predictions.parquet \
          --fallback humansl_predictions.parquet --submission $OUT/submissions/\${name}_allplayers.csv \
        || echo \"all-player aggregate failed for \$name\"; \
        cp $OUT/rank/\$name/submission.csv $OUT/submissions/\${name}_v2_fallback.csv || echo \"no V2 submission for \$name\"; done; \

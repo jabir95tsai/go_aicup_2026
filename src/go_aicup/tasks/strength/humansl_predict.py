@@ -40,12 +40,12 @@ from go_aicup.paths import PROCESSED, ROOT
 from go_aicup.tasks.strength.humansl import RankModel
 from go_aicup.tasks.strength.v2.predict import question_table
 
-MODEL = ROOT / "outputs" / "humansl_model" / "model.pkl"
-RANKVEC_MODEL = ROOT / "outputs" / "humansl_rankvec_model" / "model.pkl"
+MODEL = ROOT / "outputs" / "rank" / "humansl" / "humansl_model" / "model.pkl"
+RANKVEC_MODEL = ROOT / "outputs" / "rank" / "humansl" / "humansl_rankvec_model" / "model.pkl"
 RANKVEC_RUNS = (ROOT / "outputs" / "humansl_rankvec_feat", ROOT / "outputs" / "humansl_rankvec_feat_vu")
 FIT_RUNS = (ROOT / "outputs" / "humansl_q1000", ROOT / "outputs" / "humansl_qsel", ROOT / "outputs" / "humansl_vs_rest")
 FIT_ROLES = ("S-fit", "S-select", "S-extra")   # Valid-U is never fitted
-A024 = ROOT / "outputs" / "v2_strength"
+A024 = ROOT / "outputs" / "rank" / "v2" / "v2_strength"
 DATASET = PROCESSED / "strength_v2" / "seed2027"
 HD1_COLUMNS = ["hd1_black", "hd1_white"]
 HD_RE = re.compile(r"HD\[(\d+)\]")

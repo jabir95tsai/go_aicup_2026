@@ -73,6 +73,7 @@ def pick_balanced(questions: pd.DataFrame, rng, parts: int) -> list[pd.DataFrame
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--out", type=Path, default=ROOT / "outputs" / "rehearsal")
+    parser.add_argument("--pid-only", action="store_true", help="competition-1 files only (no V2 split needed)")
     args = parser.parse_args()
     raw, answers = args.out / "raw", args.out / "answers"
     raw.mkdir(parents=True, exist_ok=True)
@@ -81,8 +82,10 @@ def main() -> int:
     games = pd.read_parquet(CACHE_GAMES).set_index("game_index")
 
     # ---- competition 2 ----------------------------------------------------
-    unseen = pd.read_parquet(V2_DIR / "strength_v2_valid_unseen_questions.parquet")
-    rank_parts = dict(zip(("public", "private"), pick_balanced(unseen, rng, 2)))
+    rank_parts = {}
+    if not args.pid_only:
+        unseen = pd.read_parquet(V2_DIR / "strength_v2_valid_unseen_questions.parquet")
+        rank_parts = dict(zip(("public", "private"), pick_balanced(unseen, rng, 2)))
     # ---- competition 1 ----------------------------------------------------
     gallery = pd.read_parquet(PID_DIR / "pid_gallery.parquet")
     pid_questions = pd.read_parquet(PID_DIR / "pid_questions.parquet")

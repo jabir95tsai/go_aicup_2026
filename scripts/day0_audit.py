@@ -120,6 +120,36 @@ def quantiles(series) -> dict:
     return {q: round(float(np.quantile(series, q)), 3) for q in (0.1, 0.25, 0.5, 0.75, 0.9)}
 
 
+# Q&A Q13 star points of the handicap stones (row * 19 + col), as audit_handicap_semantics.py
+_STAR = {"pd": 3 * 19 + 15, "dp": 15 * 19 + 3, "dd": 3 * 19 + 3, "pp": 15 * 19 + 15, "jj": 9 * 19 + 9,
+         "dj": 9 * 19 + 3, "pj": 9 * 19 + 15, "jd": 3 * 19 + 9, "jp": 15 * 19 + 9}
+_STONES = {2: "pd dp", 3: "pd dp dd", 4: "pd dp dd pp", 5: "pd dp dd pp jj", 6: "pd dp dd pp dj pj",
+           7: "pd dp dd pp dj pj jj", 8: "pd dp dd pp dj pj jd jp", 9: "pd dp dd pp dj pj jd jp jj"}
+
+
+def hd_report(name: str, moves, meta: pd.DataFrame) -> dict:
+    """HD distribution; for HD>=2, how many games play on a Q13 stone point in the first
+    10 plies (0 = stones missing from the SGF and labels reversed, as in training)."""
+    if "hd" not in meta:
+        return {"hd_column": False}
+    hd = meta["hd"].to_numpy()
+    report = {"hd_counts": {str(k): int(v) for k, v in pd.Series(hd).value_counts().sort_index().items()}}
+    on_stone = 0
+    big = np.flatnonzero(hd >= 2)
+    for i in big:
+        o, n = int(meta["offset"].iloc[i]), int(meta["length"].iloc[i])
+        points = {_STAR[p] for p in _STONES[min(int(hd[i]), 9)].split()}
+        on_stone += bool(set(np.asarray(moves[o:o + min(n, 10)]).tolist()) & points)
+    report["hd2plus_games_with_early_move_on_stone_point"] = int(on_stone)
+    report["hd2plus_games"] = int(len(big))
+    if "question_id" in meta:
+        q = meta.assign(big=hd >= 2).groupby("question_id")["big"].agg(["sum", "size"])
+        report["questions_with_hd2plus"] = int((q["sum"] > 0).sum())
+        report["questions_all_hd2plus"] = int((q["sum"] == q["size"]).sum())
+    print(f"\n[1b] {name} handicap\n" + json.dumps(report, indent=1))
+    return report
+
+
 def audit_release(store_dir: Path, raw_dirs: list[Path], identity_dir: Path | None) -> dict:
     stores = {}
     for name in RELEASE_FILES:
@@ -127,7 +157,17 @@ def audit_release(store_dir: Path, raw_dirs: list[Path], identity_dir: Path | No
             stores[name] = load_store(name, store_dir)
     if not stores:
         raise SystemExit(f"no release stores under {store_dir}")
-    out = {"format": {name: format_report(name, s[1], s[2]) for name, s in stores.items()}}
+    out = {"format": {name: format_report(name, s[1], s[2]) for name, s in stores.items()},
+           "handicap": {name: hd_report(name, s[0], s[2]) for name, s in stores.items()}}
+    sizes = {}
+    for part in ("public", "private"):
+        if f"pool_{part}" in stores and f"pid_{part}" in stores:
+            questions = stores[f"pid_{part}"][2]["question_id"].nunique()
+            players = stores[f"pool_{part}"][2]["player_id"].nunique()
+            sizes[part] = {"questions": int(questions), "candidates": int(players),
+                           "one_to_one_possible": bool(questions <= players)}
+    print("\n[4b] questions vs candidates\n" + json.dumps(sizes, indent=1))
+    out["questions_vs_candidates"] = sizes
 
     train_meta = data.load_meta()
     train_h = set(train_hashes(train_meta).tolist())

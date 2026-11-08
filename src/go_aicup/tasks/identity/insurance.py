@@ -30,7 +30,7 @@ from go_aicup.paths import ROOT
 from go_aicup.tasks.identity.ge2e import MIN_PLY, IdentityEncoder
 from go_aicup.tasks.strength.shared.runtime import autocast_context
 
-RUN = ROOT / "outputs" / "pid_ge2e_v1_short"   # A-035 choice
+RUN = ROOT / "outputs" / "pid" / "ge2e" / "pid_ge2e_v1_short"   # A-035 choice (moved 2026-11)
 
 
 def load_run(run_dir: Path = RUN) -> tuple[IdentityEncoder, dict, float, float]:
@@ -88,18 +88,24 @@ def embed_store(store_dir: Path, name: str, work: Path, run_dir: Path = RUN, bat
 
 
 def fused_scores(opening: np.ndarray, work: Path, pool_name: str, question_name: str, candidates,
-                 pool_players, question_rows: list[np.ndarray], run_dir: Path = RUN) -> tuple[np.ndarray, dict]:
-    """opening + lambda * w * cos(question mean, candidate mean); missing vectors contribute 0."""
+                 pool_players, question_rows: list[np.ndarray], run_dir: Path = RUN,
+                 pool_keep: np.ndarray | None = None) -> tuple[np.ndarray, dict]:
+    """opening + lambda * w * cos(question mean, candidate mean); missing vectors contribute 0.
+    pool_keep: pool rows allowed in the candidate means (HD>=2 games are left out)."""
     _, _, w, lam = load_run(run_dir)
 
     def vectors(name, n):
         saved = np.load(work / name / "ge2e.npz")
+        if len(saved["store_row"]):
+            n = max(n, int(saved["store_row"].max()) + 1)
         out = np.full((n, saved["vector"].shape[1]), np.nan)
         out[saved["store_row"]] = saved["vector"]
         return out / np.linalg.norm(out, axis=1, keepdims=True)
 
     pool = vectors(pool_name, len(pool_players))
-    questions = vectors(question_name, max(int(r.max()) for r in question_rows if len(r)) + 1)
+    if pool_keep is not None:
+        pool[~pool_keep] = np.nan
+    questions = vectors(question_name, max((int(r.max()) for r in question_rows if len(r)), default=-1) + 1)
 
     def pooled(rows):
         """Mean of normalised game vectors, normalised (identity_ge2e_eval.insurance_scores)."""

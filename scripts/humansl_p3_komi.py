@@ -104,6 +104,28 @@ def evaluate() -> None:
     (OUT / "result.json").write_text(json.dumps(result, indent=1))
 
 
+def test_table(part: str, arm: str, columns: list[str]) -> tuple[pd.DataFrame, pd.Index]:
+    """Per test game: P1+P2 columns, with H (and C for arm hc) of HD1 games from the komi-0.5 runs."""
+    work = WORK / f"rank_{part}"
+    table = hp.features(hp.a024_per_game(np.load(work / "category.npy", allow_pickle=False)),
+                        hp.release_features(work / "humansl"), hp.rankvec_features([work / "rankvec"]))
+    table = table.join(hp.hd1_features(work, RAW / f"rank_prediction_test_{part}.csv"), how="inner")
+    if list(table.columns) != columns:
+        raise ValueError("test feature columns differ")
+    h = hfeat.run_features(OUT / f"h_test_{part}").set_index("game_index")
+    h = h[[c for c in h.columns if c.startswith(("own_", "opp_"))]]
+    hd1 = table.index[table[hp.HD1_COLUMNS].sum(axis=1) > 0]
+    if not set(hd1) <= set(h.index):
+        raise ValueError(f"{part}: missing komi-0.5 H features")
+    table.loc[hd1, [c for c in columns if c.startswith(("own_", "opp_"))]] = h.loc[hd1].to_numpy()
+    if arm == "hc":
+        c = cfeat.run_features(OUT / f"c_test_{part}").set_index("game_index").add_prefix("c_")
+        if not set(hd1) <= set(c.index):
+            raise ValueError(f"{part}: missing komi-0.5 C features")
+        table.loc[hd1, list(c.columns)] = c.loc[hd1].to_numpy()
+    return table, hd1
+
+
 def export(job: str, arm: str) -> None:
     """Fit the arm at seed 2027 on Valid-S HD<=1 and predict the test parts with HD1 games replaced."""
     games, fit, eval_games, x_fit, x_eval = hf.setup()
@@ -120,22 +142,7 @@ def export(job: str, arm: str) -> None:
     parts, report = [], {}
     for part in ("public", "private"):
         work = WORK / f"rank_{part}"
-        table = hp.features(hp.a024_per_game(np.load(work / "category.npy", allow_pickle=False)),
-                            hp.release_features(work / "humansl"), hp.rankvec_features([work / "rankvec"]))
-        table = table.join(hp.hd1_features(work, RAW / f"rank_prediction_test_{part}.csv"), how="inner")
-        if list(table.columns) != columns:
-            raise ValueError("test feature columns differ")
-        h = hfeat.run_features(OUT / f"h_test_{part}").set_index("game_index")
-        h = h[[c for c in h.columns if c.startswith(("own_", "opp_"))]]
-        hd1 = table.index[table[hp.HD1_COLUMNS].sum(axis=1) > 0]
-        if not set(hd1) <= set(h.index):
-            raise ValueError(f"{part}: missing komi-0.5 H features")
-        table.loc[hd1, [c for c in columns if c.startswith(("own_", "opp_"))]] = h.loc[hd1].to_numpy()
-        if arm == "hc":
-            c = cfeat.run_features(OUT / f"c_test_{part}").set_index("game_index").add_prefix("c_")
-            if not set(hd1) <= set(c.index):
-                raise ValueError(f"{part}: missing komi-0.5 C features")
-            table.loc[hd1, list(c.columns)] = c.loc[hd1].to_numpy()
+        table, hd1 = test_table(part, arm, columns)
         questions = hp.question_table(work)
         if any(len(set(g) - set(table.index)) for g in questions["games"]):
             raise ValueError(f"{part}: a question has games without features")
