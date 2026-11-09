@@ -640,3 +640,14 @@ P1＋P2＋P3 設定，E2 Equal-k：首選 seed 2027 為 0.7372，五 seed 0.7372
 - `ahc-p3-noA-t20-allp_733179_rank.csv`（SHA `bd14b596…`）：Valid-S＋train20＋Valid-U；對 noA-allp 改 40／49 題。
 - `ahc-p3-noA-t20_733179_rank.csv`（SHA `695140f6…`）：Valid-S＋train20；對 noA-allp 改 66／59 題（對 noA 76／80）。
 - 預測分布（800 題，D…6D）：noA-allp 87／98／91／111／52／71／63／81／78／68；noA-t20-allp 86／92／98／128／34／70／66／87／72／67。加入 train 切分玩家後 1D 預測變少、A 變多，與各級玩家數（1D 433 人、A 1,582 人）造成的 B2 隱含先驗一致；測試集的級別分布未知。
+
+
+### 2026-11-09：HumanSL residual B2 三階段程式與 Slurm
+
+依使用者指定的 `src/go_aicup/tasks/strength/humansl_residual_b2/PLAN.md`，以三個 subagent 分工，完成固定 HumanSL 雙分支分類、凍結第一階段的十層殘差修正、四個 k 的 22 維線性 B2；主 agent 整合 DDP／microbatch、精確續跑、嚴格改善早停、best/final/latest、監控／發布失敗重試、100 步量測、可追蹤的三階段 Slurm。另完成 HD0/1／原 fold 稽核、雙方選定 ply 串流編碼、逐位置強 teacher、四折 OOF／全 D 特徵、H＋C＋P2 對照、完整 M best/final 選擇／信心尺度診斷、配對 gate／玩家 bootstrap、U 設定鎖定、release 固定 s1/s2 重訓及單一全 P 模型 CSV 匯出接線。共享程式僅新增 CV helper 及相容的 export 檔名參數。
+
+整合 CPU／Gloo 回歸 **108 項通過（108.24 秒）**；其後最新特徵／B2 回歸 **15 項通過（1.83 秒）**，兩組重疊、合計 **109 個不同測試**。包含實際兩程序訓練／累積梯度、第二階段凍結、完整 RNG／sampler 續跑、spawn workers 預取、teacher 假引擎部分失敗重試，以及真實測試 store→board cache→模擬 HumanSL→B2／CSV 的接線。既有 HD0／HD1 各三個位置與舊 encoder 逐元素一致。所有新 CLI／兩份 config 與 Slurm bash 語法檢查通過。這是工程驗證，**k=5/10/15/20 分數與 Equal-k 增益均未知**。
+
+短測設定 `configs/strength/humansl_residual_smoke100.json` 的兩階段各 100 updates、AdamW LR=0.001；C 對照 100 updates、LR=0.01，均只作工程起點，未實跑 GPU。正式 `humansl_residual_train.json` 的 updates／LR 留 null，需量測後明訂；smoke 不允許鎖定 U／release。C 對照為有界全盤位置均勻抽樣 Adam／cosine，保留原 likelihood 目標，不宣稱逐步重現舊 epoch packs 訓練。
+
+唯讀查核發現 `data/processed/cv/` 為空，預設的原 seed=2027 完整玩家 fold 表尚不存在；prepare 要求取回原表並明確驗證，不自行重抽。未建立本版官方資料／題庫、啟動真 teacher／GPU 短測、正式訓練／全量推論、提交 Slurm 或上傳；真實收斂、CUDA／SyncBN、顯存／吞吐與完整成本未知。輸出隔離於 `outputs/rank/humansl_residual_b2/<run_id>/`；三階段及輔助 Slurm 位於套件內 `slurm/`，操作、前置條件、全部命令與量測界線見 [README](src/go_aicup/tasks/strength/humansl_residual_b2/README.md) 及 PLAN §13。

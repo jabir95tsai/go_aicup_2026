@@ -102,7 +102,7 @@ def aggregate(config, work, fallback=None):
     return dict(questions=len(output), fallback_ahc=int(output.fallback_ahc.sum()))
 
 
-def export(work_root, sample, output):
+def export(work_root, sample, output, prediction_name='se3_hc_b2_predictions.parquet'):
     work_root, sample, output = Path(work_root), Path(sample), Path(output)
     template = pd.read_csv(sample, dtype=str)
     if list(template) != ['question_id', 'pred_rank'] or not template.question_id.is_unique:
@@ -110,7 +110,7 @@ def export(work_root, sample, output):
     parts = []
     model_id = None
     for part in ('public', 'private'):
-        path = work_root / f'rank_{part}/se3_hc_b2_predictions.parquet'
+        path = work_root / f'rank_{part}' / prediction_name
         frame = pd.read_parquet(path)
         marker = json.loads(path.with_suffix('.json').read_text())
         if not marker.get('model') or (model_id is not None and model_id != marker['model']):

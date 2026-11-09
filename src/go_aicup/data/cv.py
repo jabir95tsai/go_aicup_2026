@@ -428,3 +428,46 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def make_humansl_residual_roles(games: pd.DataFrame, original_folds: pd.DataFrame,
+                                seed: int = 2027, *, release: bool = False) -> pd.DataFrame:
+    """Keep original identities; only M selection/release four-fold mapping are new."""
+    original = original_folds[['player_id', 'fold']].copy()
+    original['player_id'] = original.player_id.astype(str)
+    if not original.player_id.is_unique or not original.fold.isin([-1, 0, 1, 2, 3, 4]).all():
+        raise ValueError('original folds must assign each player exactly once')
+    players = games.groupby('player_id', sort=True).agg(rank_id=('rank_id', 'first'),
+                                                        n_games=('rank_id', 'size')).reset_index()
+    players = players.merge(original, on='player_id', how='left', validate='one_to_one')
+    if players.fold.isna().any():
+        raise ValueError('filtered players missing from original full-data folds')
+    players['role'] = np.where(players.fold.eq(-1), 'R', np.where(players.fold.eq(0), 'U', 'D'))
+    players['oof_fold'] = players.fold.astype(int)
+    rng = np.random.default_rng(seed)
+    if release:
+        players.loc[players.fold.ne(-1), 'role'] = 'P'
+    for rank in range(10):
+        allowed = players.index[players.rank_id.eq(rank) & players.role.eq('P' if release else 'D')]
+        if release and len(allowed) < 4:
+            raise ValueError(f'release rank {rank} needs at least four players')
+        volume = np.digitize(np.log10(players.loc[allowed, 'n_games']), [1, 1.5, 2, 2.5])
+        bins = {int(b): allowed[volume == b].to_numpy() for b in np.unique(volume)}
+        small = [v for v in bins.values() if len(v) < (8 if release else 10)]
+        bins = [v for v in bins.values() if len(v) >= (8 if release else 10)]
+        if small:
+            merged = np.concatenate(small)
+            if len(merged) < (8 if release else 10) and bins:
+                bins[0] = np.concatenate([bins[0], merged])
+            else:
+                bins.append(merged)
+        offset = 0
+        for members in bins:
+            members = rng.permutation(members)
+            if release:
+                players.loc[members, 'oof_fold'] = (np.arange(len(members)) + offset) % 4 + 1
+                offset = (offset + len(members)) % 4
+            else:
+                count = int(round(len(members) * .1))
+                players.loc[members[:count], 'role'] = 'M'
+    return players

@@ -1,6 +1,6 @@
 # HumanSL 固定主幹＋雙分支等級分類＋十層殘差修正＋B2 實驗計畫
 
-更新：2026-11-09（台灣時間）。狀態：使用者已確認採用審查建議，完成本版流程選擇；尚未實作、建立本實驗資料或啟動訓練。
+更新：2026-11-09（台灣時間）。狀態：使用者已授權並完成本版程式、三階段入口與 Slurm；CPU／Gloo 工程驗證見第 13 節。尚未建立官方實驗資料、啟動 teacher／GPU 訓練或提交作業。
 
 本目錄專供此實驗後續實作。本文整合本次討論及深入審查後的確認事項；第 12 節區分已選定流程與仍需量測的訓練數值，不將舊 SE3 設定直接視為本版已核准設定。專案共同規範以根目錄 [CLAUDE.md](../../../../../CLAUDE.md) 為準，歷史分數以 [RESULTS.md](../../../../../RESULTS.md) 為準。
 
@@ -285,7 +285,7 @@ OOF 模型只用約 75% 的池內玩家，全資料模型用 100%，信心尺度
 
 ## 11. 實作範圍、算力與驗收
 
-本次只更新本計畫文件。後續本目錄承接設定／資料準備、模型／loss、三階段訓練、特徵聚合、評估及提交程式；先重用現有函式，不因計畫先建立空模組或複製整個 SE3。
+本目錄已承接設定／資料準備、模型／loss、三階段訓練、特徵聚合、評估及提交程式；重用與新增範圍如下，實作／未執行事項見第 13 節及 [README.md](README.md)。
 
 重用以函式為單位，先直接 import 現有純函式／工具，不複製整個舊實驗，也不先建立新的通用框架。相對模組路徑以 `src/go_aicup/` 為基準：
 
@@ -359,3 +359,16 @@ OOF 模型只用約 75% 的池內玩家，全資料模型用 100%，信心尺度
 | 100 步短測及正式長作業時間、GPU-hours、分 k 增益 | 未知；本次不提交作業 |
 
 不得把本文寫出的未定事項或未執行驗收改標為完成；後續決策直接更新本文件，實際結果登記於 RESULTS.md。
+
+## 13. 2026-11-09 程式實作與工程驗證
+
+- 依使用者要求分給三個 subagent 完成模型／loss、資料／teacher、特徵／B2；主 agent 整合訓練器、設定、Slurm、文件及跨模組回歸。沒有複製舊 SE3 trainer。
+- 第一／二階段入口為 `python -m go_aicup.tasks.strength.humansl_residual_b2.train --stage 1|2`，第三階段為 `.b2`。可追蹤 Slurm 置於本目錄 `slurm/stage1.slurm`、`stage2.slurm`、`stage3.slurm`，另有 prepare、teacher、features、baseline 及兩階段 smoke100。
+- 完成獨立 HD／原玩家 fold 稽核、D/M/U/R 與 release 四折、雙方串流編碼／D4、各級獨立抽盤與消費者 durable state、強 teacher 來源／視角／每盤 checksum、梯度累積、凍結 BN、嚴格改善早停、best/final/latest、監控／發布失敗重試、OOF 全位置二十維、P2 線性 B2、受控 H＋C 對照、分 k gate／玩家 bootstrap、M 信心尺度診斷、U 鎖定及單一全 P release 模型／CSV 接線。
+- H＋C 對照沿用 likelihood／C 向量數學與 Adam／cosine，為避免持久化輸入 packs，改用全盤位置均勻抽樣的有界更新；不是舊 epoch 遍歷逐步重現。此差異記入對照身分，正式更新預算亦未決定。
+- 短測 config 為 `configs/strength/humansl_residual_smoke100.json`：兩階段各 100 updates、AdamW LR=0.001，C 為 100 updates、LR=0.01；僅屬可執行的工程起點。正式 `humansl_residual_train.json` 的 LR／updates 保留 null，需短測後明訂。smoke 禁止鎖定 U／release；沒有核准或提交長作業。
+- 整合回歸 **108 項通過，108.24 秒**，涵蓋本版與計畫指定的既有資料／teacher／checkpoint／HD／CSV 回歸；其後新增成本／鎖定檢查由最新 B2 測試另行驗證，詳見 RESULTS。實際兩程序 CPU Gloo 與單程序在固定 BN 下，兩階段 loss／參數一致；中斷續跑的模型、sampler、RNG 一致。實際 spawn workers／預取的續跑亦通過。這不驗證 GPU SyncBN 的數值或吞吐。
+- 另唯讀抽取既有 HD0／HD1 各三個位置，新串流 spatial／global／action 與既有 encoder 逐元素完全一致。teacher 真引擎未啟動；使用 fake Engine 驗證完整落子前 prefix、兩種 komi、1 visit、黑白 target 及部分失敗後續跑。
+- 本次查得 `data/processed/cv/` 為空，預設原始 seed=2027 完整 fold 表不存在。prepare 必須取回原切分表，不因缺檔重抽；因此未建立官方新題庫／manifest。未生成正式模型、分 k 分數或提交檔；Equal-k 增益、GPU／SyncBN、顯存、吞吐、teacher／全位置推論及完整 GPU-hours 均未知。
+
+輸出隔離於 `outputs/rank/humansl_residual_b2/<run_id>/`；操作、設定欄位、來源前置條件及成本紀錄見 [README.md](README.md)。

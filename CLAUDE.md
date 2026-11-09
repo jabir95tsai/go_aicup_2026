@@ -513,3 +513,12 @@ project/
 ### 2026-11-06：SE3＋H＋C＋B2 單次提交訓練
 
 依使用者要求，新增可追蹤的 `src/go_aicup/tasks/strength/SE_H_C_B2/slurm/train.slurm`，一次提交依序執行 prepare、八卡開發 SE3 特徵、兩臂 B2 開發訓練／S-select、開發 gate，再視結果補算最終 SE3／H／C、最終兩臂訓練與 U_newgames 評估；gate 不通過時保留開發報表並結束。預設 8 卡／12 小時上限，即最多 96 GPU-h（含 CPU 階段）；實際總耗時與 SU 未知。修正特徵補算在多程序啟動時間不同時可能漏分片的問題，以固定 game_index 分配；含既有完整／限量分片及單一作業成功、gate 停止、worker 失敗的 21 項 CPU 測試通過。未提交 Slurm、執行 GPU 推論或正式訓練；歷史吞吐的局部估算與重跑限制見該目錄 README。
+
+
+### 2026-11-09：HumanSL residual B2 三階段實作
+
+依使用者明確授權，三個 subagent 與主 agent 已完成 `humansl_residual_b2/PLAN.md` 的資料／雙方串流輸入、兩階段模型／loss、獨立級別 sampler、teacher、DDP／梯度累積／嚴格改善早停／精確續跑、OOF／線性 B2、受控 H＋C 對照、M 選模／U 鎖定、release 固定步數重訓與 CSV 接線，及套件內可追蹤的三階段／短測 Slurm。原 CV helper 僅在唯一 `data/cv.py` 增補，既有 export 只擴充相容檔名參數；原實驗權重／索引未改寫。
+
+CPU／Gloo 整合 108 項（108.24 秒）與最新 B2 15 項（1.83 秒）通過，合計 109 個不同測試；包括實際兩程序更新／累積梯度、stage2 凍結、RNG／sampler／spawn 預取續跑、失敗發布／監控重試及測試 store 接線。既有 HD0／HD1 各三個位置的編碼 parity 通過。未執行 GPU、真 teacher、正式全量 prepare／訓練／推論或提交作業；真實各 k 分數、CUDA／SyncBN 與成本未知。
+
+短測 `humansl_residual_smoke100.json` 兩階段各 100 步／AdamW LR=0.001（C 對照 100 步／LR=0.01），只屬工程起點；正式 `humansl_residual_train.json` 的 LR／updates 留 null，須短測後依 §9 明訂預算。原 seed=2027 完整 fold 表在本機預設路徑缺失，prepare 不會重抽；須取回原切分身分。輸出為 `outputs/rank/humansl_residual_b2/<run_id>/`，完整操作／差異／未驗收事項見該目錄 README、PLAN §13 及 RESULTS 本日紀錄。
