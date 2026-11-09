@@ -625,7 +625,18 @@ P1＋P2＋P3 設定，E2 Equal-k：首選 seed 2027 為 0.7372，五 seed 0.7372
 判讀：跳過 HD≥2 有害（候選庫與題目的錯標一致，反而是指紋）→ 預設保留，`--hd2plus drop` 只當選項。讓子分布項（候選人 100 盤 HD 直方圖下題目各盤 HD 的 log 機率，`predict.hd_scores`）兩份都正向；w=2 在兩份皆為正且不在網格邊界，採用。合成驗證已飽和，真實測試的效果未知；若正式資料沒有 HD，該項為常數、不影響排序。`run_release.sh` 主檔與指派變體加 `--hd-weight 2`，另出 `pid_<part>_nohd.csv`（A-053 原融合）作 LB 對照。CPU 測試 16 項通過。
 
 **LB 探針檔（Slurm 725504，CPU 84 分）：** 對照組重算逐題重現首選 `ahc-p12-komihc_725150_rank.csv`（Public／Private 0 題不同）。各檔只改一處，對首選改變題數（Public／Private）：
-- `ahc-p3-noA_725504_rank.csv`（SHA `727150ca…`）：拿掉 A-024；41／49 題；本地 E2 +0.0070（五 seed 平均 +0.0056）。
+- `ahc-p3-noA_725504_rank.csv`（SHA `727150ca…`）：拿掉 A-024；41／49 題；本地 E2 +0.0070（五 seed 平均 +0.0056）。**LB 11/09 06:21:18（jabir95tsai）Public 0.7270608（16/102），對首選 +0.0074**；41 題不同，相當於淨多約 3 分（約 0.7 個標準差的雜訊量級，但與本地五 seed 同方向）。目前 Public 最高分。
 - `ahc-p3-allp_725504_rank.csv`（SHA `27a3cc0c…`）：Valid-S＋U（HD≤1）擬合；55／65 題；無本地分數（A-058 交叉擬合 +0.0017）。
 - `ahc-p3-bag10_725504_rank.csv`（SHA `e161e0ea…`）：10 seed 平均；20／17 題；本地 E2 −0.0028。
 - `ahc-p3-allpbag10_725504_rank.csv`（SHA `7aacc8f8…`）：S＋U 且 10 seed 平均；46／69 題。
+
+**以 noA 為基礎的探針（2026-11-09，`rank_b2_bagging.py export --arms …`）：** 重算 noA 與 `ahc-p3-noA_725504` 逐題相同（0／0 題）。
+- `ahc-p3-noA-allp_731429_rank.csv`（SHA `53f8b8fd…`，Slurm 731429，5 分）：noA＋Valid-S＋U（HD≤1）擬合；對 noA 改 50／55 題（對原首選 63／83）。無本地分數（評估集就是 Valid-U）。**LB 11/09 08:46:25（jabir95tsai）Public 0.7386411（15/102），對 noA +0.0116**（50 題不同，淨多約 4.6 分）；目前 Public 最高分。與 A-058 本地交叉擬合 +0.0017 相比大得多：多 1,442 位未見過的玩家，而測試玩家也是未見玩家，推測擬合玩家數是主要瓶頸（與 A-044／A-047 的資料增益一致；機制未驗證）。
+- `ahc-p3-noA-bag10_731431_rank.csv`（SHA `2bca912d…`，Slurm 731431，36 分）：noA 10 seed 平均；對 noA 改 22／16 題。
+- `ahc-p3-noA-allpbag10_731431_rank.csv`（SHA `72cc8ae2…`）：noA-allp 10 seed 平均；對 noA-allp 改 16／17 題。本地 bag10 無增益（−0.0016），屬低優先探針。
+
+**noA＋train20（2026-11-09，使用者同意，約 10 GPU-h）：** `scripts/rank_train20_hc.py`、`slurm/rank_train20_hc.slurm`（Slurm 733177，8 卡；後續 CPU 733179 先匯出 `ahc-p3-noA-t20`、`ahc-p3-noA-t20-allp` 再跑 E2／E1 五 seed）。A-047 的 train20（每位 train 切分玩家最多 20 盤）去掉 HD≥2 與學 C 向量用過的 15,000 盤：HD0 68,513 盤補 C（貼 6.5，H 已有），HD1 18,235 盤以貼 0.5 重算 H＋C。可組題（玩家、顏色）k=5／10／15／20 由 3,807／2,178／1,305／816 增為 9,948／6,542／3,502／2,112。增益未知。
+- GPU 733177：8 卡 81 分（約 10.8 GPU-h），86,748／86,748 盤特徵完整。擬合盤數 62,867 → 149,615；B2 可抽玩家（依 player_id，≥k 盤）k=5／10／15／20：2,685／1,847／1,359／1,036 → 5,604／5,177／4,500／3,146。
+- `ahc-p3-noA-t20-allp_733179_rank.csv`（SHA `bd14b596…`）：Valid-S＋train20＋Valid-U；對 noA-allp 改 40／49 題。
+- `ahc-p3-noA-t20_733179_rank.csv`（SHA `695140f6…`）：Valid-S＋train20；對 noA-allp 改 66／59 題（對 noA 76／80）。
+- 預測分布（800 題，D…6D）：noA-allp 87／98／91／111／52／71／63／81／78／68；noA-t20-allp 86／92／98／128／34／70／66／87／72／67。加入 train 切分玩家後 1D 預測變少、A 變多，與各級玩家數（1D 433 人、A 1,582 人）造成的 B2 隱含先驗一致；測試集的級別分布未知。

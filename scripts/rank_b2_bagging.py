@@ -8,7 +8,7 @@ noA   drop the 10 A-024 columns: how much A adds (decides whether H+C on trainin
 allp  final fit on Valid-S + Valid-U (HD<=1) players; no local score (E1/E2 are Valid-U)
 
     python scripts/rank_b2_bagging.py local          # E2 / E1, paired with the primary
-    python scripts/rank_b2_bagging.py export --job ID
+    python scripts/rank_b2_bagging.py export --job ID [--arms noA-allp noA-bag10 ...]
 """
 from __future__ import annotations
 
@@ -34,6 +34,8 @@ import humansl_p3_komi as p3
 OUT = ROOT / "outputs" / "rank" / "humansl" / "b2_bagging"
 BAG = tuple(range(2027, 2037))   # 10 seeds; 2027 is the primary's
 PRIMARY = ROOT / "submissions" / "rank" / "ahc-p12-komihc_725150_rank.csv"
+NOA = ROOT / "submissions" / "rank" / "ahc-p3-noA_725504_rank.csv"   # Public 0.7271, best on 11/09
+ARMS = ("bag10", "allp", "allpbag10", "noA", "noA-allp", "noA-bag10", "noA-allpbag10")
 
 
 def data():
@@ -93,17 +95,20 @@ def local() -> None:
     (OUT / "local.json").write_text(json.dumps(result, indent=1))
 
 
-def export(job: str) -> None:
+def export(job: str, arms: list[str]) -> None:
     games, fit, eval_games, x_fit, x_eval = data()
     both = pd.concat([fit, eval_games], ignore_index=True)
     x_both = np.vstack([x_fit, x_eval])
     with hf.PRODUCTION.open("rb") as handle:
         columns = pickle.load(handle)["info"]["columns"] + hp.HD1_COLUMNS
-    models = {"primary": [fit_b2(fit, x_fit, hf.SEED)],
-              "bag10": [fit_b2(fit, x_fit, s) for s in BAG],
-              "allp": [fit_b2(both, x_both, hf.SEED)],
-              "allpbag10": [fit_b2(both, x_both, s) for s in BAG],
-              "noA": [fit_b2(fit, x_fit[:, 10:], hf.SEED)]}
+    builders = {"bag10": lambda: [fit_b2(fit, x_fit, s) for s in BAG],
+                "allp": lambda: [fit_b2(both, x_both, hf.SEED)],
+                "allpbag10": lambda: [fit_b2(both, x_both, s) for s in BAG],
+                "noA": lambda: [fit_b2(fit, x_fit[:, 10:], hf.SEED)],
+                "noA-allp": lambda: [fit_b2(both, x_both[:, 10:], hf.SEED)],
+                "noA-bag10": lambda: [fit_b2(fit, x_fit[:, 10:], s) for s in BAG],
+                "noA-allpbag10": lambda: [fit_b2(both, x_both[:, 10:], s) for s in BAG]}
+    models = {"primary": [fit_b2(fit, x_fit, hf.SEED)]} | {name: builders[name]() for name in arms}
     print("fitted", flush=True)
     template = pd.read_csv(hf.ROOT / "data" / "raw" / "tests" / "sample_submission_rank.csv", dtype=str)
     rows = {name: [] for name in models}
@@ -111,17 +116,21 @@ def export(job: str) -> None:
         table, _ = p3.test_table(part, "hc", columns)
         questions = hp.question_table(p3.WORK / f"rank_{part}")
         for name, ms in models.items():
-            x = table.to_numpy()[:, 10:] if name == "noA" else table.to_numpy()
+            x = table.to_numpy()[:, 10:] if name.startswith("noA") else table.to_numpy()
             p = np.mean([m.probabilities(x, table.index.to_numpy(), questions) for m in ms], axis=0)
             rows[name].append(pd.DataFrame({"question_id": questions["question_id"],
                                             "pred_rank": [RANKS[r] for r in score_rank(p)]}))
-    primary_file = pd.read_csv(PRIMARY, dtype=str).set_index("question_id")["pred_rank"]
+    references = {"vs_primary": PRIMARY, "vs_noA": NOA}
     report = {}
     for name, frames in rows.items():
         result = pd.concat(frames, ignore_index=True).set_index("question_id").loc[template.question_id]["pred_rank"]
-        diff = result != primary_file.loc[template.question_id]
-        report[name] = {"public": int(diff[diff.index.str.startswith("pub")].sum()),
-                        "private": int(diff[diff.index.str.startswith("priv")].sum())}
+        report[name] = {}
+        for label, path in references.items():
+            changed = result != pd.read_csv(path, dtype=str).set_index("question_id")["pred_rank"].loc[template.question_id]
+            report[name][label] = {"public": int(changed[changed.index.str.startswith("pub")].sum()),
+                                   "private": int(changed[changed.index.str.startswith("priv")].sum())}
+            if label == "vs_primary":
+                diff = changed
         if name == "primary":
             if diff.any():
                 raise ValueError("primary refit does not reproduce the P1+P2+P3 submission")
@@ -129,15 +138,16 @@ def export(job: str) -> None:
         output = ROOT / "submissions" / "rank" / f"ahc-p3-{name}_{job}_rank.csv"
         result.reset_index().to_csv(output, index=False, lineterminator="\r\n")
         print("wrote", output, flush=True)
-    print(json.dumps({"changed_vs_primary": report}))
+    print(json.dumps({"changed": report}))
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("command", choices=["local", "export"])
     parser.add_argument("--job", default="local")
+    parser.add_argument("--arms", nargs="+", choices=ARMS, default=["bag10", "allp", "allpbag10", "noA"])
     args = parser.parse_args()
-    local() if args.command == "local" else export(args.job)
+    local() if args.command == "local" else export(args.job, args.arms)
     return 0
 
 
