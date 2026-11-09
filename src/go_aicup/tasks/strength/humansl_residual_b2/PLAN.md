@@ -181,7 +181,7 @@ f_q = concat(x_q,h_q)           # 保留 P2：22 維
 6. 訓練目標為十級 CE（含既有 L2）；推論 `P_q=softmax(W_k*scaled(f_q)+b_k)`，再 `metrics.score_rank(P_q)`。
 7. scaler、分類器及任何設定選擇只使用該次擬合資料。題目抽樣 seed 固定保存，不用 test 或評估玩家選特徵／正則化。
 
-本節重用既有 B2 方法，不把舊 `RankModel` 只按 player_id 抽盤的實作原封套用；需補上同色組題。不得將第一、二階段 training loss 當作第三階段的選模指標。
+組題直接重用 `SE_H_C_B2.data.sample_questions`：`balanced=False,count=20000` 已實作先玩家、再合格顏色、再抽 k 盤，不重寫同色 sampler。M 監控題以 `balanced=True,count=125` 產生每個 k/rank cell 125 題。只需把 B2 擬合接到這份固定題目表；舊 `RankModel.fit(method='B2')` 會忽略傳入 questions、另按 player_id 抽盤，因此不能直接呼叫原入口。不得將第一、二階段 training loss 當作第三階段的選模指標。
 
 prepare 必須輸出每個 k／rank 的合格玩家數、玩家顏色組數及合成題使用頻次，十級缺任一級就報錯。既有 S/U 特徵棋局、HD0/1、同色組題的唯讀稽核如下，未加入 train20，也不是新切分後已發布的題庫：
 
@@ -287,13 +287,38 @@ OOF 模型只用約 75% 的池內玩家，全資料模型用 100%，信心尺度
 
 本次只更新本計畫文件。後續本目錄承接設定／資料準備、模型／loss、三階段訓練、特徵聚合、評估及提交程式；先重用現有函式，不因計畫先建立空模組或複製整個 SE3。
 
-| 可重用來源 | 用途與需要調整的部分 |
-|---|---|
-| `features/humansl_torch.py` | HumanSL 載入、profile metadata、KataGo 編碼；本版單條件、按 HD 貼目、只抽有效位置輸出 |
-| `reproduce_paper/model.py` | SE residual block、scalar/value head |
-| `reproduce_paper_3/` | 可重建抽樣、監控、續跑與分類報表；不繼承 game-disjoint、18 blocks、15 個本人位置或舊 log-prob 聚合 |
-| `tasks/strength/humansl.py` | B2 scaler／LR 與題目平均；補同色組題 |
-| `shared/`、`SE_H_C_B2/` | seed／環境／checkpoint、來源稽核、配對 bootstrap 與匯出模式，按實際介面重用 |
+重用以函式為單位，先直接 import 現有純函式／工具，不複製整個舊實驗，也不先建立新的通用框架。相對模組路徑以 `src/go_aicup/` 為基準：
+
+| 功能 | 現有入口 | 本版採用方式 |
+|---|---|---|
+| 棋譜讀取／SGF 解析 | `data.store.GameStore.game`、`data.preprocess.load_store`、`data.sgf.parse` | 直接使用既有 memmap 與 parser；訓練不重轉 SGF；新 store 與既有 game_index 要明確對齊 |
+| 舊棋局 metadata／HD | `data/processed/boards/strength_v1/games.parquet`、`data/raw/training/handicap.csv` | 唯讀重用，依 `(rank,game_id)` join 並驗證；不因雙分支重建全量 board cache |
+| 玩家 fold | `data.cv.make_rank_folds`、`player_table`、`assert_player_disjoint` | 原 seed=2027 五折／holdout 身分直接重用；M 與 release 四折規則在唯一 CV 模組最小增補 |
+| HumanSL 與棋盤規則 | KataGo 原有 `load_model`、`GameState`、`Features`；`features.humansl_torch.profile_metadata`、`_katago` | 模型、規則、歷史、征子等特徵不重寫；僅新增按選定 ply／HD 貼目的串流編碼迴圈與 trunkfinal 讀取 |
+| 網路元件 | `reproduce_paper.model.ResidualBlock`、`scalar_head` | 直接用於十層／value；新共用投影、雙分支讀出與殘差 logits 組裝留在本實驗 |
+| D4／value 視角 | `shared.dataset.d4_id`、`apply_d4`；`reproduce_paper.dataset.transform_policy`、`soft_value_target` | 直接使用相同幾何與視角轉換，不另寫第二套 |
+| Teacher 引擎協定 | `reproduce_paper.label_value.Engine`、`make_query`、`parse_root` | 直接使用逐位置 query、timeout／錯誤處理及視角驗證；新標籤索引／來源保存與每盤 komi 由本版串接 |
+| 同色組題／驗證 | `SE_H_C_B2.data.sample_questions`、`check_games`、`check_questions`、`match_metadata` | 直接使用；fit 每 k 20,000 題，監控每 k/rank 125 題；切分後再呼叫，不沿用該模組的舊 make_pools |
+| 題目平均／B2 | `tasks.strength.humansl.question_mean`、`GameLR`、`RankModel.probabilities`；已安裝的 sklearn scaler／LR | 題目平均及 scaler＋LR 可直接用；新增極小的「接收固定題目表」擬合接點，不重寫分類器或最佳化器 |
+| 官方計分／區間 | `metrics.score_rank`、`rank_report`；`SE_H_C_B2.evaluate.report`、`official_rows`、`paired_bootstrap` | 直接使用分 k 官方分數與玩家配對 bootstrap；不要照搬該模組的 a/se3 舊 evaluate 主流程 |
+| DDP／AMP／seed | `shared.runtime.setup_distributed`、`autocast_context`、`on_rank_zero`、`model_state_hash`；`shared.training.seed_process`、`configure_torch`、`rng_state`、`restore_rng`、`environment`、`log_event` | 按現有 config 欄位呼叫；新訓練迴圈只負責階段凍結、實際 loss、microbatch 累積與新 sampler 狀態 |
+| 原子存檔／分片 | `artifacts.file_hash`、`object_hash`、`write_json`；`SE_H_C_B2.common.writer_lock`、`atomic_table`、`publish_table`、`load_table`、`assert_frozen` | 直接使用；本版自己組合 stage／fold／上游身分，不使用綁定 AH/C/SE3 路徑的 source_identity |
+| Checkpoint 底層 | `reproduce_paper_3.train.atomic_payload`；`shared.checkpoint.resolve_checkpoint` | 沿用重載驗證、原子發布及 hash 檢查；payload 的 state 用可比較的純 Python 值保存游標／佇列，RNG 另存；階段載入與 best/final/latest 選擇由本版定義 |
+| 正式題組／CSV | `SE_H_C_B2.predict.release_questions`、`export` | 題目映射及 sample 順序／機率／rank／checksum 驗證沿用；export 只需相容增加預測檔名參數，不把新結果偽裝成 AH+C 或建立另一套 CSV 驗證 |
+
+### 重用界線與最小新增範圍
+
+- `features.humansl_rankvec.load_frozen` 會把 metadata encoder 換成 identity 並改 TF32 設定，僅適用 C 向量對照，不能拿來抽本版固定 rank_1d 的一般主幹；本版直接用原 KataGo loader 與既有 profile_metadata。
+- `humansl_torch.encode_game` 是「全盤逐手編碼並 stack」；重用其 GameState／Features 與步進方式，新增選定 ply 的有界輸出，不複製或改寫圍棋規則。`PaperDataset`／`pre_action_inputs` 只允許本人位置且產生 SE 18 planes，不能直接當成雙方 KataGo dataset。
+- `label_value.make_query` 已接受任意 analyzeTurns／komi，可直接分析雙方所需位置；但 `source_data` 固定舊 split_seed=2026、export 完成後會刪來源 sidecar，故不使用其舊 label/export CLI 作本版流程。
+- `RankModel._fit_synthetic` 的舊抽題不保證同色；用已存在的 sample_questions 取代抽題入口。C=1／max_iter=5000 時 `GameLR` 可直接在題目矩陣擬合；若沿用 RankModel 保存與 probabilities，僅補接既有 per_k scaler／model，不另建 B2 模型類別。
+- 不直接複製 `reproduce_paper_3.train.train`：它綁定八卡、舊資料 manifest／shape、單次整批前向、舊聚合與舊 checkpoint 格式。`validation_transition` 以 `>=` 更新 best 並重設 patience，本版同分不更新，需明確實作嚴格改善邏輯。
+- `shared.checkpoint.save_checkpoint` 的 state 要求 epoch／next_batch，且保留策略為 latest-only 或最低 training loss；本版各級獨立游標及監控 best/final 不套用此保留策略。重用 atomic_payload／resolve_checkpoint 即可，不為相容舊欄位捏造全域 epoch。
+- 正式預測沿用既有 store／cache 與 release_questions 映射；`prepare_release`、`aggregate_frames` 舊入口綁定 SE3/H/C 模型與 fallback，不沿用。新輸出使用完整的機率／rank／模型身分，再交給相容擴充後的既有 export；不偽造 AH+C fallback 或 humansl_games 欄位來通過舊腳本。
+
+必須新增的程式僅為五部分：(1) 兩階段模型／loss 組裝；(2) 雙方位置索引與選定 ply 串流 dataset；(3) 各級獨立 sampler 與四折／階段工作串接；(4) 帶梯度累積、嚴格早停與本版狀態的訓練迴圈；(5) 既有組題／LR／分片／匯出工具之間的特徵與身分接線。舊 H/C 對照沿用其 policy likelihood／向量學習數學，僅依新 fold 與貼目設定安排工作，不另寫一套 likelihood。
+
+既有回歸測試以 `test_se_h_c_b2.py`（組題／bootstrap／發布）、`test_reproduce_paper_value.py`（teacher／視角）、`test_reproduce_paper_data.py`（D4）、`test_checkpoint_retention.py`、`test_hd1_features.py`、`test_release_pipeline.py` 為基礎。保留其原語意，只針對新增接點、不同早停規則與雙方／OOF／累積梯度補測，不複製整套測試，也不把舊測試通過視為新實驗已驗收。
 
 - 輸出預計隔離於 `outputs/rank/humansl_residual_b2/<run_id>/`；資料索引／teacher 放獨立 processed 目錄，不覆寫舊索引、模型或主線提交。
 - 每個 run 保存設定、來源模型／資料身分、玩家切分、監控集合、抽樣 seed、環境、loss、階段模型與評估；checkpoint 須可續跑，最終模型驗證成功前不刪續跑資料。
