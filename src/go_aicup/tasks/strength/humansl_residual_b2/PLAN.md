@@ -415,3 +415,12 @@ HD≥2 排除、ply≥30、每方 15 手、各級獨立抽盤、teacher 身分�
 ### 14.4 工程驗證（2026-11-10）
 
 `tests/test_humansl_residual_*.py` 共 62 項 CPU 測試通過（84 秒），其中新增 `test_humansl_residual_improvements.py` 涵蓋：log 平均與機率平均分開計算、prob／logp 特徵選擇與舊格式拒絕、cosine LR 與步進排程疊加、正式 config 的預算與驗證、capped 池的 seed 決定性、擴充題庫只動 ext 目錄且 release 需要鎖定、fit_all OOF B2 與 M 四折平均評估、探針頭可學可分資料與每盤分支平均、探針讀出等於第一階段的 gather。release 預測與鎖定的舊測試改寫為四折版本（含 checkpoint 被改時拒絕、第二階段祖先檢查）。沒有執行 GPU、真實探針、prepare --extension 或任何 Slurm 作業；分 k 分數與實際成本未知。
+
+### 14.5 實驗範圍限縮：只用新 20 維做 B2（2026-11-10，使用者決定）
+
+本實驗的問題是「這個 ResNet 架構能不能比 H＋C 更好」，因此先不做第 14 節第 2 項的 72 維 stack：
+
+- config `b2.arms=["new"]`；要求 stack 臂時 `arm_options` 直接拒絕，探針也不跑 stack。stack 程式保留，之後要用時把 `"stack"` 加回 `arms`。
+- 新模型的 B2 維持 20 維＋P2 兩個讓先旗標＝22 維；H＋C 對照是 50 維＋P2＝52 維，兩邊都有 P2，差異只在上游特徵。
+- **配對架構比較**用 `fit_pool=fit`：新模型 B2 與 H＋C B2 在同一份 Valid-S∩D 固定題擬合，在同一份 M 題目評分，gate 與玩家 bootstrap 不變。`fit_all`（全部 D 玩家）同時改變了 B2 的擬合資料量，作為另一個變因分開報告，不拿來當架構比較的依據。
+- `stage3.slurm` 對 best／final 各跑 {fit, fit_all} × {prob, logp} 四個 new 臂；best／final 選擇仍以 config 的 fit_all＋logp 為準。新模型因此也要抽 `fit` 池特徵（約 4.7 萬盤，每候選每階段約 0.6 GPU-h）。

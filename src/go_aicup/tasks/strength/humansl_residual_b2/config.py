@@ -70,6 +70,9 @@ def validate_config(config):
         raise ValueError('b2.fit_pool must be fit or fit_all')
     if b2.get('aggregation', 'prob') not in AGGREGATIONS:
         raise ValueError('b2.aggregation must be prob or logp')
+    arms = b2.get('arms', ['new'])
+    if 'new' not in arms or not set(arms) <= set(ARMS):
+        raise ValueError('b2.arms must include new and only list new/stack')
     cap = b2.get('fit_all_cap_per_color', 20)
     if type(cap) is not int or cap < 20:
         raise ValueError('fit_all_cap_per_color must be an integer >= 20 so k=20 questions remain possible')

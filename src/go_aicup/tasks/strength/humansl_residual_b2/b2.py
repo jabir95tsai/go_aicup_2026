@@ -26,14 +26,22 @@ from .features import (BUCKETS, COLUMNS, FIT_POOLS, LOGP_COLUMNS, feature_path,
 FOLDS = (1, 2, 3, 4)
 
 
-def arm_options(config, arm=None, aggregation=None):
-    """Resolve the arm, its aggregation and its fitting pool from the config defaults."""
+def arm_options(config, arm=None, aggregation=None, fit_pool=None):
+    """Resolve the arm, its aggregation and its fitting pool from the config defaults.
+
+    Only arms listed in config b2.arms may be fitted/evaluated (default: the new 20-dim arm only).
+    fit_pool overrides the config pool so the new arm can also be fitted on the exact pool of the
+    controlled H+C baseline, giving a paired architecture comparison.
+    """
     b2 = config.get('b2', {})
     arm = arm or 'new'
     aggregation = aggregation or b2.get('aggregation', 'prob')
     if arm not in ('new', 'stack') or aggregation not in ('prob', 'logp'):
         raise ValueError('arm must be new/stack and aggregation prob/logp')
-    pool = b2.get('fit_pool', 'fit') if arm == 'new' else b2.get('stack_fit_pool', 'fit')
+    if arm not in b2.get('arms', ['new']):
+        raise ValueError(f'arm {arm} is disabled in config b2.arms')
+    default = b2.get('fit_pool', 'fit') if arm == 'new' else b2.get('stack_fit_pool', 'fit')
+    pool = fit_pool or default
     if pool not in FIT_POOLS:
         raise ValueError('B2 fitting pool must be fit or fit_all')
     return arm, aggregation, pool
@@ -146,8 +154,8 @@ def baseline_frame(config, pool, questions_name=None):
     return frame, sources
 
 
-def model_path(config, stage, candidate, phase='dev', arm=None, aggregation=None):
-    arm, aggregation, pool = arm_options(config, arm, aggregation)
+def model_path(config, stage, candidate, phase='dev', arm=None, aggregation=None, fit_pool=None):
+    arm, aggregation, pool = arm_options(config, arm, aggregation, fit_pool)
     return Path(config['run_dir']) / 'b2' / phase / f'stage{stage}' / candidate / f'{arm}_{aggregation}_{pool}' / 'model.pkl'
 
 
@@ -186,10 +194,10 @@ def release_pool(config, stage, candidate, fit_pool):
     return canonical, q, frame[frame.game_index.isin(needed)].reset_index(drop=True), fit_sources + mu_sources
 
 
-def fit(config, stage, candidate='best', phase='dev', arm=None, aggregation=None):
+def fit(config, stage, candidate='best', phase='dev', arm=None, aggregation=None, fit_pool=None):
     from .data import load_prepared
     started, cpu_started = time.perf_counter(), time.process_time()
-    arm, aggregation, fit_pool = arm_options(config, arm, aggregation)
+    arm, aggregation, fit_pool = arm_options(config, arm, aggregation, fit_pool)
     manifest = load_prepared(config)
     if phase == 'release':
         from .evaluate import load_lock
@@ -213,7 +221,7 @@ def fit(config, stage, candidate='best', phase='dev', arm=None, aggregation=None
                     prepared=object_hash(manifest), config=object_hash(config), sources=sources,
                     questions=object_hash(q.to_json(orient='records')), training_players=sorted(q.player_id.astype(str).unique()),
                     dimensions=dimensions, regularization_C=1, max_iter=5000, question_seed=2027)
-    path = model_path(config, stage, candidate, phase, arm, aggregation)
+    path = model_path(config, stage, candidate, phase, arm, aggregation, fit_pool)
     reused = path.exists()
     if reused:
         _, existing = load_model(path)
@@ -246,9 +254,10 @@ def main():
     p.add_argument('--phase', choices=('dev', 'release'), default='dev')
     p.add_argument('--arm', choices=('new', 'stack'), default=None)
     p.add_argument('--aggregation', choices=('prob', 'logp'), default=None)
+    p.add_argument('--fit-pool', choices=FIT_POOLS, default=None)
     a = p.parse_args()
     from .config import read_config
-    print(fit(read_config(a.config), a.stage, a.candidate, a.phase, a.arm, a.aggregation))
+    print(fit(read_config(a.config), a.stage, a.candidate, a.phase, a.arm, a.aggregation, a.fit_pool))
 
 
 if __name__ == '__main__':

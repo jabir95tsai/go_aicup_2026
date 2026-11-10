@@ -19,11 +19,16 @@ if [[ "$PHASE" == release ]]; then
     "$PYTHON_BIN" -m "$MODULE.b2" --config "$CONFIG" --stage "$STAGE" --phase release \
         --candidate "$CANDIDATE" --arm "$ARM" --aggregation "$AGGREGATION"
 else
-    # Both aggregations for the new arm; the config aggregation (logp) drives best/final selection.
+    # New 22-dim arm only (20 new + 2 P2), both aggregations, on two fitting pools:
+    #   fit     = the controlled H+C B2 pool -> paired ResNet-vs-H+C architecture comparison
+    #   fit_all = all D players capped per color -> the score-oriented configuration
+    # The config pool/aggregation (fit_all, logp) drives best/final selection.
     for candidate in best final; do
-        for aggregation in prob logp; do
-            "$PYTHON_BIN" -m "$MODULE.b2" --config "$CONFIG" --stage "$STAGE" --candidate "$candidate" \
-                --arm new --aggregation "$aggregation"
+        for pool in fit fit_all; do
+            for aggregation in prob logp; do
+                "$PYTHON_BIN" -m "$MODULE.b2" --config "$CONFIG" --stage "$STAGE" --candidate "$candidate" \
+                    --arm new --aggregation "$aggregation" --fit-pool "$pool"
+            done
         done
     done
     "$PYTHON_BIN" -m "$MODULE.evaluate" --config "$CONFIG" --stage "$STAGE" --select

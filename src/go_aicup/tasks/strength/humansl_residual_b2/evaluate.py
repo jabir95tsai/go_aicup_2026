@@ -35,18 +35,18 @@ def compare(q, reference, candidate, *, repeats=2000, seed=2027):
                                                  official_rows(score_rank(candidate), q.rank_id), repeats, seed))
 
 
-def prediction_path(config, stage, candidate, pool, arm=None, aggregation=None):
-    arm, aggregation, fit_pool = arm_options(config, arm, aggregation)
+def prediction_path(config, stage, candidate, pool, arm=None, aggregation=None, fit_pool=None):
+    arm, aggregation, fit_pool = arm_options(config, arm, aggregation, fit_pool)
     return (Path(config['run_dir']) / 'evaluation' / f'stage{stage}' / candidate
             / f'{arm}_{aggregation}_{fit_pool}' / f'{pool}.parquet')
 
 
-def evaluate(config, stage, candidate='best', pool='monitor', arm=None, aggregation=None):
+def evaluate(config, stage, candidate='best', pool='monitor', arm=None, aggregation=None, fit_pool=None):
     """Score one fitted B2 arm on M (or locked U) with fold-averaged upstream features."""
     if pool not in ('monitor', 'U'):
         raise ValueError('development evaluation is restricted to M or locked U')
-    arm, aggregation, _ = arm_options(config, arm, aggregation)
-    bundle = model_path(config, stage, candidate, 'dev', arm, aggregation)
+    arm, aggregation, fit_pool = arm_options(config, arm, aggregation, fit_pool)
+    bundle = model_path(config, stage, candidate, 'dev', arm, aggregation, fit_pool)
     model, identity = load_model(bundle)
     if identity['config'] != object_hash(config):
         raise ValueError('development config changed after B2 fit')
@@ -60,10 +60,10 @@ def evaluate(config, stage, candidate='best', pool='monitor', arm=None, aggregat
     baseline = baseline_frame(config, pool)[0] if arm == 'stack' else None
     proba = probabilities(model, games, q, frame, aggregation, baseline)
     result = report(q, proba)
-    result.update(pool=pool, arm=arm, aggregation=aggregation, upstream='fold-average', model=file_hash(bundle),
+    result.update(pool=pool, arm=arm, aggregation=aggregation, fit_pool=fit_pool, upstream='fold-average', model=file_hash(bundle),
                   sources=sources,
                   interpretation='development selection' if pool == 'monitor' else 'locked one-time U evaluation')
-    path = prediction_path(config, stage, candidate, pool, arm, aggregation)
+    path = prediction_path(config, stage, candidate, pool, arm, aggregation, fit_pool)
     output = q.drop(columns='games').assign(rank_prediction=score_rank(proba))
     for i, rank in enumerate(RANKS):
         output[f'p_{rank}'] = proba[:, i]
@@ -104,10 +104,10 @@ def gate_paths(reference, candidate, *, repeats=2000):
     return compare(left, left[columns].to_numpy(), right[columns].to_numpy(), repeats=repeats)
 
 
-def scale_diagnostics(config, stage, candidate, arm=None, aggregation=None):
+def scale_diagnostics(config, stage, candidate, arm=None, aggregation=None, fit_pool=None):
     """Same M and B2: each single fold model versus the four-fold average used for M/U/test."""
-    arm, aggregation, _ = arm_options(config, arm, aggregation)
-    model, _ = load_model(model_path(config, stage, candidate, 'dev', arm, aggregation))
+    arm, aggregation, fit_pool = arm_options(config, arm, aggregation, fit_pool)
+    model, _ = load_model(model_path(config, stage, candidate, 'dev', arm, aggregation, fit_pool))
     baseline = baseline_frame(config, 'monitor')[0] if arm == 'stack' else None
     result = {}
     for fold in ('avg', 1, 2, 3, 4):
@@ -119,7 +119,7 @@ def scale_diagnostics(config, stage, candidate, arm=None, aggregation=None):
             summary[name] = dict(entropy=float(-(p * logp).sum(1).mean()),
                                  nll=float(-logp[np.arange(len(q)), q.rank_id].mean()))
         result[str(fold)] = summary
-    path = Path(config['run_dir']) / 'diagnostics' / f'stage{stage}_{candidate}_{arm}_{aggregation}.json'
+    path = Path(config['run_dir']) / 'diagnostics' / f'stage{stage}_{candidate}_{arm}_{aggregation}_{fit_pool}.json'
     write_json(path, result)
     return result
 
@@ -141,12 +141,12 @@ def lock(config, arms):
             frozen[name] = dict(model=str(path), sha256=file_hash(path))
             continue
         stage, candidate = int(spec['stage']), spec['candidate']
-        arm, aggregation, fit_pool = arm_options(config, spec.get('arm'), spec.get('aggregation'))
+        arm, aggregation, fit_pool = arm_options(config, spec.get('arm'), spec.get('aggregation'), spec.get('fit_pool'))
         selection = root / 'selection' / f'stage{stage}.json'
         if json.loads(selection.read_text())['selected'] != candidate:
             raise ValueError('lock must use the selected M complete-B2 candidate')
         selections[str(stage)] = dict(path=str(selection), sha256=file_hash(selection))
-        path = model_path(config, stage, candidate, 'dev', arm, aggregation)
+        path = model_path(config, stage, candidate, 'dev', arm, aggregation, fit_pool)
         _, identity = load_model(path)
         if identity['config'] != object_hash(config):
             raise ValueError('arm config differs from current experiment')
@@ -204,6 +204,7 @@ def main():
     p.add_argument('--candidate', choices=('best', 'final'), default='best')
     p.add_argument('--pool', choices=('monitor', 'U'), default='monitor')
     p.add_argument('--arm', choices=('new', 'stack')); p.add_argument('--aggregation', choices=('prob', 'logp'))
+    p.add_argument('--fit-pool', choices=('fit', 'fit_all'))
     p.add_argument('--select', action='store_true'); p.add_argument('--diagnostics', action='store_true'); p.add_argument('--lock-arms')
     p.add_argument('--reference'); p.add_argument('--candidate-predictions'); p.add_argument('--output')
     a = p.parse_args()
@@ -214,11 +215,11 @@ def main():
     elif a.reference:
         result = gate_paths(a.reference, a.candidate_predictions)
     elif a.diagnostics:
-        result = scale_diagnostics(config, a.stage, a.candidate, a.arm, a.aggregation)
+        result = scale_diagnostics(config, a.stage, a.candidate, a.arm, a.aggregation, a.fit_pool)
     elif a.select:
         result = select(config, a.stage)
     else:
-        result = evaluate(config, a.stage, a.candidate, a.pool, a.arm, a.aggregation)
+        result = evaluate(config, a.stage, a.candidate, a.pool, a.arm, a.aggregation, a.fit_pool)
     if a.output:
         write_json(Path(a.output), result)
     print(json.dumps(result, indent=2))

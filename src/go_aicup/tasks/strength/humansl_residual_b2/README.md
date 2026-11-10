@@ -76,7 +76,7 @@ sbatch "$JOBS/probe_cache.slurm"   # 8 卡：fit_all、fit 與 M 每盤固定 30
 sbatch "$JOBS/probe_run.slurm"     # 1 卡：四折 OOF 線性／MLP 頭 → 每盤 prob／logp 平均 → B2 → M 分 k 報告
 ```
 
-結果在 `<run_dir>/probe/result.json`，每個臂包含 k=5/10/15/20、Equal-k；若對照 H＋C 的 M 預測已存在，另附配對 gate 與玩家 bootstrap；若對照 H＋C 特徵已存在，另跑 stack 臂。探針只用每盤 30 手，分數是同一讀出的保守下界。快取約 600 萬位置、約 9 GB。
+結果在 `<run_dir>/probe/result.json`，每個臂（linear／mlp × prob／logp × fit／fit_all）包含 k=5/10/15/20、Equal-k；若對照 H＋C 的 M 預測已存在，另附配對 gate 與玩家 bootstrap。架構比較看 `*_fit` 臂（與 H＋C 同擬合池）。探針只用每盤 30 手，分數是同一讀出的保守下界。快取約 600 萬位置、約 9 GB。
 
 ### 2. 第一／二階段只訓練四折
 
@@ -94,23 +94,27 @@ for FOLD in 1 2 3 4; do export FOLD; sbatch "$JOBS/stage1.slurm"; done
 ```bash
 export CANDIDATE=best STAGE_DIR=stage1
 for FOLD in 1 2 3 4; do
-    for POOL in fit_all monitor; do
+    for POOL in fit fit_all monitor; do
         CHECKPOINT=<run_dir>/dev/fold_$FOLD/$STAGE_DIR/$CANDIDATE.pt FOLD=$FOLD POOL=$POOL sbatch "$JOBS/features.slurm"
     done
 done
-# stack／H＋C 對照臂使用 stack_fit_pool（預設 fit）時，另以 POOL=fit 抽一次。
 export STAGE=1
-sbatch "$JOBS/stage3.slurm"   # best/final × prob/logp 的 new 臂 B2，再以 config 的 logp 選 best/final
+sbatch "$JOBS/stage3.slurm"   # best/final × {fit, fit_all} × {prob, logp} 的 new 臂 B2，再以 fit_all＋logp 選 best/final
 ```
 
-每盤特徵同時保存 prob 平均（`own_r`）和 log 機率平均（`own_lp_r`），格式為 `humansl_residual_features_v2`；舊 v1 特徵不能用於 logp 臂。stack 臂（H30＋C20＋新 20＋P2＝72 維）：
+每盤特徵同時保存 prob 平均（`own_r`）和 log 機率平均（`own_lp_r`），格式為 `humansl_residual_features_v2`；舊 v1 特徵不能用於 logp 臂。
+
+**本實驗只比較架構：新模型 B2 只用新 20 維＋P2（22 維），不做 72 維 stack。** config 的 `b2.arms=["new"]`，要求 stack 臂時程式直接拒絕；`probe.py` 也只在 `arms` 列出 stack 時才跑。ResNet 對 H＋C 的配對比較用 `--fit-pool fit`：兩者在同一個擬合池（Valid-S∩D 的固定題）、同一份 M 題目上比較，差異只來自上游特徵。`fit_all` 是另一個「多玩家擬合 B2」的變因，分開報告：
 
 ```bash
-python -m go_aicup.tasks.strength.humansl_residual_b2.b2 --config "$CONFIG" --stage 1 --candidate <selected> --arm stack --aggregation logp
-python -m go_aicup.tasks.strength.humansl_residual_b2.evaluate --config "$CONFIG" --stage 1 --candidate <selected> --arm stack --aggregation logp
+python -m go_aicup.tasks.strength.humansl_residual_b2.evaluate --config "$CONFIG" --stage 1 --candidate <selected> --arm new --aggregation logp --fit-pool fit
+python -m go_aicup.tasks.strength.humansl_residual_b2.evaluate --config "$CONFIG" \
+    --reference <run_dir>/baseline/dev/evaluation/monitor.parquet \
+    --candidate-predictions <run_dir>/evaluation/stage1/<selected>/new_logp_fit/monitor.parquet \
+    --output <run_dir>/gate_stage1_vs_hc.json
 ```
 
-H＋C 每個全盤位置約需 25 次 HumanSL 前向，因此 `b2.stack_fit_pool` 預設為較小的 `fit`（Valid-S∩D）；改成 `fit_all` 前要另估 GPU-h。`evaluate --diagnostics` 比較各單折與四折平均在同一 M 上的熵、NLL 與 B2 分數。
+`evaluate --diagnostics` 比較各單折與四折平均在同一 M 上的熵、NLL 與 B2 分數。
 
 ### 4. 對照、gate 與 U 鎖定
 
@@ -118,8 +122,8 @@ H＋C 對照沿用 `baseline.py`（四折 C 加全 D C，命令同下節舊說�
 
 ```json
 {
-  "s1_new_logp": {"stage": 1, "candidate": "best", "arm": "new", "aggregation": "logp"},
-  "s1_stack_logp": {"stage": 1, "candidate": "best", "arm": "stack", "aggregation": "logp"},
+  "s1_new_logp_fit": {"stage": 1, "candidate": "best", "arm": "new", "aggregation": "logp", "fit_pool": "fit"},
+  "s1_new_logp_fit_all": {"stage": 1, "candidate": "best", "arm": "new", "aggregation": "logp", "fit_pool": "fit_all"},
   "baseline": {"model": "<run_dir>/baseline/dev/model.pkl"}
 }
 ```
@@ -142,7 +146,7 @@ python -m go_aicup.tasks.strength.humansl_residual_b2.predict --config "$CONFIG"
 python -m go_aicup.tasks.strength.humansl_residual_b2.predict --work-root <release-root> --sample data/raw/tests/sample_submission_rank.csv --output submissions/rank/<job>-hrb2.csv
 ```
 
-每個 fold 的測試特徵分別快取，讀取時平均；stack 臂另以全 D C 向量抽測試題的 H＋C。
+每個 fold 的測試特徵分別快取，讀取時平均。release 時 `FIT_POOL` 依鎖定的臂而定（`stage3.slurm` 的 release 分支用 config 預設，必要時直接呼叫 `b2 --phase release --fit-pool ...`）。
 
 ## 舊流程說明（2026-11-09，已被上一節取代的部分僅供追溯）
 

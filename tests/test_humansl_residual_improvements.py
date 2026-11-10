@@ -210,3 +210,33 @@ def test_probe_readout_matches_stage_one_gather():
     assert out.shape == (3, 768)
     torch.testing.assert_close(out[:, :384], f.flatten(2).mean(2))
     torch.testing.assert_close(out[1, 384:], f[1, :, 200 // 19, 200 % 19])
+
+
+def test_stack_arm_is_disabled_and_new_arm_can_use_the_controlled_hc_pool(extension):
+    from go_aicup.tasks.strength.humansl_residual_b2 import evaluate
+    config, games = extension
+    with pytest.raises(ValueError, match='disabled'):
+        b2.arm_options(config, 'stack')
+    data.prepare_extension(config)
+    fit_ids = data.pool_game_ids(config, 'fit')
+    monitor_ids = data.pool_game_ids(config, 'monitor')
+    for fold in range(1, 5):
+        held = games[games.oof_fold.eq(fold) & games.game_index.isin(fit_ids)].game_index
+        _publish(config, games, 'fit', fold, _frame(games, held))
+        _publish(config, games, 'monitor', fold, _frame(games, monitor_ids))
+    path = b2.fit(config, 1, arm='new', aggregation='logp', fit_pool='fit')
+    assert path.parent.name == 'new_logp_fit'
+    _, identity = b2.load_model(path)
+    assert identity['fit_pool'] == 'fit' and identity['dimensions'] == 22
+    result = evaluate.evaluate(config, 1, 'best', 'monitor', 'new', 'logp', 'fit')
+    assert result['fit_pool'] == 'fit'
+    assert evaluate.prediction_path(config, 1, 'best', 'monitor', 'new', 'logp', 'fit').exists()
+
+
+def test_production_configs_only_enable_the_new_arm():
+    for name in ('train', 'smoke100'):
+        config = read_config(Path(__file__).parents[1] / f'configs/strength/humansl_residual_{name}.json')
+        assert config['b2']['arms'] == ['new']
+    bad = json.loads(json.dumps(config)); bad['b2']['arms'] = ['stack']
+    with pytest.raises(ValueError, match='must include new'):
+        validate_config(bad)

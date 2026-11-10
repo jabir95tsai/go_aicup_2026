@@ -70,8 +70,7 @@
     "fit_all_cap_per_color": 20,
     "aggregation": "logp",
     "arms": [
-      "new",
-      "stack"
+      "new"
     ]
   },
   "evaluation": {

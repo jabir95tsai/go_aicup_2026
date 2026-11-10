@@ -732,3 +732,5 @@ P1＋P2＋P3 設定，E2 Equal-k：首選 seed 2027 為 0.7372，五 seed 0.7372
 - **成本粗估（未驗證）：** 開發約 110–130 GPU-h；原計畫開發＋release 約 950 GPU-h。
 - **測試：** `tests/test_humansl_residual_*.py` 62 項 CPU 測試通過（84 秒），含新增 `test_humansl_residual_improvements.py`；release 預測與鎖定的舊測試改寫為四折版本。分 k 分數、探針結果、CPU 編碼吞吐與實際 GPU-h 均未知。
 - **下一步（需使用者確認後提交）：** `prepare --extension`（CPU）→ `probe_cache`（8 卡）→ `probe_run`（1 卡），並行跑 H＋C 對照；探針過 gate 才跑第一階段。
+
+**補充（同日，使用者決定）：** 本實驗只回答「ResNet 架構能否勝過 H＋C」，先不做 72 維 stack。config `b2.arms=["new"]`，stack 臂被程式拒絕、探針也不跑；新模型 B2 為 20 維＋P2＝22 維。新增 `fit_pool` 參數，讓新模型 B2 可在與 H＋C 相同的 `fit` 池擬合，作為配對架構比較；`fit_all` 視為另一個變因分開報告。`stage3.slurm` 改跑 best／final × {fit, fit_all} × {prob, logp}。residual 測試 64 項通過（90 秒）。未提交作業。

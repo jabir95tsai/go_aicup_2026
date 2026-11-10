@@ -82,7 +82,7 @@ def predict(config, work, *, arm_name, batch_size=300):
     if arm == 'stack':
         from .baseline import extract_rows
         baseline = extract_rows(config, rows, runtime, work / 'controlled_hc_games.parquet')
-    bundle = model_path(config, stage, candidate, 'release', arm, aggregation)
+    bundle = model_path(config, stage, candidate, 'release', arm, aggregation, spec.get('fit_pool'))
     b2, identity = load_model(bundle)
     if (identity['phase'] != 'release' or identity['stage'] != stage or identity['config'] != object_hash(config)
             or identity['arm'] != arm or identity['aggregation'] != aggregation):

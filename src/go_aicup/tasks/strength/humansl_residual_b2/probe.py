@@ -5,7 +5,8 @@ cache: one HumanSL forward per fixed position (15 own + 15 opponent per game, th
        768-dim readout [mean_board(trunkfinal), trunkfinal[played point]] in float16.
 run:   per head (linear, mlp) train four player-OOF folds on D positions, aggregate per game
        (prob and log-prob means per branch), M = average of the four fold models, then the same
-       per-k linear B2 as the main pipeline. Optional stack arm with controlled H+C features.
+       per-k 22-dim linear B2 as the main pipeline, fitted on both fit (the controlled H+C pool,
+       paired comparison) and fit_all. The 72-dim stack arm only runs if b2.arms lists it.
 
 The probe uses 30 positions per game while the full pipeline uses every ply>=30 position, so
 its B2 scores are a conservative lower bound of what the same readout could reach.
@@ -262,8 +263,9 @@ def run(config):
                 if reference is not None:
                     entry['gate_vs_controlled_hc'] = compare(mq, reference[P_COLUMNS].to_numpy(), proba)
                 result['arms'][name] = entry
-        stack = _stack_arm(config, rows, oof_frame, monitor_frame, q_monitor, reference)
-        result['arms'].update({f'{kind}_{k}': v for k, v in stack.items()})
+        if 'stack' in config.get('b2', {}).get('arms', ['new']):
+            stack = _stack_arm(config, rows, oof_frame, monitor_frame, q_monitor, reference)
+            result['arms'].update({f'{kind}_{k}': v for k, v in stack.items()})
     result['seconds'] = time.perf_counter() - started
     result['device'] = str(device)
     write_json(out / 'result.json', result)
