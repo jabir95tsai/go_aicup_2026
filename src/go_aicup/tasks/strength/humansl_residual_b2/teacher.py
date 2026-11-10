@@ -1,6 +1,7 @@
 """Resumable strong KataGo labels for actual training positions only."""
 import argparse
 import json
+import os
 import hashlib
 import time
 import signal
@@ -124,6 +125,119 @@ class TeacherLabels:
         return selected
 
 
+def _fsync_dir(directory):
+    fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _durable_write(path, writer):
+    """Plain write + fsync + atomic rename; shared memmap writes were silently lost on Nano4 WekaFS."""
+    path = Path(path)
+    temporary = path.with_name(path.name + '.tmp')
+    with temporary.open('wb') as handle:
+        writer(handle)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+    _fsync_dir(path.parent)
+
+
+def _read_from_disk(path):
+    """Drop this node's clean cached pages first so verification re-reads what the filesystem holds."""
+    with open(path, 'rb') as handle:
+        try:
+            os.posix_fadvise(handle.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+        except (AttributeError, OSError):
+            pass
+        return np.load(handle, allow_pickle=False)
+
+
+def _valid_rows(source, values, done, checksums):
+    valid = np.zeros(len(source), dtype=bool)
+    for game in source.itertuples():
+        index = int(game.row)
+        if not done[index]:
+            continue
+        segment = values[int(game.offset):int(game.offset) + int(game.length) - 30]
+        valid[index] = (np.isfinite(segment).all() and not np.any(np.abs(segment) > 1)
+                        and value_digest(segment) == int(checksums[index]))
+    return valid
+
+
+def _load_state(out, source, count):
+    """Verified consolidated rows plus committed chunks; anything unverifiable is relabelled."""
+    values = np.full(count, np.nan, dtype=np.float32)
+    done = np.zeros(len(source), dtype=bool)
+    checksums = np.zeros(len(source), dtype=np.uint64)
+    discarded = 0
+    if all((out / name).exists() for name in ('values.npy', 'done.npy', 'checksums.npy')):
+        old_values, old_done, old_checksums = (_read_from_disk(out / name) for name in ('values.npy', 'done.npy', 'checksums.npy'))
+        if old_values.shape != (count,) or old_done.shape != (len(source),) or old_checksums.shape != (len(source),):
+            raise ValueError('teacher shard arrays do not match the index')
+        valid = _valid_rows(source, old_values, old_done, old_checksums)
+        discarded = int(old_done.sum() - valid.sum())
+        for game in source[valid[source.row.to_numpy()]].itertuples():
+            index, start = int(game.row), int(game.offset)
+            stop = start + int(game.length) - 30
+            values[start:stop] = old_values[start:stop]
+            done[index] = True
+            checksums[index] = old_checksums[index]
+    lengths = source.length.to_numpy() - 30
+    offsets = source.offset.to_numpy()
+    for path in sorted((out / 'chunks').glob('chunk_*.npz')):
+        with np.load(path, allow_pickle=False) as chunk:
+            rows, digests, sizes, flat = chunk['rows'], chunk['checksums'], chunk['lengths'], chunk['values']
+        if len(rows) != len(digests) or len(rows) != len(sizes) or int(sizes.sum()) != len(flat):
+            raise ValueError(f'teacher chunk malformed: {path.name}')
+        cursor = 0
+        for row, digest, size in zip(rows.tolist(), digests.tolist(), sizes.tolist()):
+            segment = flat[cursor:cursor + size]; cursor += size
+            if (size != lengths[row] or not np.isfinite(segment).all() or np.any(np.abs(segment) > 1)
+                    or value_digest(segment) != digest):
+                raise ValueError(f'teacher chunk row invalid: {path.name}')
+            values[offsets[row]:offsets[row] + size] = segment
+            done[row] = True
+            checksums[row] = digest
+    return values, done, checksums, discarded
+
+
+def _commit_chunk(out, sequence, pending):
+    rows = np.asarray([row for row, _, _ in pending], dtype=np.int64)
+    digests = np.asarray([digest for _, digest, _ in pending], dtype=np.uint64)
+    sizes = np.asarray([len(segment) for _, _, segment in pending], dtype=np.int64)
+    flat = np.concatenate([segment for _, _, segment in pending]).astype(np.float32)
+    (out / 'chunks').mkdir(exist_ok=True)
+    _durable_write(out / 'chunks' / f'chunk_{sequence:06d}.npz',
+                   lambda handle: np.savez(handle, rows=rows, checksums=digests, lengths=sizes, values=flat))
+
+
+def _publish_arrays(out, values, done, checksums):
+    for name, array in (('values.npy', values), ('checksums.npy', checksums), ('done.npy', done)):
+        _durable_write(out / name, lambda handle, array=array: np.save(handle, array))
+
+
+def verify_shard(config, *, phase='dev', shard=0, limit_games=None):
+    """Re-read published arrays from disk and check every requested training row."""
+    table = games(config, phase).sort_values('game_index').reset_index(drop=True)
+    num_shards = config['teacher'].get('num_shards', 8)
+    source = table[table.game_index.mod(num_shards).eq(shard)].copy().reset_index(drop=True)
+    source['row'] = np.arange(len(source)); source['offset'] = np.r_[0, np.cumsum(source.length.to_numpy()[:-1] - 30)]
+    out = _shard(config, shard)
+    record = json.loads((out / 'manifest.json').read_text())
+    if file_hash(out / 'index.parquet') != record['index_sha256'] or record['positions'] != int(np.sum(source.length - 30)):
+        raise ValueError('teacher index checksum changed')
+    values, done, checksums = (_read_from_disk(out / name) for name in ('values.npy', 'done.npy', 'checksums.npy'))
+    training = source[source.role.eq('P' if phase == 'release' else 'D')]
+    if limit_games is not None:
+        training = training.iloc[:limit_games]
+    valid = _valid_rows(source, values, done, checksums)
+    verified = int(valid[training.row.to_numpy()].sum())
+    return dict(training_games=len(training), verified_games=verified, complete=verified == len(training))
+
+
 def label(config, *, phase='dev', shard=0, limit_games=None):
     started = time.monotonic()
     release = phase == 'release'
@@ -133,8 +247,11 @@ def label(config, *, phase='dev', shard=0, limit_games=None):
     prepared = load_prepared(config, release=release)
     table = games(config, phase).sort_values('game_index').reset_index(drop=True)
     cfg = config['teacher']; num_shards = cfg.get('num_shards', 8)
+    chunk_games = cfg.get('chunk_games', 500)
     if type(num_shards) is not int or num_shards < 1 or cfg.get('visits', 1) != 1 or not 0 <= shard < num_shards:
         raise ValueError('invalid teacher shard')
+    if type(chunk_games) is not int or chunk_games < 1:
+        raise ValueError('invalid teacher chunk_games')
     if file_hash(Path(cfg['model_path'])) != file_hash(MODEL):
         raise ValueError('teacher must be the registered strong KataGo network')
     # Role membership is deliberately absent: release can extend the same labels.
@@ -164,19 +281,15 @@ def label(config, *, phase='dev', shard=0, limit_games=None):
                 raise ValueError('teacher position alignment changed')
             if file_hash(out / 'index.parquet') != record['index_sha256']:
                 raise ValueError('teacher index checksum changed')
-            values = np.load(out / 'values.npy', mmap_mode='r+')
-            done = np.load(out / 'done.npy', mmap_mode='r+')
-            checksums = np.load(out / 'checksums.npy', mmap_mode='r+')
         else:
             atomic_table(out / 'index.parquet', source.drop(columns=['role', 'oof_fold'], errors='ignore'))
-            values = np.lib.format.open_memmap(out / 'values.npy', mode='w+', dtype=np.float32, shape=(count,))
-            values[:] = np.nan; values.flush()
-            done = np.lib.format.open_memmap(out / 'done.npy', mode='w+', dtype=np.bool_, shape=(len(source),))
-            done[:] = False; done.flush()
-            checksums = np.lib.format.open_memmap(out / 'checksums.npy', mode='w+', dtype=np.uint64, shape=(len(source),))
-            checksums[:] = 0; checksums.flush()
             write_json(marker, dict(teacher_id=object_hash(identity), positions=count,
                                     index_sha256=file_hash(out / 'index.parquet')))
+        values, done, checksums, discarded_games = _load_state(out, source, count)
+        if discarded_games:
+            # Publish the honest state now so external progress checks never count unverifiable rows.
+            _publish_arrays(out, values, done, checksums)
+        sequence = 1 + max([int(p.stem.split('_')[1]) for p in (out / 'chunks').glob('chunk_*.npz')], default=-1)
         training = source[source.role.eq('P' if release else 'D')]
         if limit_games is not None:
             if limit_games < 1:
@@ -195,49 +308,69 @@ def label(config, *, phase='dev', shard=0, limit_games=None):
         new_games = new_positions = imported_positions = 0
         engine = None
         success = False
+        pending = []
+        verification = None
         try:
-            for game in training.itertuples():
-                if stopped[0]:
-                    break
-                index = int(game.row)
-                if done[index]:
-                    existing = values[int(game.offset):int(game.offset) + int(game.length) - 30]
-                    if not np.isfinite(existing).all() or np.any(np.abs(existing) > 1) or value_digest(existing) != int(checksums[index]):
-                        raise ValueError('completed teacher row is corrupt')
-                    continue
-                moves, colors = store.game(int(game.store_index)); plies = np.arange(30, len(moves))
-                imported, targets = reuse.positions(game, colors) if reuse else (np.empty(0, np.int64), None)
-                # Incomplete games are rebuilt; uncommitted mmap values are never trusted after interruption.
-                values[int(game.offset):int(game.offset) + len(moves) - 30] = np.nan
-                values[int(game.offset) + imported - 30] = targets if targets is not None else []
-                imported_positions += len(imported)
-                missing = np.setdiff1d(plies, imported)
-                completed = set(imported)
-                if len(missing):
-                    if engine is None:
-                        engine = Engine(Path(cfg['engine']), Path(cfg['model_path']), Path(cfg['analysis_config']),
-                                        out / 'engine.log', cfg.get('timeout', 300))
-                    query = make_query(f'{game.rank}/{game.game_id}', moves, colors, missing, 1, 'japanese', 6.5 if game.hd == 0 else .5)
-                    for ply, response in engine.analyze(query):
-                        if ply not in missing or ply in completed:
-                            raise ValueError('unexpected/duplicate teacher ply')
-                        _, value, _, _, _ = parse_root(response, int(colors[ply]))
-                        values[int(game.offset) + ply - 30] = value; completed.add(ply)
-                        new_positions += 1
-                if completed != set(plies):
-                    raise ValueError('teacher failed to return every required actual-side target')
-                values.flush()
-                checksums[index] = value_digest(values[int(game.offset):int(game.offset) + int(game.length) - 30]); checksums.flush()
-                done[index] = True; done.flush()
-                new_games += 1
-            success = not stopped[0]
+            try:
+                for game in training.itertuples():
+                    if stopped[0]:
+                        break
+                    index = int(game.row)
+                    if done[index]:
+                        continue
+                    moves, colors = store.game(int(game.store_index)); plies = np.arange(30, len(moves))
+                    imported, targets = reuse.positions(game, colors) if reuse else (np.empty(0, np.int64), None)
+                    segment = np.full(len(moves) - 30, np.nan, dtype=np.float32)
+                    segment[imported - 30] = targets if targets is not None else []
+                    imported_positions += len(imported)
+                    missing = np.setdiff1d(plies, imported)
+                    completed = set(imported)
+                    if len(missing):
+                        if engine is None:
+                            engine = Engine(Path(cfg['engine']), Path(cfg['model_path']), Path(cfg['analysis_config']),
+                                            out / 'engine.log', cfg.get('timeout', 300))
+                        query = make_query(f'{game.rank}/{game.game_id}', moves, colors, missing, 1, 'japanese', 6.5 if game.hd == 0 else .5)
+                        for ply, response in engine.analyze(query):
+                            if ply not in missing or ply in completed:
+                                raise ValueError('unexpected/duplicate teacher ply')
+                            _, value, _, _, _ = parse_root(response, int(colors[ply]))
+                            segment[ply - 30] = value; completed.add(ply)
+                            new_positions += 1
+                    if completed != set(plies) or not np.isfinite(segment).all() or np.any(np.abs(segment) > 1):
+                        raise ValueError('teacher failed to return every required actual-side target')
+                    digest = value_digest(segment)
+                    values[int(game.offset):int(game.offset) + len(segment)] = segment
+                    checksums[index] = digest; done[index] = True
+                    pending.append((index, digest, segment))
+                    new_games += 1
+                    if len(pending) >= chunk_games:
+                        _commit_chunk(out, sequence, pending); sequence += 1; pending = []
+                success = not stopped[0]
+            finally:
+                if engine is not None:
+                    engine.close()
+                # Only whole, validated games are ever pending, so they are always safe to commit.
+                if pending:
+                    _commit_chunk(out, sequence, pending); sequence += 1; pending = []
+                _publish_arrays(out, values, done, checksums)
+                verification = verify_shard(config, phase=phase, shard=shard, limit_games=limit_games)
+                if verification['verified_games'] != int(done[training.row.to_numpy()].sum()):
+                    raise ValueError('published teacher arrays differ from committed labels on re-read')
+                # Chunks are redundant only after the published arrays re-read correctly.
+                for path in sorted((out / 'chunks').glob('chunk_*.npz')):
+                    path.unlink()
         finally:
-            if engine is not None:
-                engine.close()
             seconds = time.monotonic() - started
-            metrics = dict(phase=phase, shard=shard, training_games=len(training), completed_games=int(done.sum()),
+            if success and not (verification or {}).get('complete'):
+                status = 'incomplete'
+            else:
+                status = 'complete' if success else ('stopped' if stopped[0] else 'failed')
+            metrics = dict(phase=phase, shard=shard, training_games=len(training),
+                           completed_games=int(done[training.row.to_numpy()].sum()),
+                           verified_games=(verification or {}).get('verified_games'),
+                           discarded_games=discarded_games,
                            teacher_id=object_hash(identity), prepared_id=prepared['dataset_id'],
-                           status='complete' if success else ('stopped' if stopped[0] else 'failed'), seconds=seconds, setup_seconds=setup_seconds,
+                           status=status, seconds=seconds, setup_seconds=setup_seconds,
                            new_games=new_games, new_positions=new_positions, imported_positions=imported_positions,
                            runtime_code_sha256=file_hash(Path(__file__)),
                            positions_per_second=new_positions / seconds if seconds else 0.,
@@ -253,9 +386,16 @@ def main(argv=None):
     parser.add_argument('--phase', choices=['dev', 'release'], default='dev')
     parser.add_argument('--shard', type=int, default=0)
     parser.add_argument('--limit-games', type=int)
+    parser.add_argument('--verify', action='store_true', help='only re-read published arrays and check completeness')
     args = parser.parse_args(argv)
-    print(json.dumps(label(read_config(args.config), phase=args.phase, shard=args.shard, limit_games=args.limit_games)))
-    return 0
+    config = read_config(args.config)
+    if args.verify:
+        result = verify_shard(config, phase=args.phase, shard=args.shard, limit_games=args.limit_games)
+        print(json.dumps(dict(result, shard=args.shard, phase=args.phase)))
+        return 0 if result['complete'] else 1
+    metrics = label(config, phase=args.phase, shard=args.shard, limit_games=args.limit_games)
+    print(json.dumps(metrics))
+    return 0 if metrics['status'] == 'complete' else 1
 
 
 if __name__ == '__main__':
