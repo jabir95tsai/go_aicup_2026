@@ -637,8 +637,8 @@ P1＋P2＋P3 設定，E2 Equal-k：首選 seed 2027 為 0.7372，五 seed 0.7372
 
 **noA＋train20（2026-11-09，使用者同意，約 10 GPU-h）：** `scripts/strength/rank_train20_hc.py`、`slurm/rank_train20_hc.slurm`（Slurm 733177，8 卡；後續 CPU 733179 先匯出 `ahc-p3-noA-t20`、`ahc-p3-noA-t20-allp` 再跑 E2／E1 五 seed）。A-047 的 train20（每位 train 切分玩家最多 20 盤）去掉 HD≥2 與學 C 向量用過的 15,000 盤：HD0 68,513 盤補 C（貼 6.5，H 已有），HD1 18,235 盤以貼 0.5 重算 H＋C。可組題（玩家、顏色）k=5／10／15／20 由 3,807／2,178／1,305／816 增為 9,948／6,542／3,502／2,112。增益未知。
 - GPU 733177：8 卡 81 分（約 10.8 GPU-h），86,748／86,748 盤特徵完整。擬合盤數 62,867 → 149,615；B2 可抽玩家（依 player_id，≥k 盤）k=5／10／15／20：2,685／1,847／1,359／1,036 → 5,604／5,177／4,500／3,146。
-- `ahc-p3-noA-t20-allp_733179_rank.csv`（SHA `bd14b596…`）：Valid-S＋train20＋Valid-U；對 noA-allp 改 40／49 題。**LB 11/09 16:57:42（jabir95tsai）Public 0.7404805（15/103），對 noA-allp +0.0018**（40 題不同，淨多約 0.7 分，雜訊範圍）；目前 Public 最高分。
-- `ahc-p3-noA-t20_733179_rank.csv`（SHA `695140f6…`）：Valid-S＋train20；對 noA-allp 改 66／59 題（對 noA 76／80）。
+- `ahc-p3-noA-t20-allp_733179_rank.csv`（SHA `695140f6…`；11/10 更正，原誤記為 `bd14b596`）：Valid-S＋train20＋Valid-U；對 noA-allp 改 40／49 題。**LB 11/09 16:57:42（jabir95tsai）Public 0.7404805（15/103），對 noA-allp +0.0018**（40 題不同，淨多約 0.7 分，雜訊範圍）；目前 Public 最高分。
+- `ahc-p3-noA-t20_733179_rank.csv`（SHA `bd14b596…`；11/10 更正）：Valid-S＋train20；對 noA-allp 改 66／59 題（對 noA 76／80）。
 - 預測分布（800 題，D…6D）：noA-allp 87／98／91／111／52／71／63／81／78／68；noA-t20-allp 86／92／98／128／34／70／66／87／72／67。加入 train 切分玩家後 1D 預測變少、A 變多，與各級玩家數（1D 433 人、A 1,582 人）造成的 B2 隱含先驗一致；測試集的級別分布未知。
 - **本地（Slurm 733179，CPU 19 分；Valid-S 擬合 vs Valid-S＋train20 擬合，Valid-U 評分）：**
 
@@ -678,6 +678,7 @@ P1＋P2＋P3 設定，E2 Equal-k：首選 seed 2027 為 0.7372，五 seed 0.7372
   - **上傳判斷（22:17 上傳前登記）：** 本地沒有支持 → 不升為基底，只當資訊探針用掉今日最後一次額度。預期 LB 與 0.7509 差距在 ±0.02 內（雜訊）；不論升降，基底維持 `-prior`，除非之後本地證據轉正。
   - **LB 11/09 22:18:13（jabir95tsai）Public 0.7508820（12/106）**，與 21:50 的 `-prior` 到第 7 位小數完全相同。使用者當時在 IDE 開的是 `ahc-p3-noA-t20-allp-prior_737645_rank.csv`（與 `-prior_736589` 逐位元相同），**使用者確認誤傳了重複檔**，`-prior-ex` 未上傳、仍無 LB 分數；此次額度浪費，不影響基底。
   - **命名規則（2026-11-09 使用者要求，`go_aicup.tasks.strength.submission_files.write_rank_csv`）：** 平台會把長檔名截成 `ahc-p3-noA-t20-a...csv`，前綴相同的檔看起來一樣。新檔一律 `<job>-<tag>.csv`（tag ≤ 8 字元，全名 ≤ 19 字元，例 `737645-priorex.csv`），完整來源記在本檔；與既有檔內容相同時不再另寫。`rank_more_players.py` 已改用；其他舊匯出腳本下次使用時再改。
+  - **`737645-priorex.csv` LB 11/10 10:59:23（jabir95tsai）Public 0.7468017（14/108），對基底 `-prior`（0.7509）−0.0041**：24 題不同、全為差一級，淨少約 1.6 分（約 2.6 題由對變鄰級），在 ±0.02 雜訊內；與本地 local-ex 先驗對齊 E1 −0.0016／E2 −0.0007 同方向。結論：先驗對齊後再加 794 人無增益，**基底維持 `-prior_736589`**。⚠️ 平台上競賽二的最後一筆現在是 `priorex`，停止上傳前須再傳一次基底（或之後更好的檔）。
   - **決策原則（同日使用者修訂 CLAUDE.md §6）：** 最終排名看 Private LB，以本地多 seed 證據＋機制為主，Public 差距 < 約 0.02 視為雜訊。`-prior` 上傳的事前規則：除非 Public 掉超過 0.02，否則保留為候選基底。
 
 
@@ -699,3 +700,35 @@ P1＋P2＋P3 設定，E2 Equal-k：首選 seed 2027 為 0.7372，五 seed 0.7372
 保留原 identity／分片 manifest，明列原 labeler SHA-256 作為相容續跑版本；已完成棋局略過，未完成棋局先匯入再補缺值，整盤才提交 checksum/done。共用初始化改用等待式檔案鎖、分片用獨占非等待鎖，程序退出自動釋放；Slurm exec Python 並在 USR1/TERM/INT 後完成當前棋局再停止。確認八個舊作業已取消且無 teacher 工作後，清理八個殘留 `.writer.lock`。
 
 來源／索引拒絕、HD1 排除、八片匯入／中斷重試、不覆寫已完成值、鎖競爭與既有資料／訓練／模型回歸共 25 項 CPU 測試通過（50.38 秒）；Slurm bash 語法通過。未啟動 GPU 補算或 Slurm，實際提速、剩餘時間與 k=5/10/15/20 棋力增益未知。兩份既有 config 已啟用匯入，續跑指令見套件 README。
+
+
+## 2026-11-10：提交檔整理
+
+`submissions/rank/` 頂層只留現行基底 `ahc-p3-noA-t20-allp-prior_736589_rank.csv`（`d98def9c`）；其餘移到 `archive/`，三個逐位元重複檔（`-prior_737127`、`-prior_737645`、`-ex_737645`）移到 `archive/duplicates/`，未刪除任何檔。索引（每檔 SHA、上傳時間、Public LB、未上傳原因）見 `submissions/rank/INDEX.md`。`rank_b2_bagging.py`／`rank_more_players.py` 寫死的重現檢查路徑同步改指 `archive/`。
+整理時重算 SHA 發現 11/09 紀錄把 `noA-t20-allp_733179`（實為 `695140f6`）與 `noA-t20_733179`（實為 `bd14b596`）的 SHA 寫反；已以題數差（對 noA-allp 40／49 vs 66／59）與預測分布確認檔案內容正確、只是帳本誤記，上方已更正。
+
+
+
+## 2026-11-10：HumanSL residual teacher 742066「完成」但標籤未落地 → 改寫入方式重跑（746225）
+
+- **現象：** array 742066（8 分片 × 1 GPU，各約 3.1 h，共約 25.6 GPU-h）全部 `COMPLETED`、exit 0、`metrics.json` 寫 `status=complete`，但磁碟重驗只有 **23,304／618,954 盤 D（3.8%）** 可驗證，幾乎等於開跑前的 SE3 匯入續跑量。
+- **判定為何誤報：** 舊 `status=complete` 只表示迴圈未被停止；`completed_games` 讀的是程序自己的 memmap 映射，未檢查 `done.sum()==training_games`，也未從磁碟重讀。
+- **為何未寫入（證據）：** `values/done/checksums.npy` 以 `np.memmap` r+ 原地寫、每盤 `flush()`（msync 回報成功）。執行於 hgpn030／hgpn032 的分片 2–7，三個檔的 mtime 停在開跑後首次寫入（10:38），3 小時內頁面從未寫回；hgpn004 的分片 0／1 前約 15% 處理量遺失、之後落地，但 `checksums.npy` 全程未落地（約 11.7 萬列有值、checksum=0）。分片 0–2 連程序自身視圖都掉列（髒頁被丟棄），與登入節點 11:17–11:24 讀取時間吻合，原因只能部分解釋。同作業一般寫入（metrics.json、se3_import.json）正常；在原節點讀檔與伺服器相同，無法搶救。
+- **重現：** 健康節點 hgpn015（746008，並行讀取）與 hgpn013（746025，先獨占寫 5 分鐘、96 MB 檔）上，memmap+flush、+fsync、pwrite+fsync、不 flush 四種寫法全部完整落地（90/90、210/210）。WEKA 文件未提 mmap；**根因（Weka client 狀態／節點相依）未知**。診斷約 0.3 GPU-h，腳本在 `outputs/diag/memmap_weka/`。
+- **修正（`teacher.py`）：** 每 `chunk_games`（500）盤寫 `chunks/chunk_*.npz`（一般寫入＋fsync＋原子 rename＋目錄 fsync）；結束時原子發布三個 `.npy`、丟本機快取後重讀驗證，相符才刪 chunk；續跑逐盤重驗既有陣列，不可驗證列丟棄重算；只有 D 全部經磁碟重讀驗證才 `complete`，否則非 0 結束。Slurm 改 6 h、轉送 USR1，另起程序 `--verify`；進度腳本計入 chunk 作為登入節點外部檢查。標籤語意與 teacher_id 不變（identity 仍為 LEGACY 相容）。新增 4 項測試（崩潰保留已提交 chunk 不重查、發布失敗由 chunk 重放、舊列 checksum=0 丟棄重算、重讀不符不得 complete），相關回歸共 25 項通過。
+- **重跑：** array **746225**（8 分片 × 1 GPU，16:04 開跑）。16:14 外部檢查：全部分片（含又排到 hgpn030 的 6／7）chunk 持續落地，約 18.4 萬盤／h，預估約 3.0 h、約 26 GPU-h。完成與驗證結果待補。
+
+
+## 2026-11-10：HumanSL residual B2 修訂（使用者同意「全部依建議修改」）
+
+只改程式、設定、測試與文件；沒有提交任何作業，也沒有動執行中的 teacher（746225 於 16:03:50 開跑，早於本次修改；teacher 身分綁定的 `dataset.py`、`teacher.py` 與 base prepared manifest 都未改，`dataset_id` 仍為 `5777bfbe…`）。完整理由與取代關係見 `humansl_residual_b2/PLAN.md` §14。
+
+- **聚合：** 每盤每方加存 log_softmax 平均（特徵格式 v2）；B2 主臂改 `aggregation=logp`，prob 保留作對照（依據 A-025：log 聚合在 Valid-U +0.064）。
+- **stack 臂：** H30＋C20＋新 20＋P2＝72 維 B2；H＋C 預設仍只在 `fit` 池抽（`stack_fit_pool`），因每位置約 25 次前向。
+- **B2 玩家數：** 新增 `ext_v1` 擴充池 `fit_all`＝全部 D 玩家 5,167 人、每人每色最多 20 盤（約 157,843 盤），原 B_dev 為 4,404 人／56,246 盤。
+- **預算：** 第一階段 3,000 步（每 300 步監控）、第二階段 6,000 步（每 600 步），cosine 衰減到 5%；原為各 20,000 步、每 5,000 步監控、常數 LR。
+- **上游：** 不訓練全 D 模型；M／U／測試用四個 fold 模型的每盤特徵平均。取消 release 重訓：鎖定綁四個 fold checkpoint，release B2 以開發 OOF＋四折平均的 M＋U 擬合。
+- **探針：** 新增 `probe.py`＋`probe_cache.slurm`／`probe_run.slurm`，凍結主幹 768 維讀出、四折 OOF 線性／MLP 頭＋B2，在 M 上分 k 報告（有 H＋C 時附 gate）。
+- **成本粗估（未驗證）：** 開發約 110–130 GPU-h；原計畫開發＋release 約 950 GPU-h。
+- **測試：** `tests/test_humansl_residual_*.py` 62 項 CPU 測試通過（84 秒），含新增 `test_humansl_residual_improvements.py`；release 預測與鎖定的舊測試改寫為四折版本。分 k 分數、探針結果、CPU 編碼吞吐與實際 GPU-h 均未知。
+- **下一步（需使用者確認後提交）：** `prepare --extension`（CPU）→ `probe_cache`（8 卡）→ `probe_run`（1 卡），並行跑 H＋C 對照；探針過 gate 才跑第一階段。

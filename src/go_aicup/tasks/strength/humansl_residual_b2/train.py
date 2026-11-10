@@ -28,7 +28,7 @@ from go_aicup.tasks.strength.shared.runtime import (
 from go_aicup.tasks.strength.shared.training import (
     configure_torch, environment, log_event, restore_rng, rng_state, seed_process,
 )
-from .config import read_config, runtime_config
+from .config import monitor_every, read_config, runtime_config
 
 
 def run_directory(config, phase, fold, stage):
@@ -86,10 +86,15 @@ def validation_transition(state, score, step, patience=3):
 
 
 def learning_rate(options, completed):
+    """Step schedule first, then optional cosine decay to min_lr_ratio at the budget end."""
     lr = options['lr']
     for boundary, value in options['lr_schedule']:
         if completed >= boundary:
             lr = value
+    if options.get('lr_decay', 'none') == 'cosine':
+        ratio = options.get('min_lr_ratio', 0.0)
+        progress = min(max(completed / options['updates'], 0.0), 1.0)
+        lr *= ratio + (1 - ratio) * .5 * (1 + math.cos(math.pi * progress))
     return lr
 
 
@@ -118,9 +123,12 @@ def monitor(config, model, rank, world):
         batch = to_device({k: torch.as_tensor(v) for k, v in raw.items()}, next(model.parameters()).device)
         with autocast_context(config, next(model.parameters()).device):
             result = forward_batch(model, batch)
-        probabilities = result['rank_logits'].float().softmax(-1).cpu().numpy()
+        logp = result['rank_logits'].float().log_softmax(-1).cpu().numpy()
+        probabilities = np.exp(logp)
         sides = np.asarray(raw['sides'])
-        local.append((int(rows.iloc[row].game_index), np.stack([probabilities[sides == side].mean(0) for side in (0, 1)])))
+        local.append((int(rows.iloc[row].game_index),
+                      np.stack([probabilities[sides == side].mean(0) for side in (0, 1)]
+                               + [logp[sides == side].mean(0) for side in (0, 1)])))
     if world > 1:
         gathered = [None] * world
         dist.all_gather_object(gathered, local)
@@ -129,8 +137,14 @@ def monitor(config, model, rank, world):
     if set(lookup) != ids:
         raise ValueError('monitor game coverage mismatch')
     by_question = np.stack([np.mean([lookup[int(i)] for i in row], axis=0) for row in q.games])
+    # Early stopping keeps the fixed equal-weight probability fusion (no fitted temperature).
+    # The log-probability fusion is reported for diagnosis only: softmax(mean log p) at T=1.
+    fused_logp = by_question[:, 2:].mean(1)
+    fused_logp = np.exp(fused_logp - fused_logp.max(1, keepdims=True))
+    fused_logp /= fused_logp.sum(1, keepdims=True)
     result = {}
-    for name, values in [('own', by_question[:, 0]), ('opp', by_question[:, 1]), ('fused', by_question.mean(1))]:
+    for name, values in [('own', by_question[:, 0]), ('opp', by_question[:, 1]),
+                         ('fused', by_question[:, :2].mean(1)), ('fused_logp_t1', fused_logp)]:
         result[name] = report(q, values)
         result[name]['ce'] = float(-np.log(np.maximum(values[np.arange(len(q)), q.rank_id.to_numpy()], 1e-30)).mean())
         for k, bucket in result[name]['by_k'].items():
@@ -155,12 +169,8 @@ def train(config, stage, phase='dev', fold='all', source=None, resume=True, stop
         if Path(source).resolve() != expected.resolve():
             raise ValueError('stage two must use the stage-one complete-B2 selection for this fold')
     options = dict(config[f'stage{stage}'])
-    if phase == 'release':
-        from .evaluate import load_lock
-        locked = load_lock(config)
-        options['updates'] = locked['fixed_steps'][f's{stage}']
-        if config.get('smoke'):
-            raise ValueError('resource smoke candidates cannot be used for release')
+    if phase != 'dev':
+        raise ValueError('release retraining was removed: release reuses the four development fold models')
     if options['updates'] is None or options['lr'] is None:
         raise ValueError('set explicit measured updates and learning rate before a long run')
     world_env = int(__import__('os').environ.get('WORLD_SIZE', '1'))
@@ -178,9 +188,9 @@ def train(config, stage, phase='dev', fold='all', source=None, resume=True, stop
             lock = writer_lock(directory)
             lock.__enter__()
         on_rank_zero(acquire, rank)
-        manifest = load_prepared(config, release=phase == 'release')
-        table = games(config, phase=phase)
-        selected = table[table.role.eq('P' if phase == 'release' else 'D')]
+        manifest = load_prepared(config)
+        table = games(config)
+        selected = table[table.role.eq('D')]
         if fold != 'all':
             selected = selected[~selected.oof_fold.eq(int(fold))]
         selected = selected.sort_values('game_index').reset_index(drop=True)
@@ -200,8 +210,6 @@ def train(config, stage, phase='dev', fold='all', source=None, resume=True, stop
                     or source_payload['code_sha256'] != code_identity()
                     or old['human_sha256'] != identity['human_sha256']):
                 raise ValueError('stage-one source has different fold, players, data or HumanSL identity')
-            if phase == 'release' and source_payload['state']['optimizer_steps'] != locked['fixed_steps']['s1']:
-                raise ValueError('release stage-one source must have the locked s1 updates')
             identity['stage1_identity'] = old
         code = code_identity()
         state = dict(optimizer_steps=0, best_score=None, best_step=None,
@@ -337,7 +345,7 @@ def train(config, stage, phase='dev', fold='all', source=None, resume=True, stop
                 losses /= world
             on_rank_zero(lambda: log_event(directory, 0, dict(step=step, lr=optimizer.param_groups[0]['lr'],
                           **{name: float(losses[i]) for i, name in enumerate(('total', 'rank', 'policy', 'value'))})), rank)
-            pending = phase == 'dev' and (step % config['monitoring']['every'] == 0 or step == options['updates'])
+            pending = phase == 'dev' and (step % monitor_every(config, f'stage{stage}') == 0 or step == options['updates'])
             state['pending_monitor'] = pending
             if pending or step % config['training']['checkpoint_every'] == 0:
                 save('latest.pt')
@@ -398,7 +406,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', default=None)
     parser.add_argument('--stage', type=int, choices=(1, 2), required=True)
-    parser.add_argument('--phase', choices=('dev', 'release'), default='dev')
+    parser.add_argument('--phase', choices=('dev',), default='dev')
     parser.add_argument('--fold', choices=('all', '1', '2', '3', '4'), default='all')
     parser.add_argument('--source', type=Path)
     parser.add_argument('--no-resume', action='store_true')

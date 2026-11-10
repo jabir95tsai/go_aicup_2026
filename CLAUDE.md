@@ -32,7 +32,7 @@
 
 | | 官方 baseline | 我們目前的本地數字（2026-10-22 更新） |
 |---|---|---|
-| 競賽二（棋力） | **0.4631** | **Public LB 最高 0.7404805（2026-11-09，`ahc-p3-noA-t20-allp_733179_rank.csv`：P1＋P2＋P3 拿掉 A-024、以 Valid-S＋train20＋Valid-U 擬合）；演進 AH＋C 0.7103 → P1＋P2 0.7165 → P3 0.7197 → noA 0.7271 → noA-allp 0.7386 → ＋train20 0.7405，見 `RESULTS.md` 11/08–11/09。** 本地：**A-024 每盤特徵＋KataGo HumanSL likelihood＋B2 題目層級 LR（2026-10-25 更新，A-044）：Valid-U 1,000 題 Equal-k 0.6833**（k=5/10/15/20：0.617/0.679/0.722/0.715）；同題 V2 ResNet（A-024）＋C2 為 0.5532（全部 10,000 題 0.5553）→ 已過 baseline（本地合成題目，不是 LB）。舊的手工特徵線性探針為 0.4117（A-006） |
+| 競賽二（棋力） | **0.4631** | **Public LB 最高 0.7508820（2026-11-09，`ahc-p3-noA-t20-allp-prior_736589_rank.csv`：P1＋P2＋P3 拿掉 A-024、以 Valid-S＋train20＋Valid-U 擬合、B2 合成題先驗對齊）；演進 AH＋C 0.7103 → P1＋P2 0.7165 → P3 0.7197 → noA 0.7271 → noA-allp 0.7386 → ＋train20 0.7405 → ＋先驗對齊 0.7509（＋794 排除玩家 0.7468，未採用），見 `RESULTS.md` 11/08–11/09。** 本地：**A-024 每盤特徵＋KataGo HumanSL likelihood＋B2 題目層級 LR（2026-10-25 更新，A-044）：Valid-U 1,000 題 Equal-k 0.6833**（k=5/10/15/20：0.617/0.679/0.722/0.715）；同題 V2 ResNet（A-024）＋C2 為 0.5532（全部 10,000 題 0.5553）→ 已過 baseline（本地合成題目，不是 LB）。舊的手工特徵線性探針為 0.4117（A-006） |
 | 競賽一（玩家辨識） | **0.2845** | 開局 pp+slot、D4 正規化（A-029）：合成驗證 0.9494（0.838/0.971/0.989/1.000），加 L6 Hungarian 0.9829 → **遠高於 baseline，但合成驗證已飽和，且與 baseline 的落差未解（見下方警訊）**。零訓練的黑前 4 手 naive Bayes 為 0.929（A-006） |
 
 ⚠️ **競賽一的落差是警訊，不是好消息：** 零訓練計數模型在合成驗證拿 0.93，官方 baseline 卻只有 0.28。
@@ -522,3 +522,8 @@ project/
 CPU／Gloo 整合 108 項（108.24 秒）與最新 B2 15 項（1.83 秒）通過，合計 109 個不同測試；包括實際兩程序更新／累積梯度、stage2 凍結、RNG／sampler／spawn 預取續跑、失敗發布／監控重試及測試 store 接線。既有 HD0／HD1 各三個位置的編碼 parity 通過。未執行 GPU、真 teacher、正式全量 prepare／訓練／推論或提交作業；真實各 k 分數、CUDA／SyncBN 與成本未知。
 
 短測 `humansl_residual_smoke100.json` 兩階段各 100 步／AdamW LR=0.001（C 對照 100 步／LR=0.01），只屬工程起點；正式 `humansl_residual_train.json` 的 LR／updates 留 null，須短測後依 §9 明訂預算。原 seed=2027 完整 fold 表在本機預設路徑缺失，prepare 不會重抽；須取回原切分身分。輸出為 `outputs/rank/humansl_residual_b2/<run_id>/`，完整操作／差異／未驗收事項見該目錄 README、PLAN §13 及 RESULTS 本日紀錄。
+
+
+### 2026-11-10：HumanSL residual B2 修訂
+
+依使用者「全部依建議修改」：B2 主臂改 log 機率平均（保留 prob 對照）、新增 H＋C＋新特徵的 stack 臂、B2 擬合擴大到全部 D 玩家（`ext_v1/fit_all`，每人每色最多 20 盤）、兩階段改 3,000／6,000 步加 cosine 與較密監控、不訓練全 D 模型（M／U／測試用四折平均）、取消 release 重訓（release B2 加入 M＋U）、新增低成本探針 `probe.py` 作 go/no-go。teacher 身分與 base prepared 未變。62 項 CPU 測試通過；未提交任何作業，分 k 增益與成本未知。詳見套件 PLAN §14 與 RESULTS。

@@ -7,6 +7,8 @@ from pathlib import Path
 from go_aicup.paths import ROOT
 
 DEFAULT_CONFIG = ROOT / 'configs/strength/humansl_residual_smoke100.json'
+AGGREGATIONS = ('prob', 'logp')
+ARMS = ('new', 'stack')
 
 
 def read_config(path=DEFAULT_CONFIG):
@@ -48,16 +50,37 @@ def validate_config(config):
             value = budget[key]
             if value is not None and (not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0):
                 raise ValueError('learning rate must be finite and positive or unset')
+        if budget.get('lr_decay', 'none') not in ('none', 'cosine'):
+            raise ValueError('lr_decay must be none or cosine')
+        ratio = budget.get('min_lr_ratio', 0.0)
+        if not isinstance(ratio, (int, float)) or not 0 <= ratio <= 1:
+            raise ValueError('min_lr_ratio must be within [0, 1]')
+        every = monitor_every(config, stage)
+        if type(every) is not int or every < 1:
+            raise ValueError('monitor_every must be a positive integer')
         drops = budget['lr_schedule']
         if any(type(row[0]) is not int or row[0] < 1 or not math.isfinite(row[1]) or row[1] <= 0 for row in drops):
             raise ValueError('schedule entries are [completed_update, positive_lr]')
         if [row[0] for row in drops] != sorted(set(row[0] for row in drops)):
             raise ValueError('schedule boundaries must increase')
-    if config['monitoring']['every'] != 5000 or config['monitoring']['patience'] != 3:
-        raise ValueError('monitor every 5000 updates with patience=3')
+    if config['monitoring']['patience'] != 3:
+        raise ValueError('monitoring requires patience=3')
+    b2 = config.get('b2', {})
+    if b2.get('fit_pool', 'fit') not in ('fit', 'fit_all'):
+        raise ValueError('b2.fit_pool must be fit or fit_all')
+    if b2.get('aggregation', 'prob') not in AGGREGATIONS:
+        raise ValueError('b2.aggregation must be prob or logp')
+    cap = b2.get('fit_all_cap_per_color', 20)
+    if type(cap) is not int or cap < 20:
+        raise ValueError('fit_all_cap_per_color must be an integer >= 20 so k=20 questions remain possible')
     if config.get('smoke') and any(config[s]['updates'] != 100 for s in ('stage1', 'stage2')):
         raise ValueError('resource smoke runs require 100 optimizer updates per stage')
     return config
+
+
+def monitor_every(config, stage):
+    """Per-stage interval; the legacy shared monitoring.every remains a fallback."""
+    return config[stage].get('monitor_every', config.get('monitoring', {}).get('every'))
 
 
 def runtime_config(config, world):

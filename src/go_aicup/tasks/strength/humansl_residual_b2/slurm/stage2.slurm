@@ -14,11 +14,7 @@
 source src/go_aicup/tasks/strength/humansl_residual_b2/slurm/environment.sh
 STAGE=2
 if [[ -z "${SOURCE:-}" ]]; then
-    if [[ "$PHASE" == release ]]; then
-        selected=final
-    else
-        selected=$("$PYTHON_BIN" -c 'import json,sys; print(json.load(open(sys.argv[1]))["selected"])' "$RUN_ROOT/selection/stage1.json")
-    fi
+    selected=$("$PYTHON_BIN" -c 'import json,sys; print(json.load(open(sys.argv[1]))["selected"])' "$RUN_ROOT/selection/stage1.json")
     SOURCE="$RUN_ROOT/$PHASE/fold_$FOLD/stage1/$selected.pt"
 fi
 source_args=(--source "$SOURCE")

@@ -47,20 +47,32 @@
   "stage1": {
     "updates": 100,
     "lr": 0.001,
-    "lr_schedule": []
+    "lr_schedule": [],
+    "lr_decay": "none",
+    "min_lr_ratio": 0.0,
+    "monitor_every": 100
   },
   "stage2": {
     "updates": 100,
     "lr": 0.001,
-    "lr_schedule": []
+    "lr_schedule": [],
+    "lr_decay": "none",
+    "min_lr_ratio": 0.0,
+    "monitor_every": 100
   },
   "monitoring": {
-    "every": 5000,
     "patience": 3,
     "questions_per_cell": 125
   },
   "b2": {
-    "questions_per_k": 20000
+    "questions_per_k": 20000,
+    "fit_pool": "fit_all",
+    "fit_all_cap_per_color": 20,
+    "aggregation": "logp",
+    "arms": [
+      "new",
+      "stack"
+    ]
   },
   "evaluation": {
     "batch_size": 300,

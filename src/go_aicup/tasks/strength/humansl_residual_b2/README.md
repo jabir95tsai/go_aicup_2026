@@ -5,7 +5,7 @@
 ## 設定與前置資料
 
 - `configs/strength/humansl_residual_smoke100.json`：兩階段各 100 optimizer updates，探索用 AdamW LR=0.001；C 對照 100 updates、LR=0.01。這些數字只供工程短測，不是已選定的正式超參數。
-- `configs/strength/humansl_residual_train.json`：正式設定，兩階段各 20,000 updates，AdamW LR 分別為 0.001／0.0003；C 對照 20,000 updates、LR=0.01。這些是未經正式訓練驗證的起點，長作業前須依短測估算成本。可用 `lr_schedule=[[完成步數,新LR],...]` 設定各階段的學習率變化。
+- `configs/strength/humansl_residual_train.json`：正式設定（2026-11-10 修訂）。第一階段 3,000 updates、LR 0.001；第二階段 6,000 updates、LR 0.0003；兩者都是 cosine 衰減到 5%（`lr_decay`、`min_lr_ratio`），各自每 300／600 步監控（`monitor_every`）、patience 3。B2 預設 `aggregation=logp`、`fit_pool=fit_all`（全部 D 玩家、每人每色最多 20 盤）。C 對照 20,000 updates、LR=0.01。全部是未經正式訓練驗證的起點，長作業前仍須依短測估算成本。`lr_schedule=[[完成步數,新LR],...]` 可與 cosine 疊加。
 - 兩者預設 8 GPU、global 128 組、每卡 microbatch 一組／300 位置、累積 16 次。每方 15 手、seed=2026、玩家／題目 seed=2027；實際 world size、microbatch、precision 都綁定續跑身分。3060 Ti 使用獨立縮小 config／輸出目錄，不能混用八卡 checkpoint。
 - `data.folds_path` 必須指向**原完整資料 seed=2027** 的玩家表，至少有 `player_id,fold`，fold 為 −1、0、1、2、3、4。本次唯讀查核時 `data/processed/cv/` 為空，預設的 `strength_folds_seed2027.parquet` 尚不存在；須從原切分保存處取回並設定路徑。程式不自動重抽原 fold。
 - `data.legacy_split_paths` 重用既有 `humansl_q1000`／`humansl_qsel`／`humansl_vs_rest` 的棋局表，合併 S-fit／S-select／S-extra 為 Valid-S、U 為 Valid-U，其餘棋局僅作上游來源。也可用 `legacy_split_path` 指向完整、明列 `split` 的原棋局表；兩種方式擇一。
@@ -32,13 +32,15 @@ python -m go_aicup.tasks.strength.humansl_residual_b2.teacher --config "$CONFIG"
 
 teacher 只分析 D（release 為 P）所需的 ply≥30 位置，雙方各自取落子前 target；HD0 貼 6.5、HD1 貼 0.5、1 visit、黑方勝率轉當手視角。每盤原子完成狀態、來源、索引及數值 checksum 支援重試；舊 SE 的裸 `value.npy` 不直接重用。teacher 索引預留 HD0/1 棋局的緊湊數值空間，未要求的玩家維持未完成，不會啟動其分析。dev/release 可延用完全相同身分的既有 target。
 
+**寫入方式（2026-11-10 起）：** 不再用 `np.memmap` 原地寫 `values/done/checksums.npy`（作業 742066 在 Nano4 WekaFS 上 `flush()` 回報成功卻幾乎全未落地，見 RESULTS 同日紀錄）。每 `teacher.chunk_games`（預設 500）盤寫一個 `chunks/chunk_*.npz`（一般寫入＋`fsync`＋原子 rename＋目錄 fsync）；結束（成功、停止或失敗）時以同法原子發布三個 `.npy`，丟棄本節點快取後重讀驗證，與已提交數一致才刪 chunk。續跑先逐盤重驗既有 `.npy`，checksum 不符或非有限值的列丟棄重算（`discarded_games`），再重放 chunk。只有 D（release 為 P）全部經磁碟重讀驗證才標 `complete`；否則 `incomplete`／`stopped`／`failed` 且程序非 0 結束。Slurm 另起新程序執行 `--verify`，並把 USR1 轉送給 label 程序。`scripts/strength/hrb2_teacher_progress.py` 從登入節點計入已提交 chunk，作為外部進度檢查。
+
 ## 三個訓練入口與 Slurm
 
 | 階段 | Python 入口 | Slurm |
 |---|---|---|
-| 第一階段 | `python -m go_aicup.tasks.strength.humansl_residual_b2.train --config "$CONFIG" --stage 1 --phase dev --fold all` | `stage1.slurm` |
+| 第一階段 | `python -m go_aicup.tasks.strength.humansl_residual_b2.train --config "$CONFIG" --stage 1 --phase dev --fold 1` | `stage1.slurm` |
 | 第二階段 | 同入口 `--stage 2 --source <同折第一階段候選.pt>` | `stage2.slurm` |
-| 第三階段 | `python -m go_aicup.tasks.strength.humansl_residual_b2.b2 --config "$CONFIG" --stage 1 --candidate best` | `stage3.slurm` |
+| 第三階段 | `python -m go_aicup.tasks.strength.humansl_residual_b2.b2 --config "$CONFIG" --stage 1 --candidate best --arm new --aggregation logp` | `stage3.slurm` |
 
 `smoke100.slurm` 依序量測兩階段；第二階段只在第一階段完成後載入它的 `final.pt`。短測也在第 100 步做固定 M 監控。`summary.json` 保存時間、steps/s、位置/s、資料等待／計算／監控／存檔時間、顯存、RAM、I/O、重播手數及 GPU-hours。前五個 updates 只從純訓練吞吐量統計剔除，仍正常更新；不改 LR。計算與資料等待是同步牆鐘量測，CPU 重播手數是所選最大 ply 導出的重播工作量，不是 CPU 指令的獨立 profiler。
 
@@ -46,117 +48,117 @@ teacher 只分析 D（release 為 P）所需的 ply≥30 位置，雙方各自�
 sbatch "$JOBS/smoke100.slurm"
 ```
 
-Slurm 腳本均放在本套件下，會被 Git 追蹤。訓練／特徵預設八卡；teacher／C 對照單卡。prepare／B2 使用 dev 的最少一張 GPU 配額執行 CPU 工作，仍須計入配置 GPU-hours。預設四小時是排程上限，沒有實測完成時間含義；長作業須先回報成本，依實測調整 `sbatch --time=...`，dev 最多四小時、8gpus 最多 48 小時。不會因完成程式就自動提交。
+Slurm 腳本均放在本套件下，會被 Git 追蹤。訓練／特徵預設八卡；teacher／C 對照單卡。prepare／B2 使用 dev 的最少一張 GPU 配額執行 CPU 工作，仍須計入配置 GPU-hours。預設四小時（teacher 為六小時）是排程上限，沒有實測完成時間含義；長作業須先回報成本，依實測調整 `sbatch --time=...`，dev 最多四小時、8gpus 最多 48 小時。不會因完成程式就自動提交。
 
-正式開發依序執行五個第一階段 runs，`FOLD=1/2/3/4/all`；第二階段同樣五個，不能用全 D 來源替代 fold 來源：
+正式開發每個階段只跑四個 fold（2026-11-10 起不再訓練全 D 模型），命令見下方「2026-11-10 修訂後的開發流程」第 2 步。
 
-```bash
-export CONFIG=configs/strength/humansl_residual_train.json
-for FOLD in 1 2 3 4 all; do
-    export FOLD
-    sbatch "$JOBS/stage1.slurm"
-done
-```
-
-每個 run 的目錄是 `<run_dir>/dev/fold_<fold>/stage1/` 或 `stage2/`，保存 `best.pt`、`final.pt`、`latest.pt` 及 complete markers。`best` 僅在 M 融合 Equal-k 嚴格增加時更新；相等保留較早者，連續三次未增加早停。每 5,000 updates 及預算最後一步監控，各分支另報分 k 分數／CE。訓練 loss 不選 best。
+每個 run 的目錄是 `<run_dir>/dev/fold_<fold>/stage1/` 或 `stage2/`，保存 `best.pt`、`final.pt`、`latest.pt` 及 complete markers。`best` 僅在 M 融合 Equal-k 嚴格增加時更新；相等保留較早者，連續三次未增加早停。每 `monitor_every`（正式設定 300／600）updates 及預算最後一步監控，各分支另報分 k 分數／CE；另報 `fused_logp_t1`（log 機率平均、T=1）僅供診斷，早停仍看機率平均融合。訓練 loss 不選 best。
 
 重跑相同命令自動從 `latest.pt` 續跑；更換 config、資料、程式、world size 或階段來源會拒絕。抽樣 durable state 只按已消費完整更新保存，與 worker 預取隔離；不同級別獨立洗牌，跨輪衝突延後，不刪盤、不截短。停止檔為該 stage 目錄的 `.stop-requested`，Slurm 預告／TERM／INT 會在完整 update 後保存。監控或最終發布失敗，可重跑補做，不增加已完成的 updates。續跑 log 會裁掉超出 durable step 的紀錄。
 
-## 全位置特徵、B2 與開發選擇
+## 2026-11-10 修訂後的開發流程
 
-對 `best`／`final` 各做一條完整管線。各折模型在 `POOL=fit` 只抽自己未見過的 B_dev 玩家；全 D 模型在 `POOL=monitor` 抽 M。模型／階段／fold／候選／HD／貼目／資料身分一併保存。特徵逐盤、有界批次抽取，只有每盤二十維機率、計數及 marker 落盤，不存全量輸入或浮點主幹。
+修訂內容與理由見 [PLAN.md](PLAN.md) 第 14 節。重點：不再訓練全 D 模型，也不做 release 重訓；M、U、測試一律用四個 fold 模型的每盤特徵平均；B2 主臂改用 log 機率平均，並擴大到全部 D 玩家；先跑低成本探針再決定是否投入第一階段。
+
+### 0. 擴充題庫（CPU，一次）
 
 ```bash
-export FOLD=1 CANDIDATE=best POOL=fit
-export CHECKPOINT=<run_dir>/dev/fold_1/stage1/best.pt
-sbatch "$JOBS/features.slurm"
-# 同樣完成其餘三折 fit；fold_all 對 POOL=monitor 做 M 特徵。
-# 再對 final 候選重做以上步驟。
+python -m go_aicup.tasks.strength.humansl_residual_b2.prepare --config "$CONFIG" --extension
+# 或 EXTENSION=1 sbatch "$JOBS/prepare.slurm"
+```
+
+在 `prepared_dir/ext_v1/` 產生 `pool_fit_all`（全部 D 玩家、每人每色最多 20 盤，seed 2027）與 `questions_fit_all`（每 k 20,000 題）。既有 base manifest、dataset_id 與 teacher 身分都不動。
+
+### 1. 探針（go/no-go，先做）
+
+```bash
+sbatch "$JOBS/probe_cache.slurm"   # 8 卡：fit_all、fit 與 M 每盤固定 30 手，一次 HumanSL 前向，存 768 維 fp16 讀出
+sbatch "$JOBS/probe_run.slurm"     # 1 卡：四折 OOF 線性／MLP 頭 → 每盤 prob／logp 平均 → B2 → M 分 k 報告
+```
+
+結果在 `<run_dir>/probe/result.json`，每個臂包含 k=5/10/15/20、Equal-k；若對照 H＋C 的 M 預測已存在，另附配對 gate 與玩家 bootstrap；若對照 H＋C 特徵已存在，另跑 stack 臂。探針只用每盤 30 手，分數是同一讀出的保守下界。快取約 600 萬位置、約 9 GB。
+
+### 2. 第一／二階段只訓練四折
+
+```bash
+export CONFIG=configs/strength/humansl_residual_train.json
+for FOLD in 1 2 3 4; do export FOLD; sbatch "$JOBS/stage1.slurm"; done
+```
+
+`--fold all` 仍可用（smoke100 用它），但正式流程不需要。第二階段同樣只跑 fold 1..4，來源固定為同 fold 第一階段的 M 選定候選。
+
+### 3. 全位置特徵
+
+每個候選（best、final）各抽一次：fit 池每折只抽自己的 OOF 玩家；M 由四個 fold 模型各抽一次，讀取時平均。
+
+```bash
+export CANDIDATE=best STAGE_DIR=stage1
+for FOLD in 1 2 3 4; do
+    for POOL in fit_all monitor; do
+        CHECKPOINT=<run_dir>/dev/fold_$FOLD/$STAGE_DIR/$CANDIDATE.pt FOLD=$FOLD POOL=$POOL sbatch "$JOBS/features.slurm"
+    done
+done
+# stack／H＋C 對照臂使用 stack_fit_pool（預設 fit）時，另以 POOL=fit 抽一次。
 export STAGE=1
-sbatch "$JOBS/stage3.slurm"
+sbatch "$JOBS/stage3.slurm"   # best/final × prob/logp 的 new 臂 B2，再以 config 的 logp 選 best/final
 ```
 
-`stage3.slurm` 不重做特徵：它在全部特徵完成後擬合 best／final 各自四個 B2，再以 M 的完整管線 Equal-k 選擇，同分取 best，保存 `selection/stage1.json`。B2 每盤／每題算術等權、二十維各方機率和為 1，加 P2 兩個旗標後為 22 維；固定題目直接交既有 StandardScaler／GameLR，C=1、max_iter=5000，不呼叫舊的另抽題 B2 fit。
-
-正式第二階段的 `stage2.slurm` 自動讀取這個 selection，以同 fold 第一階段候選為來源。安排第二階段前先檢視第一階段對照 gate 與短測成本；程式不替使用者決定是否花費後續預算。第二階段的特徵／B2／selection 流程相同，設定 `STAGE=2`、checkpoint 改為 `stage2/`。
-
-為量測 OOF／全 D 信心尺度差異，另外對每個 fold 的模型抽 `POOL=monitor`，再執行：
+每盤特徵同時保存 prob 平均（`own_r`）和 log 機率平均（`own_lp_r`），格式為 `humansl_residual_features_v2`；舊 v1 特徵不能用於 logp 臂。stack 臂（H30＋C20＋新 20＋P2＝72 維）：
 
 ```bash
-python -m go_aicup.tasks.strength.humansl_residual_b2.evaluate --config "$CONFIG" --stage 1 --candidate best --diagnostics
+python -m go_aicup.tasks.strength.humansl_residual_b2.b2 --config "$CONFIG" --stage 1 --candidate <selected> --arm stack --aggregation logp
+python -m go_aicup.tasks.strength.humansl_residual_b2.evaluate --config "$CONFIG" --stage 1 --candidate <selected> --arm stack --aggregation logp
 ```
 
-輸出各 fold 與全 D 在同一 M 的本人／對手熵、NLL，以及完整 B2 分 k 成績。
+H＋C 每個全盤位置約需 25 次 HumanSL 前向，因此 `b2.stack_fit_pool` 預設為較小的 `fit`（Valid-S∩D）；改成 `fit_all` 前要另估 GPU-h。`evaluate --diagnostics` 比較各單折與四折平均在同一 M 上的熵、NLL 與 B2 分數。
 
-特徵與 B2 首次成功的成本另存 `.metrics.json`；重用快取寫 `.reuse.metrics.json`，不覆蓋原量測，也不把重用盤數計為新增吞吐。每個特徵 rank 各記配置 GPU-hours；CPU B2 亦計入 Slurm 持有的 GPU 配額。teacher 的 `metrics.json` 另列本次新分析位置，失敗重試不把舊完成盤灌入吞吐。
+### 4. 對照、gate 與 U 鎖定
 
-## H＋C 對照、gate 與 U 鎖定
-
-`baseline.py` 建立 D 內四折及全 D 共五份 C 向量；H/C 使用原 policy likelihood 數學、全盤位置及正確貼目，沒有 A-024。C 使用有界輸入的 Adam／cosine、全盤位置均勻抽樣；不是複製會建立大輸入 packs 的舊訓練器。實際更新預算仍須以獨立短測決定。
-
-```bash
-python -m go_aicup.tasks.strength.humansl_residual_b2.baseline --config "$CONFIG" --command train-c --fold 1
-python -m go_aicup.tasks.strength.humansl_residual_b2.baseline --config "$CONFIG" --command extract --pool fit --fold 1
-# 其餘三折相同；全 D 的 C 使用 --fold all，之後抽 --pool monitor。
-python -m go_aicup.tasks.strength.humansl_residual_b2.baseline --config "$CONFIG" --command fit
-python -m go_aicup.tasks.strength.humansl_residual_b2.baseline --config "$CONFIG" --command evaluate --pool monitor
-```
-
-也可設定 `COMMAND=train-c|extract|fit|evaluate`、`FOLD`、`POOL` 使用 `baseline.slurm`。對照輸出在 `<run_dir>/baseline/dev/`；不可載入舊全玩家 C 快取充當本版 OOF 對照。
-
-配對比較用相同 M 題目，gate 為 Equal-k 至少 +0.005、每 k 不低於 −0.005，另報玩家層級 bootstrap：
-
-```bash
-python -m go_aicup.tasks.strength.humansl_residual_b2.evaluate --config "$CONFIG" \
-    --reference <run_dir>/baseline/dev/evaluation/monitor.parquet \
-    --candidate-predictions <run_dir>/evaluation/stage1/best/monitor.parquet \
-    --output <run_dir>/gate_stage1.json
-```
-
-範例的 `best` 必須換成 `selection/stage1.json` 實際選中的候選；第二階段增量與相對 H＋C 的差值分開比較。
-
-全部選擇完成後，建立 arms JSON，將 candidate 換成實際 M 所選者；baseline model 路徑見其 fit 輸出：
+H＋C 對照沿用 `baseline.py`（四折 C 加全 D C，命令同下節舊說明；`fit` 使用 `stack_fit_pool`）。gate 仍為 Equal-k ≥ +0.005、各 k ≥ −0.005，另報玩家 bootstrap。鎖定時每個臂都要寫明 stage、candidate、arm、aggregation；鎖定紀錄同時綁定四個 fold 的 checkpoint：
 
 ```json
 {
-  "stage1": {"stage": 1, "candidate": "best"},
-  "stage2": {"stage": 2, "candidate": "best"},
+  "s1_new_logp": {"stage": 1, "candidate": "best", "arm": "new", "aggregation": "logp"},
+  "s1_stack_logp": {"stage": 1, "candidate": "best", "arm": "stack", "aggregation": "logp"},
   "baseline": {"model": "<run_dir>/baseline/dev/model.pkl"}
 }
 ```
 
-```bash
-python -m go_aicup.tasks.strength.humansl_residual_b2.evaluate --config "$CONFIG" --lock-arms arms.json
-# 鎖定後才允許抽 POOL=U；對每個已登記 arm 一次完整評估。
-python -m go_aicup.tasks.strength.humansl_residual_b2.evaluate --config "$CONFIG" --stage 1 --candidate best --pool U
-```
+鎖定後才可抽 `POOL=U`（四折各一次），再以 `evaluate --pool U --arm ... --aggregation ...` 各評一次。
 
-`selection_lock.json` 綁定選擇、B2／checkpoint checksum、資料及全 D 選定步數 s1/s2。U 結果可重讀，身分改變時拒絕覆寫；不能把選完 M 的數字稱為獨立泛化。對照 U 亦須先登記 baseline model，再抽 baseline U 特徵、執行其 evaluate。
-
-## Release 重訓與提交檔
-
-鎖定後使用同一 config：`prepare --release` 建立 P 的新四折玩家映射，排除 R；teacher `--phase release` 只補缺少的 P 標籤。設定 `PHASE=release`，依序使用 stage1／stage2 Slurm 對 1..4/all 重訓；步數由 lock 的 s1/s2 讀取，不監控、不早停。release stage2 固定載入同 fold 的 stage1/final.pt。smoke config 禁止 release。
-
-release 特徵使用 `PHASE=release,POOL=fit,CANDIDATE=final,FOLD=1..4`；B2 使用 `PHASE=release,STAGE=2` 的 `stage3.slurm`。只用 S＋U 棋局的 OOF 特徵擬合，測試使用全 P 單模型，不平均四折。release 沒有獨立 U 分數。
-
-測試資料先沿用既有 preprocessing 建立有明確 HD 的 GameStore，接著使用本版 prepare／推論／CSV 匯出：
+### 5. Release（不重訓）
 
 ```bash
-python -m go_aicup.tasks.strength.humansl_residual_b2.predict --prepare \
-    --store-dir <test-store> --name rank_public --work <release-root>/rank_public
-python -m go_aicup.tasks.strength.humansl_residual_b2.predict --config "$CONFIG" \
-    --work <release-root>/rank_public --checkpoint <run_dir>/release/fold_all/stage2/final.pt
-# private 同樣處理；兩者完成後合併並驗證 800 列與官方 sample 順序。
-python -m go_aicup.tasks.strength.humansl_residual_b2.predict \
-    --work-root <release-root> --sample data/raw/tests/sample_submission_rank.csv \
-    --output submissions/rank/humansl_residual_b2_rank.csv
+PHASE=release sbatch "$JOBS/prepare.slurm"   # 鎖定後：mu_all（M＋U 每人每色最多 20 盤）與 release 題庫
+for FOLD in 1 2 3 4; do CHECKPOINT=... FOLD=$FOLD POOL=mu_all sbatch "$JOBS/features.slurm"; done
+PHASE=release STAGE=<s> ARM=new AGGREGATION=logp CANDIDATE=<selected> sbatch "$JOBS/stage3.slurm"
 ```
 
-完整推論覆蓋 ply≥30 的雙方全部位置，缺分支／不支援 HD／缺棋局直接報錯。舊無 HD 的測試 store 須從原官方輸入重建 metadata；不默認 HD0。CSV 沿用既有 export 的格式、機率、rank、順序及 checksum 檢查。輸出檔登記 RESULTS 後由使用者手動上傳。
+release B2 以開發 OOF 特徵（fit 池）加上四折平均的 M＋U 特徵擬合，等於把 allp 的做法帶進本實驗；上游模型就是鎖定的四個 fold 模型，沒有獨立 U 分數。測試推論：
+
+```bash
+python -m go_aicup.tasks.strength.humansl_residual_b2.predict --prepare --store-dir <test-store> --name rank_public --work <release-root>/rank_public
+python -m go_aicup.tasks.strength.humansl_residual_b2.predict --config "$CONFIG" --work <release-root>/rank_public --arm-name s1_new_logp
+python -m go_aicup.tasks.strength.humansl_residual_b2.predict --work-root <release-root> --sample data/raw/tests/sample_submission_rank.csv --output submissions/rank/<job>-hrb2.csv
+```
+
+每個 fold 的測試特徵分別快取，讀取時平均；stack 臂另以全 D C 向量抽測試題的 H＋C。
+
+## 舊流程說明（2026-11-09，已被上一節取代的部分僅供追溯）
+
+下列 H＋C 對照命令仍有效；其中「全 D 模型抽 M」「release 四折重訓」「固定步數 s1/s2」的描述已由上一節取代。
+
+```bash
+python -m go_aicup.tasks.strength.humansl_residual_b2.baseline --config "$CONFIG" --command train-c --fold 1
+python -m go_aicup.tasks.strength.humansl_residual_b2.baseline --config "$CONFIG" --command extract --pool fit --fold 1
+# 其餘三折相同；全 D 的 C 使用 --fold all，之後抽 --pool monitor（以及鎖定後的 U、mu_all）。
+python -m go_aicup.tasks.strength.humansl_residual_b2.baseline --config "$CONFIG" --command fit
+python -m go_aicup.tasks.strength.humansl_residual_b2.baseline --config "$CONFIG" --command evaluate --pool monitor
+```
 
 ## 工程驗證與限制
 
-新增測試位於 `tests/test_humansl_residual_{model,data,train,ddp,b2,baseline}.py`，涵蓋模型凍結、梯度、雙方抽樣、預取／消費者續跑、teacher 來源／視角、OOF 洩漏拒絕、B2/scaler、分 k gate、發布重試及 CSV 接點。執行方式：
+新增測試位於 `tests/test_humansl_residual_{model,data,train,ddp,b2,baseline,improvements}.py`，涵蓋模型凍結、梯度、雙方抽樣、預取／消費者續跑、teacher 來源／視角、OOF 洩漏拒絕、B2/scaler、分 k gate、發布重試及 CSV 接點。執行方式：
 
 ```bash
 OMP_NUM_THREADS=1 python -m pytest -q tests/test_humansl_residual_*.py

@@ -27,7 +27,7 @@ from go_aicup.tasks.strength.shared.checkpoint import resolve_checkpoint
 from .b2 import load_model, save_model
 from .data import games, load_prepared, questions
 from .dataset import SelectedDataset
-from .features import BUCKETS, extraction_rows
+from .features import BUCKETS, FIT_POOLS, INFERENCE_POOLS, extraction_rows
 
 H_COLUMNS = [f'h_{side}_{profile}' for side in ('own', 'opp') for profile in PROFILES]
 C_COLUMNS = [f'c_{side}_{rank}' for side in ('own', 'opp') for rank in range(10)]
@@ -225,9 +225,21 @@ def checked_features(frame):
     return frame
 
 
+def fit_pool(config):
+    """H+C extraction is ~25 HumanSL forwards per whole-game position, so it has its own pool."""
+    pool = config.get('b2', {}).get('stack_fit_pool', 'fit')
+    if pool not in FIT_POOLS:
+        raise ValueError('stack_fit_pool must be fit or fit_all')
+    return pool
+
+
 def extract(config, pool, fold='all'):
     started = time.perf_counter()
-    if pool == 'U':
+    if pool in FIT_POOLS and str(fold) == 'all':
+        raise ValueError('controlled baseline fit features require a held-out C fold')
+    if pool in INFERENCE_POOLS and str(fold) != 'all':
+        raise ValueError('M/U/M+U baseline features use the all-D C vectors')
+    if pool in ('U', 'mu_all'):
         from .evaluate import load_lock
         load_lock(config)
     prepared = load_prepared(config)
@@ -266,14 +278,40 @@ def extract(config, pool, fold='all'):
         dataset.close()
 
 
-def read_pool(config, pool):
+def extract_rows(config, rows, runtime, target):
+    """H+C features for unlabeled release/test games with the all-D C vectors (never refitted)."""
+    prepared = load_prepared(config)
+    path = vector_path(config, 'all')
+    payload = torch.load(resolve_checkpoint(path), map_location='cpu', weights_only=False)
+    current = vector_identity(config, training_rows(config, 'all'), 'all', prepared)
+    if payload['identity'] != current or payload['state']['optimizer_steps'] != config['baseline']['updates']:
+        raise ValueError('baseline vectors are incomplete or belong to different data/config')
+    identity = dict(format='controlled_hc_features_v1', vectors=file_hash(path), upstream=current,
+                    pool='release-test', whole_game=True, games=object_hash(rows.game_index.tolist()), columns=COLUMNS)
+    target = Path(target)
+    if target.exists():
+        return checked_features(load_table(target, identity))
+    model, _, device = load_runtime(config)
+    dataset = SelectedDataset(runtime, rows, model.config, teacher_required=False, augment=False)
+    try:
+        frame = infer_likelihoods(model, payload['model']['vectors'].to(device), human_vectors(model, device),
+                                  dataset, rows, config['baseline']['batch_positions'], device)
+    finally:
+        dataset.close()
+    publish_table(target, frame, identity)
+    return frame
+
+
+def read_pool(config, pool, questions_name=None, trim=True):
+    from .data import pool_game_ids
     canonical = games(config)
-    q = questions(config, 'fit' if pool == 'fit' else pool)
-    expected = set(np.concatenate(q.games.to_numpy()).tolist())
+    q = None if pool == 'mu_all' and questions_name is None else questions(config, questions_name or pool)
+    available = pool_game_ids(config, pool)
+    expected = available if q is None else set(np.concatenate(q.games.to_numpy()).tolist())
     prepared_record = load_prepared(config)
     prepared = object_hash(prepared_record)
     frames, sources = [], []
-    for fold in range(1, 5) if pool == 'fit' else ('all',):
+    for fold in range(1, 5) if pool in FIT_POOLS else ('all',):
         target = feature_path(config, pool, fold)
         paths = [target] if target.exists() else sorted(target.parent.glob(f'{target.stem}.rank*.parquet'))
         if not paths:
@@ -289,12 +327,14 @@ def read_pool(config, pool):
                     or identity['vectors'] != file_hash(vector_path(config, fold))):
                 raise ValueError('controlled baseline feature identity differs')
             validate_ancestry(rows, identity['upstream'], fold)
-            if pool == 'fit' and not rows.oof_fold.eq(fold).all():
+            if pool in FIT_POOLS and not rows.oof_fold.eq(fold).all():
                 raise ValueError('baseline OOF features assigned to wrong fold')
             frames.append(frame); sources.append(dict(path=str(path), sha256=file_hash(path), identity=identity))
     frame = checked_features(pd.concat(frames, ignore_index=True))
-    if set(frame.game_index) != expected:
-        raise ValueError('controlled baseline question features missing or unexpected')
+    if set(frame.game_index) != available or not expected <= available:
+        raise ValueError('controlled baseline pool features missing or unexpected')
+    if trim:
+        frame = frame[frame.game_index.isin(expected)].reset_index(drop=True)
     return canonical, q, frame, sources
 
 
@@ -308,12 +348,13 @@ def p2_values(canonical, frame):
 
 def fit(config):
     started = time.perf_counter()
-    canonical, q, frame, sources = read_pool(config, 'fit')
+    pool = fit_pool(config)
+    canonical, q, frame, sources = read_pool(config, pool)
     if not canonical.set_index('game_index').loc[frame.game_index, 'role'].eq('D').all():
         raise ValueError('controlled baseline B2 fits only D players')
     check_questions(q, canonical)
     x = question_mean(p2_values(canonical, frame), frame.game_index, q)
-    identity = dict(format='controlled_hc_b2_v1', phase='dev', config=object_hash(config), sources=sources,
+    identity = dict(format='controlled_hc_b2_v1', phase='dev', fit_pool=pool, config=object_hash(config), sources=sources,
                     prepared=object_hash(load_prepared(config)), questions=object_hash(q.to_json(orient='records')),
                     training_players=sorted(q.player_id.astype(str).unique()), dimensions=52)
     target = root(config) / 'model.pkl'
@@ -371,7 +412,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--config', required=True)
     p.add_argument('--command', choices=('train-c', 'extract', 'fit', 'evaluate'), required=True)
-    p.add_argument('--fold', default='all'); p.add_argument('--pool', choices=('fit', 'monitor', 'U'), default='monitor')
+    p.add_argument('--fold', default='all'); p.add_argument('--pool', choices=FIT_POOLS + INFERENCE_POOLS, default='monitor')
     p.add_argument('--stop-after', type=int)
     a = p.parse_args(); config = read_config(a.config)
     if a.command == 'train-c':

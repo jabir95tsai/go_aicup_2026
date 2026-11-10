@@ -1,4 +1,4 @@
-"""Complete-pipeline M selection, player-paired gates and locked U evaluation."""
+"""Complete-pipeline M selection, player-paired gates and locked U evaluation (fold-average upstream)."""
 import argparse
 import json
 from pathlib import Path
@@ -12,7 +12,7 @@ from go_aicup.metrics import score_rank
 from go_aicup.tasks.strength.humansl import question_mean
 from go_aicup.tasks.strength.SE_H_C_B2.common import atomic_table
 from go_aicup.tasks.strength.SE_H_C_B2.evaluate import official_rows, paired_bootstrap, report
-from .b2 import load_model, model_path, probabilities, read_pool
+from .b2 import FOLDS, arm_options, baseline_frame, load_model, model_path, probabilities, read_pool
 from .features import BUCKETS, COLUMNS
 
 
@@ -35,14 +35,18 @@ def compare(q, reference, candidate, *, repeats=2000, seed=2027):
                                                  official_rows(score_rank(candidate), q.rank_id), repeats, seed))
 
 
-def prediction_path(config, stage, candidate, pool):
-    return Path(config['run_dir']) / 'evaluation' / f'stage{stage}' / candidate / f'{pool}.parquet'
+def prediction_path(config, stage, candidate, pool, arm=None, aggregation=None):
+    arm, aggregation, fit_pool = arm_options(config, arm, aggregation)
+    return (Path(config['run_dir']) / 'evaluation' / f'stage{stage}' / candidate
+            / f'{arm}_{aggregation}_{fit_pool}' / f'{pool}.parquet')
 
 
-def evaluate(config, stage, candidate='best', pool='monitor'):
+def evaluate(config, stage, candidate='best', pool='monitor', arm=None, aggregation=None):
+    """Score one fitted B2 arm on M (or locked U) with fold-averaged upstream features."""
     if pool not in ('monitor', 'U'):
         raise ValueError('development evaluation is restricted to M or locked U')
-    bundle = model_path(config, stage, candidate)
+    arm, aggregation, _ = arm_options(config, arm, aggregation)
+    bundle = model_path(config, stage, candidate, 'dev', arm, aggregation)
     model, identity = load_model(bundle)
     if identity['config'] != object_hash(config):
         raise ValueError('development config changed after B2 fit')
@@ -53,11 +57,13 @@ def evaluate(config, stage, candidate='best', pool='monitor'):
     games, q, frame, sources = read_pool(config, stage, candidate, pool)
     if set(q.player_id.astype(str)) & set(identity['training_players']):
         raise ValueError('B2 fitting/evaluation players overlap')
-    proba = probabilities(model, games, q, frame)
+    baseline = baseline_frame(config, pool)[0] if arm == 'stack' else None
+    proba = probabilities(model, games, q, frame, aggregation, baseline)
     result = report(q, proba)
-    result.update(pool=pool, model=file_hash(bundle), sources=sources,
+    result.update(pool=pool, arm=arm, aggregation=aggregation, upstream='fold-average', model=file_hash(bundle),
+                  sources=sources,
                   interpretation='development selection' if pool == 'monitor' else 'locked one-time U evaluation')
-    path = prediction_path(config, stage, candidate, pool)
+    path = prediction_path(config, stage, candidate, pool, arm, aggregation)
     output = q.drop(columns='games').assign(rank_prediction=score_rank(proba))
     for i, rank in enumerate(RANKS):
         output[f'p_{rank}'] = proba[:, i]
@@ -79,9 +85,12 @@ def read_predictions(path):
 
 
 def select(config, stage):
+    """Best vs final upstream candidate, judged by the configured main arm (new) on M."""
     reports = {name: evaluate(config, stage, name) for name in ('best', 'final')}
     selected = 'final' if reports['final']['equal_k'] > reports['best']['equal_k'] else 'best'
-    result = dict(stage=stage, selected=selected, reports=reports)
+    arm, aggregation, fit_pool = arm_options(config)
+    result = dict(stage=stage, selected=selected, arm=arm, aggregation=aggregation, fit_pool=fit_pool,
+                  reports=reports)
     write_json(Path(config['run_dir']) / 'selection' / f'stage{stage}.json', result)
     return result
 
@@ -95,67 +104,72 @@ def gate_paths(reference, candidate, *, repeats=2000):
     return compare(left, left[columns].to_numpy(), right[columns].to_numpy(), repeats=repeats)
 
 
-def scale_diagnostics(config, stage, candidate):
-    """Compare confidence and complete B2 on the same M for folds versus all-D."""
-    model, _ = load_model(model_path(config, stage, candidate))
+def scale_diagnostics(config, stage, candidate, arm=None, aggregation=None):
+    """Same M and B2: each single fold model versus the four-fold average used for M/U/test."""
+    arm, aggregation, _ = arm_options(config, arm, aggregation)
+    model, _ = load_model(model_path(config, stage, candidate, 'dev', arm, aggregation))
+    baseline = baseline_frame(config, 'monitor')[0] if arm == 'stack' else None
     result = {}
-    for fold in ('all', 1, 2, 3, 4):
+    for fold in ('avg', 1, 2, 3, 4):
         games, q, frame, _ = read_pool(config, stage, candidate, 'monitor', inference_fold=fold)
         x = question_mean(frame[COLUMNS].to_numpy(), frame.game_index, q)
-        summary = {'b2': report(q, probabilities(model, games, q, frame))}
+        summary = {'b2': report(q, probabilities(model, games, q, frame, aggregation, baseline))}
         for name, p in [('own', x[:, :10]), ('opp', x[:, 10:])]:
             logp = np.log(np.maximum(p, 1e-30))
             summary[name] = dict(entropy=float(-(p * logp).sum(1).mean()),
                                  nll=float(-logp[np.arange(len(q)), q.rank_id].mean()))
         result[str(fold)] = summary
-    path = Path(config['run_dir']) / 'diagnostics' / f'stage{stage}_{candidate}.json'
+    path = Path(config['run_dir']) / 'diagnostics' / f'stage{stage}_{candidate}_{arm}_{aggregation}.json'
     write_json(path, result)
     return result
 
 
 def lock(config, arms):
-    """Freeze predeclared B2 arms and selected fixed training steps before reading U."""
+    """Freeze predeclared B2 arms and their four fold checkpoints before reading U.
+
+    Release no longer retrains upstream models, so no fixed step counts are recorded: the
+    locked fold checkpoints themselves are the release upstream.
+    """
     if config.get('smoke'):
         raise ValueError('smoke candidates cannot lock U evaluation or release settings')
     root = Path(config['run_dir'])
-    selected, frozen, selections = {}, {}, {}
+    frozen, selections, folds = {}, {}, {}
+    import torch
     for name, spec in arms.items():
         if 'stage' not in spec:
             path = Path(spec['model'])
             frozen[name] = dict(model=str(path), sha256=file_hash(path))
             continue
         stage, candidate = int(spec['stage']), spec['candidate']
-        if f's{stage}' in selected:
-            raise ValueError('declare only the selected complete pipeline per stage')
+        arm, aggregation, fit_pool = arm_options(config, spec.get('arm'), spec.get('aggregation'))
         selection = root / 'selection' / f'stage{stage}.json'
         if json.loads(selection.read_text())['selected'] != candidate:
             raise ValueError('lock must use the selected M complete-B2 candidate')
         selections[str(stage)] = dict(path=str(selection), sha256=file_hash(selection))
-        path = model_path(config, stage, candidate)
+        path = model_path(config, stage, candidate, 'dev', arm, aggregation)
         _, identity = load_model(path)
         if identity['config'] != object_hash(config):
             raise ValueError('arm config differs from current experiment')
-        checkpoint = root / 'dev' / 'fold_all' / f'stage{stage}' / f'{candidate}.pt'
-        import torch
-        payload = torch.load(checkpoint, map_location='cpu', weights_only=False)
-        if payload['identity']['phase'] != 'dev' or str(payload['identity']['fold']) != 'all' or payload['identity']['stage'] != stage:
-            raise ValueError('development lock requires the selected all-D checkpoint')
-        steps = int(payload['state']['optimizer_steps'])
-        if steps <= 0:
-            raise ValueError('release requires positive selected optimizer steps')
-        selected[f's{stage}'] = steps
-        frozen[name] = dict(model=str(path), sha256=file_hash(path), checkpoint=str(checkpoint),
-                            checkpoint_sha256=file_hash(checkpoint), stage=stage, candidate=candidate)
-    if 's2' in selected:
-        if 's1' not in selected:
-            raise ValueError('a stage-two release requires the selected first-stage arm')
-        stage1 = next(a for a in frozen.values() if a.get('stage') == 1)
-        stage2 = next(a for a in frozen.values() if a.get('stage') == 2)
-        parent = torch.load(stage2['checkpoint'], map_location='cpu', weights_only=False)
-        if parent['identity']['stage1_source_sha256'] != stage1['checkpoint_sha256']:
-            raise ValueError('stage-two arm does not inherit the selected stage-one candidate')
+        checkpoints = {}
+        for fold in FOLDS:
+            checkpoint = root / 'dev' / f'fold_{fold}' / f'stage{stage}' / f'{candidate}.pt'
+            payload = torch.load(checkpoint, map_location='cpu', weights_only=False)
+            if (payload['identity']['phase'] != 'dev' or str(payload['identity']['fold']) != str(fold)
+                    or payload['identity']['stage'] != stage):
+                raise ValueError('lock requires the four selected development fold checkpoints')
+            checkpoints[str(fold)] = dict(path=str(checkpoint), sha256=file_hash(checkpoint),
+                                          stage1_source_sha256=payload['identity'].get('stage1_source_sha256'))
+        if str(stage) in folds and folds[str(stage)] != checkpoints:
+            raise ValueError('all arms of one stage must share the selected fold checkpoints')
+        folds[str(stage)] = checkpoints
+        frozen[name] = dict(model=str(path), sha256=file_hash(path), stage=stage, candidate=candidate,
+                            arm=arm, aggregation=aggregation, fit_pool=fit_pool)
+    if '2' in folds and '1' in folds:
+        for fold in FOLDS:
+            if folds['2'][str(fold)]['stage1_source_sha256'] != folds['1'][str(fold)]['sha256']:
+                raise ValueError('stage-two arm does not inherit the selected stage-one candidate')
     from .data import load_prepared
-    value = dict(config=object_hash(config), arms=frozen, fixed_steps=selected,
+    value = dict(config=object_hash(config), arms=frozen, fold_checkpoints=folds,
                  dataset_id=load_prepared(config)['dataset_id'], selections=selections)
     path = root / 'selection_lock.json'
     if path.exists() and json.loads(path.read_text()) != value:
@@ -175,8 +189,12 @@ def load_lock(config):
         if file_hash(Path(selection['path'])) != selection['sha256']:
             raise ValueError('development selection changed after locking')
     for arm in value['arms'].values():
-        if file_hash(Path(arm['model'])) != arm['sha256'] or ('checkpoint' in arm and file_hash(Path(arm['checkpoint'])) != arm['checkpoint_sha256']):
+        if file_hash(Path(arm['model'])) != arm['sha256']:
             raise ValueError('locked model changed')
+    for checkpoints in value.get('fold_checkpoints', {}).values():
+        for record in checkpoints.values():
+            if file_hash(Path(record['path'])) != record['sha256']:
+                raise ValueError('locked fold checkpoint changed')
     return value
 
 
@@ -185,6 +203,7 @@ def main():
     p.add_argument('--config', required=True); p.add_argument('--stage', type=int, choices=(1, 2))
     p.add_argument('--candidate', choices=('best', 'final'), default='best')
     p.add_argument('--pool', choices=('monitor', 'U'), default='monitor')
+    p.add_argument('--arm', choices=('new', 'stack')); p.add_argument('--aggregation', choices=('prob', 'logp'))
     p.add_argument('--select', action='store_true'); p.add_argument('--diagnostics', action='store_true'); p.add_argument('--lock-arms')
     p.add_argument('--reference'); p.add_argument('--candidate-predictions'); p.add_argument('--output')
     a = p.parse_args()
@@ -195,11 +214,11 @@ def main():
     elif a.reference:
         result = gate_paths(a.reference, a.candidate_predictions)
     elif a.diagnostics:
-        result = scale_diagnostics(config, a.stage, a.candidate)
+        result = scale_diagnostics(config, a.stage, a.candidate, a.arm, a.aggregation)
     elif a.select:
         result = select(config, a.stage)
     else:
-        result = evaluate(config, a.stage, a.candidate, a.pool)
+        result = evaluate(config, a.stage, a.candidate, a.pool, a.arm, a.aggregation)
     if a.output:
         write_json(Path(a.output), result)
     print(json.dumps(result, indent=2))

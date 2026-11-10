@@ -14,10 +14,17 @@
 source src/go_aicup/tasks/strength/humansl_residual_b2/slurm/environment.sh
 STAGE="${STAGE:-1}"
 if [[ "$PHASE" == release ]]; then
-    "$PYTHON_BIN" -m "$MODULE.b2" --config "$CONFIG" --stage "$STAGE" --phase release --candidate final
+    # After the U lock: refit the locked arm on dev OOF (fit pool) + fold-averaged M+U questions.
+    : "${ARM:?Set ARM=new|stack}" "${AGGREGATION:?Set AGGREGATION=prob|logp}" "${CANDIDATE:?Set the locked candidate}"
+    "$PYTHON_BIN" -m "$MODULE.b2" --config "$CONFIG" --stage "$STAGE" --phase release \
+        --candidate "$CANDIDATE" --arm "$ARM" --aggregation "$AGGREGATION"
 else
+    # Both aggregations for the new arm; the config aggregation (logp) drives best/final selection.
     for candidate in best final; do
-        "$PYTHON_BIN" -m "$MODULE.b2" --config "$CONFIG" --stage "$STAGE" --candidate "$candidate"
+        for aggregation in prob logp; do
+            "$PYTHON_BIN" -m "$MODULE.b2" --config "$CONFIG" --stage "$STAGE" --candidate "$candidate" \
+                --arm new --aggregation "$aggregation"
+        done
     done
     "$PYTHON_BIN" -m "$MODULE.evaluate" --config "$CONFIG" --stage "$STAGE" --select
 fi

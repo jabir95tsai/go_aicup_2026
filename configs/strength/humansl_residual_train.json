@@ -37,7 +37,7 @@
       0.999
     ],
     "eps": 1e-08,
-    "checkpoint_every": 1000,
+    "checkpoint_every": 300,
     "sync_batch_norm": true,
     "channels_last": true,
     "cudnn_benchmark": false,
@@ -45,22 +45,34 @@
     "allow_tf32": false
   },
   "stage1": {
-    "updates": 20000,
+    "updates": 3000,
     "lr": 0.001,
-    "lr_schedule": []
+    "lr_schedule": [],
+    "lr_decay": "cosine",
+    "min_lr_ratio": 0.05,
+    "monitor_every": 300
   },
   "stage2": {
-    "updates": 20000,
+    "updates": 6000,
     "lr": 0.0003,
-    "lr_schedule": []
+    "lr_schedule": [],
+    "lr_decay": "cosine",
+    "min_lr_ratio": 0.05,
+    "monitor_every": 600
   },
   "monitoring": {
-    "every": 5000,
     "patience": 3,
     "questions_per_cell": 125
   },
   "b2": {
-    "questions_per_k": 20000
+    "questions_per_k": 20000,
+    "fit_pool": "fit_all",
+    "fit_all_cap_per_color": 20,
+    "aggregation": "logp",
+    "arms": [
+      "new",
+      "stack"
+    ]
   },
   "evaluation": {
     "batch_size": 300,

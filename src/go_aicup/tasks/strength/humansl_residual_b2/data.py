@@ -56,9 +56,107 @@ def games(config, phase='dev'):
     return pd.read_parquet(directory(config, phase) / 'games.parquet')
 
 
+EXTENSION_QUESTIONS = ('fit_all', 'release_fit', 'release_fit_all')
+EXTENSION_POOLS = ('fit_all', 'mu_all')
+
+
+def extension_dir(config):
+    """Additive question/game pools; the base prepared manifest (bound by teacher) is never rewritten."""
+    return Path(config['data']['prepared_dir']) / 'ext_v1'
+
+
 def questions(config, name, phase='dev'):
     aliases = {'dev': 'fit', 'M': 'monitor', 'u': 'U', 'release': 'release_fit'}
-    return pd.read_parquet(directory(config, phase) / f'questions_{aliases.get(name, name)}.parquet')
+    name = aliases.get(name, name)
+    if name in EXTENSION_QUESTIONS:
+        load_extension(config, release=name.startswith('release'))
+        return pd.read_parquet(extension_dir(config) / f'questions_{name}.parquet')
+    return pd.read_parquet(directory(config, phase) / f'questions_{name}.parquet')
+
+
+def pool_game_ids(config, pool):
+    """Games whose features a pool needs: whole capped pools for fit_all/mu_all, else question games."""
+    if pool in EXTENSION_POOLS:
+        load_extension(config, release=pool == 'mu_all')
+        return set(pd.read_parquet(extension_dir(config) / f'pool_{pool}.parquet').game_index.astype(int))
+    q = questions(config, pool)
+    return set(int(i) for row in q.games for i in row)
+
+
+def cap_per_color(pool, cap, seed, salt):
+    """Keep at most cap games per (player, color), chosen by a fixed seeded random key."""
+    if type(cap) is not int or cap < 1:
+        raise ValueError('cap must be a positive integer')
+    pool = pool.sort_values('game_index').reset_index(drop=True)
+    key = np.random.default_rng([seed, salt]).random(len(pool))
+    ordered = pool.assign(_key=key).sort_values(['player_id', 'player_color', '_key'], kind='mergesort')
+    return ordered.groupby(['player_id', 'player_color'], sort=False).head(cap).drop(columns='_key') \
+        .sort_values('game_index').reset_index(drop=True)
+
+
+def _extension_identity(config, release):
+    b2 = config.get('b2', {})
+    return dict(version=1, base_dataset_id=load_prepared(config)['dataset_id'], release=release,
+                cap_per_color=b2.get('fit_all_cap_per_color', 20), split_seed=config['split_seed'],
+                fit_per_k=b2.get('questions_per_k', 20000))
+
+
+def load_extension(config, release=False):
+    root = extension_dir(config)
+    path = root / ('release_manifest.json' if release else 'manifest.json')
+    if not path.exists():
+        raise ValueError(f'missing extension {path.name}; run prepare --extension{" --release" if release else ""}')
+    record = json.loads(path.read_text())
+    if record['identity'] != _extension_identity(config, release):
+        raise ValueError('extension pool identity changed; use a new prepared_dir')
+    for name, digest in record['files'].items():
+        if file_hash(root / name) != digest:
+            raise ValueError(f'extension artifact changed: {name}')
+    return record
+
+
+def prepare_extension(config, *, release=False):
+    """Dev: all D players capped per color (B2 OOF fitting). Release: D/fit pools plus capped M and U."""
+    if release:
+        from .evaluate import load_lock
+        load_lock(config)
+    identity = _extension_identity(config, release)
+    root = extension_dir(config)
+    name = 'release_manifest.json' if release else 'manifest.json'
+    with writer_lock(root):
+        if (root / name).exists():
+            return load_extension(config, release)
+        table = games(config)
+        cap, seed, count = identity['cap_per_color'], identity['split_seed'], identity['fit_per_k']
+        if release:
+            load_extension(config, release=False)
+            dev_fit_all = table[table.game_index.isin(pool_game_ids(config, 'fit_all'))]
+            dev_fit = table[table.game_index.isin(pool_game_ids(config, 'fit'))]
+            mu = cap_per_color(table[table.role.isin(['M', 'U'])], cap, seed, 92)
+            frames = {'pool_mu_all': mu[['game_index']]}
+            pools = {'release_fit_all': pd.concat([dev_fit_all, mu]), 'release_fit': pd.concat([dev_fit, mu])}
+        else:
+            capped = cap_per_color(table[table.role.eq('D')], cap, seed, 91)
+            frames = {'pool_fit_all': capped[['game_index']]}
+            pools = {'fit_all': capped}
+        audit = {}
+        for qname, pool in pools.items():
+            pool = pool.sort_values('game_index').reset_index(drop=True)
+            if not pool.game_index.is_unique:
+                raise ValueError(f'{qname}: duplicate games across pooled roles')
+            cells = eligibility(pool)
+            if any(c['eligible_players'] == 0 for c in cells):
+                raise ValueError(f'{qname}: a k/rank eligibility cell has no player')
+            frames[f'questions_{qname}'] = sample_questions(pool, count, seed, balanced=False, prefix=qname)
+            audit[qname] = dict(games=len(pool), players=int(pool.player_id.nunique()), eligibility=cells,
+                                roles={str(k): int(v) for k, v in pool.role.value_counts().items()})
+        files = {}
+        for fname, frame in frames.items():
+            path = root / f'{fname}.parquet'; atomic_table(path, frame); files[path.name] = file_hash(path)
+        audit_name = 'release_audit.json' if release else 'audit.json'
+        write_json(root / audit_name, audit); files[audit_name] = file_hash(root / audit_name)
+        write_json(root / name, dict(identity=identity, files=files))
+        return load_extension(config, release)
 
 
 def load_prepared(config, release=False):

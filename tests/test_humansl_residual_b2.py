@@ -190,8 +190,8 @@ def test_complete_oof_fit_rejects_stale_checkpoint(example, tmp_path, monkeypatc
         b2.fit(config, 1)
 
 
-@pytest.mark.parametrize('stage', [1, 2])
-def test_release_prepare_predict_real_move_store_and_cached_reuse(example, tmp_path, monkeypatch, stage):
+@pytest.mark.parametrize('arm_stage', [1, 2])
+def test_release_predict_averages_locked_fold_models_and_reuses_cache(example, tmp_path, monkeypatch, arm_stage):
     from types import SimpleNamespace
     from go_aicup.artifacts import object_hash
     from go_aicup.tasks.strength.humansl_residual_b2 import data, dataset, predict, train
@@ -210,73 +210,96 @@ def test_release_prepare_predict_real_move_store_and_cached_reuse(example, tmp_p
                   training={'positions_per_side': 15}, data={'store_dir': str(store)})
     manifest = {'dataset_id': 'release-test'}
     monkeypatch.setattr(data, 'load_prepared', lambda *a, **kw: manifest)
-    monkeypatch.setattr(predict, 'load_lock', lambda *a: {'fixed_steps': {'s1': 7, 's2': 9}})
-    checkpoint = tmp_path / 'final.pt'; checkpoint.write_bytes(b'mocked-human-and-classifier')
+    checkpoints = {}
+    for fold in range(1, 5):
+        path = tmp_path / f'fold{fold}.pt'; path.write_bytes(f'fold-{fold}'.encode())
+        checkpoints[str(fold)] = dict(path=str(path), sha256=file_hash(path))
+    lock = dict(arms={'main': dict(stage=arm_stage, candidate='best', arm='new', aggregation='logp')},
+                fold_checkpoints={str(arm_stage): checkpoints})
+    monkeypatch.setattr(predict, 'load_lock', lambda *a: lock)
     class Model(torch.nn.Module):
-        def __init__(self):
-            super().__init__(); self.humansl = SimpleNamespace(config={})
+        def __init__(self, shift):
+            super().__init__(); self.humansl = SimpleNamespace(config={}); self.shift = shift
         def forward(self, spatial, global_inputs, metadata, actions, sides):
-            return {'rank_logits': torch.nn.functional.one_hot(actions % 10, 10).float()}
-    payload = dict(identity=dict(phase='release', fold='all', stage=stage), state={'optimizer_steps': 7 if stage == 1 else 9},
-                   dataset_id=manifest['dataset_id'], config_sha256=object_hash(config))
-    if stage == 2:
-        parent = Path(config['run_dir']) / 'release/fold_all/stage1/final.pt'
-        parent.parent.mkdir(parents=True)
-        torch.save({'state': {'optimizer_steps': 7}}, parent)
-        payload['identity']['stage1_source_sha256'] = file_hash(parent)
-    monkeypatch.setattr(train, 'load_candidate', lambda *a, **kw: (Model(), payload))
-    encoded = []
-    def encode(moves, colors, plies, model_config, hd, **kwargs):
-        encoded.append((len(moves), hd, tuple(plies)))
-        assert np.array_equal(moves, np.arange(len(moves)))
-        assert np.array_equal(colors, np.arange(len(colors)) % 2)
-        return dict(spatial=np.zeros((len(plies), 22, 19, 19), np.uint8),
-                    global_inputs=np.zeros((len(plies), 19), np.float32),
-                    metadata=np.zeros((len(plies), 192), np.float32), actions=moves[plies])
-    monkeypatch.setattr(dataset, 'encode_selected', encode)
-    bundle = b2.model_path(config, stage, 'final', phase='release')
-    b2.save_model(bundle, b2.fit_questions(games, q, frame),
-                  dict(phase='release', stage=stage, config=object_hash(config)))
-    result = predict.predict(config, work, checkpoint, stage=stage)
-    assert result['questions'] == 1
-    output = pd.read_parquet(work / predict.FILENAME)
-    assert output.question_id.tolist() == ['q-release']
-    assert not any('fallback' in c or 'humansl_games' in c for c in output)
-    saved = pd.read_parquet(work / 'humansl_residual_b2_games.parquet')
-    assert (saved.own_count + saved.opp_count).tolist() == (lengths - 30).tolist()
-    assert [hd for _, hd, _ in encoded] == metadata.hd.tolist()
+            return {'rank_logits': torch.nn.functional.one_hot((actions + self.shift) % 10, 10).float() * 3}
+    loaded = []
+    def load_candidate(path, *a, **kw):
+        fold = int(Path(path).stem[-1]); loaded.append(fold)
+        payload = dict(identity=dict(phase='dev', fold=str(fold), stage=arm_stage),
+                       dataset_id=manifest['dataset_id'], config_sha256=object_hash(config))
+        return Model(fold), payload
+    monkeypatch.setattr(train, 'load_candidate', load_candidate)
+    monkeypatch.setattr(dataset, 'encode_selected', lambda moves, colors, plies, model_config, hd, **kw: dict(
+        spatial=np.zeros((len(plies), 22, 19, 19), np.uint8), global_inputs=np.zeros((len(plies), 19), np.float32),
+        metadata=np.zeros((len(plies), 192), np.float32), actions=moves[plies]))
+    logp_frame = frame.copy()
+    for column, source in zip(features.LOGP_COLUMNS, features.COLUMNS):
+        logp_frame[column] = np.log(frame[source])
+    bundle = b2.model_path(config, arm_stage, 'best', 'release', 'new', 'logp')
+    b2.save_model(bundle, b2.fit_questions(games, q, logp_frame, 'logp'),
+                  dict(phase='release', stage=arm_stage, config=object_hash(config), arm='new', aggregation='logp'))
+    result = predict.predict(config, work, arm_name='main')
+    assert result['questions'] == 1 and sorted(loaded) == [1, 2, 3, 4]
+    per_fold = [features.read_features(work / f'humansl_residual_b2_stage{arm_stage}_best_fold{f}_games.parquet')[0]
+                for f in range(1, 5)]
+    averaged = b2.average_frames(per_fold)
+    np.testing.assert_allclose(averaged[features.LOGP_COLUMNS].to_numpy(),
+                               np.mean([f[features.LOGP_COLUMNS].to_numpy() for f in per_fold], axis=0))
+    assert (per_fold[0].own_count + per_fold[0].opp_count).tolist() == (lengths - 30).tolist()
     monkeypatch.setattr(dataset, 'encode_selected', lambda *a, **kw: pytest.fail('completed features recomputed'))
-    assert predict.predict(config, work, checkpoint, stage=stage) == result
-    if stage == 2:
-        torch.save({'state': {'optimizer_steps': 8}}, parent)
-        with pytest.raises(ValueError, match='locked s1'):
-            predict.predict(config, work, checkpoint, stage=stage)
+    assert predict.predict(config, work, arm_name='main') == result
+    Path(checkpoints['3']['path']).write_bytes(b'changed')
+    with pytest.raises(ValueError, match='fold checkpoint changed'):
+        predict.predict(config, work, arm_name='main')
 
 
-def test_u_lock_binds_selection_models_dataset_and_stage1_ancestry(tmp_path, monkeypatch):
+def test_u_lock_binds_selection_models_dataset_and_fold_ancestry(tmp_path, monkeypatch):
     from go_aicup.artifacts import object_hash
     from go_aicup.tasks.strength.humansl_residual_b2 import data
     config = {'run_dir': str(tmp_path)}
     monkeypatch.setattr(data, 'load_prepared', lambda *a, **kw: {'dataset_id': 'fixed-data'})
-    previous = None
+    parents = {}
     for stage in (1, 2):
         selection = tmp_path / 'selection' / f'stage{stage}.json'
         write_json(selection, {'selected': 'best'})
-        checkpoint = tmp_path / 'dev' / 'fold_all' / f'stage{stage}' / 'best.pt'
-        checkpoint.parent.mkdir(parents=True)
-        identity = dict(phase='dev', fold='all', stage=stage, stage1_source_sha256=previous)
-        torch.save(dict(identity=identity, state={'optimizer_steps': stage * 10}), checkpoint)
-        previous = file_hash(checkpoint)
+        for fold in range(1, 5):
+            checkpoint = tmp_path / 'dev' / f'fold_{fold}' / f'stage{stage}' / 'best.pt'
+            checkpoint.parent.mkdir(parents=True)
+            identity = dict(phase='dev', fold=str(fold), stage=stage, stage1_source_sha256=parents.get(fold))
+            torch.save(dict(identity=identity, state={'optimizer_steps': stage * 10 + fold}), checkpoint)
+            if stage == 1:
+                parents[fold] = file_hash(checkpoint)
         b2.save_model(b2.model_path(config, stage, 'best'), RankModel('B2'), {'config': object_hash(config)})
     with pytest.raises(ValueError, match='selected'):
         evaluate.lock(config, {'s1': {'stage': 1, 'candidate': 'final'}})
     arms = {'s1': {'stage': 1, 'candidate': 'best'}, 's2': {'stage': 2, 'candidate': 'best'}}
     result = evaluate.lock(config, arms)
-    assert result['fixed_steps'] == {'s1': 10, 's2': 20}
+    assert 'fixed_steps' not in result and set(result['fold_checkpoints']) == {'1', '2'}
+    assert set(result['fold_checkpoints']['2']) == {'1', '2', '3', '4'}
     assert evaluate.load_lock(config) == result
+    torch.save({'identity': {}, 'changed': True}, tmp_path / 'dev/fold_2/stage2/best.pt')
+    with pytest.raises(ValueError, match='fold checkpoint changed'):
+        evaluate.load_lock(config)
     write_json(tmp_path / 'selection/stage1.json', {'selected': 'final'})
     with pytest.raises(ValueError, match='selection changed'):
         evaluate.load_lock(config)
+
+
+def test_lock_rejects_stage_two_from_another_stage_one_candidate(tmp_path, monkeypatch):
+    from go_aicup.artifacts import object_hash
+    from go_aicup.tasks.strength.humansl_residual_b2 import data
+    config = {'run_dir': str(tmp_path)}
+    monkeypatch.setattr(data, 'load_prepared', lambda *a, **kw: {'dataset_id': 'fixed-data'})
+    for stage in (1, 2):
+        write_json(tmp_path / 'selection' / f'stage{stage}.json', {'selected': 'best'})
+        for fold in range(1, 5):
+            checkpoint = tmp_path / 'dev' / f'fold_{fold}' / f'stage{stage}' / 'best.pt'
+            checkpoint.parent.mkdir(parents=True)
+            torch.save(dict(identity=dict(phase='dev', fold=str(fold), stage=stage,
+                                          stage1_source_sha256='other' if stage == 2 else None)), checkpoint)
+        b2.save_model(b2.model_path(config, stage, 'best'), RankModel('B2'), {'config': object_hash(config)})
+    with pytest.raises(ValueError, match='inherit'):
+        evaluate.lock(config, {'s1': {'stage': 1, 'candidate': 'best'}, 's2': {'stage': 2, 'candidate': 'best'}})
 
 
 def test_extraction_cost_and_reuse_keep_success_metrics(example, tmp_path, monkeypatch):
