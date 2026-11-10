@@ -7,7 +7,7 @@ import pytest
 
 from go_aicup.data.board_cache import RANKS
 
-spec = importlib.util.spec_from_file_location("export_rank_submission", Path(__file__).parents[1] / "scripts/export_rank_submission.py")
+spec = importlib.util.spec_from_file_location("export_rank_submission", Path(__file__).parents[1] / "scripts/strength/export_rank_submission.py")
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 

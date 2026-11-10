@@ -7,7 +7,7 @@ import pandas as pd
 from go_aicup.data.preprocess import _parse_batch
 from go_aicup.tasks.identity.predict import handicap_ok
 
-import day0_audit
+import scripts.release.day0_audit as day0_audit
 
 
 def test_parse_records_hd_value_or_minus_one():

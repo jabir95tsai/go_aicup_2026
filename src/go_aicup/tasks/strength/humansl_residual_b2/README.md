@@ -5,7 +5,7 @@
 ## 設定與前置資料
 
 - `configs/strength/humansl_residual_smoke100.json`：兩階段各 100 optimizer updates，探索用 AdamW LR=0.001；C 對照 100 updates、LR=0.01。這些數字只供工程短測，不是已選定的正式超參數。
-- `configs/strength/humansl_residual_train.json`：正式模板，兩階段及 C 的 `updates`／`lr` 留為 `null`。短測後填入測得預算及各階段 `lr_schedule=[[完成步數,新LR],...]`，另存 run 設定；沒有填值就明確報錯。
+- `configs/strength/humansl_residual_train.json`：正式設定，兩階段各 20,000 updates，AdamW LR 分別為 0.001／0.0003；C 對照 20,000 updates、LR=0.01。這些是未經正式訓練驗證的起點，長作業前須依短測估算成本。可用 `lr_schedule=[[完成步數,新LR],...]` 設定各階段的學習率變化。
 - 兩者預設 8 GPU、global 128 組、每卡 microbatch 一組／300 位置、累積 16 次。每方 15 手、seed=2026、玩家／題目 seed=2027；實際 world size、microbatch、precision 都綁定續跑身分。3060 Ti 使用獨立縮小 config／輸出目錄，不能混用八卡 checkpoint。
 - `data.folds_path` 必須指向**原完整資料 seed=2027** 的玩家表，至少有 `player_id,fold`，fold 為 −1、0、1、2、3、4。本次唯讀查核時 `data/processed/cv/` 為空，預設的 `strength_folds_seed2027.parquet` 尚不存在；須從原切分保存處取回並設定路徑。程式不自動重抽原 fold。
 - `data.legacy_split_paths` 重用既有 `humansl_q1000`／`humansl_qsel`／`humansl_vs_rest` 的棋局表，合併 S-fit／S-select／S-extra 為 Valid-S、U 為 Valid-U，其餘棋局僅作上游來源。也可用 `legacy_split_path` 指向完整、明列 `split` 的原棋局表；兩種方式擇一。

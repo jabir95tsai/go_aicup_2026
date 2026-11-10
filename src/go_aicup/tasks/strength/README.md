@@ -44,7 +44,7 @@ python -m go_aicup.tasks.strength.v1.train --config configs/strength/rank_cnn_v1
 python -m go_aicup.tasks.strength.v1.evaluate --run-dir outputs/rank_cnn_v1_seed2027
 ```
 
-根目錄的舊轉接檔已移除，僅保留套件用的 `__init__.py`。命令與 import 統一使用上述 `shared` 或 `v1` 路徑；例如 `strength.train_rank_v1` 改用 `strength.v1.train`，`strength.dataset` 改用 `strength.shared.dataset`，設定讀取改用 `strength.v1.config`。`scripts/plot_rank_v1.py` 與 `configs/strength/rank_cnn_v1_seed*.json` 皆屬 V1 專用。
+根目錄的舊轉接檔已移除，僅保留套件用的 `__init__.py`。命令與 import 統一使用上述 `shared` 或 `v1` 路徑；例如 `strength.train_rank_v1` 改用 `strength.v1.train`，`strength.dataset` 改用 `strength.shared.dataset`，設定讀取改用 `strength.v1.config`。`scripts/strength/plot_rank_v1.py` 與 `configs/strength/rank_cnn_v1_seed*.json` 皆屬 V1 專用。
 
 程式搬移後，新資料準備紀錄與 checkpoint 的 code fingerprint 會記錄新實作位置。既有已完成資料可由 `load_dataset_manifest` 讀取，既有模型 state dict 與續跑格式保留；若對舊 processed 目錄重新執行 prepare，原有 generator hash 防護仍會要求改用新目錄，不覆寫舊資料。
 

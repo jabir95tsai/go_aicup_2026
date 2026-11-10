@@ -23,7 +23,7 @@ PYTHON_BIN="${PYTHON_BIN:-${HOME}/.conda/envs/go/bin/python}"
 RUN="${RUN:-outputs/humansl_rankvec}"
 FEAT="${FEAT:-outputs/humansl_rankvec_feat}"
 cd "$PROJECT_DIR"
-export PYTHONPATH="${PROJECT_DIR}/src:${PROJECT_DIR}/scripts:${PROJECT_DIR}/data/external/katago-src-v1.18.2/KataGo-1.18.2/python" PYTHONUNBUFFERED=1
+export PYTHONPATH="${PROJECT_DIR}/src:${PROJECT_DIR}:${PROJECT_DIR}/data/external/katago-src-v1.18.2/KataGo-1.18.2/python" PYTHONUNBUFFERED=1
 printf 'Job=%s node=%s mode=%s\n' "${SLURM_JOB_ID:-unknown}" "${SLURMD_NODENAME:-unknown}" "$MODE"
 nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv
 EXTRA=()
@@ -33,7 +33,7 @@ EXTRA=()
 [[ -n "${KOMI:-}" ]] && EXTRA+=(--komi "$KOMI")
 start=$(date +%s)
 case "$MODE" in
-    check)   "$PYTHON_BIN" scripts/humansl_rankvec.py check ;;
+    check)   "$PYTHON_BIN" -m scripts.strength.humansl_rankvec check ;;
     pack)    "$PYTHON_BIN" -m go_aicup.features.humansl_rankvec pack --games "$RUN/games.parquet" \
                  --out "$RUN/pack_$SHARD" --shard "$SHARD" --num-shards "$NUM_SHARDS" "${EXTRA[@]}" ;;
     train)   "$PYTHON_BIN" -m go_aicup.features.humansl_rankvec train --run "$RUN" "${EXTRA[@]}" ;;

@@ -62,7 +62,7 @@ nvidia-smi > outputs/rank_env_nano4/nvidia-smi.txt
 ldd --version > outputs/rank_env_nano4/libc.txt
 python -m pip freeze > outputs/rank_env_nano4/pip-freeze.txt
 python -m torch.distributed.run --standalone --nnodes=1 --nproc-per-node=2 \
-  scripts/check_torch_ddp.py 2>&1 | tee outputs/rank_env_nano4/ddp-2gpu.log
+  scripts/environment/check_torch_ddp.py 2>&1 | tee outputs/rank_env_nano4/ddp-2gpu.log
 ```
 
 通過條件：所有 process 正常退出，log 的 JSON 顯示 `status: passed`、`world_size: 2`、`all_reduce_sum: 3.0`、`ddp_gradient: 1.5`。改跑 8 卡時，使用 `ddp-8gpu.log`，預期 sum 為 36.0、gradient 為 4.5；`pip-freeze.txt` 記錄包含間接依賴的實際版本。這是環境檢查；2026-10-12 新寫的模型訓練入口已有 DDP 與全域 batch 分配程式，**尚未執行單／多卡梯度、SyncBN、尾批與續跑驗收**，環境通過仍不代表訓練入口通過。
@@ -75,7 +75,7 @@ python -m torch.distributed.run --standalone --nnodes=1 --nproc-per-node=2 \
 python -m go_aicup.data.preprocess train         # SGF → int16 memmap，約 2.5 分鐘
 python -m go_aicup.data.cv                       # CV 切分 + 合成題組，數秒
 python -m go_aicup.features.game_stats           # EDA 用的盤面統計，約 10 秒
-python scripts/eda_report.py                     # 重產 notebooks/02_eda.md，約 2 分鐘
+python -m scripts.data.eda_report                     # 重產 notebooks/02_eda.md，約 2 分鐘
 ```
 
 棋力程式依用途分為 `src/go_aicup/tasks/strength/shared/`（共用基礎）與 `v1/`（V1 專用）。V2 目前只有計畫，尚無實作；分類與檔案對照見 [程式分層說明](src/go_aicup/tasks/strength/README.md)。命令與 import 統一使用 `shared`／`v1` 路徑，舊轉接檔已移除。
@@ -257,9 +257,9 @@ python -m go_aicup.tasks.strength.v1.evaluate --run-dir outputs/rank_cnn_v1_seed
 使用同一份 Slurm 腳本分別提交三個獨立的單節點作業（每份獨占 1 節點／8 GPU；不會由腳本替你提交其他作業）：
 
 ```bash
-sbatch --job-name=rank2027 --export=ALL,SEED=2027 scripts/train_rank_v1.slurm
-sbatch --job-name=rank2028 --export=ALL,SEED=2028 scripts/train_rank_v1.slurm
-sbatch --job-name=rank2029 --export=ALL,SEED=2029 scripts/train_rank_v1.slurm
+sbatch --job-name=rank2027 --export=ALL,SEED=2027 slurm/train_rank_v1.slurm
+sbatch --job-name=rank2028 --export=ALL,SEED=2028 slurm/train_rank_v1.slurm
+sbatch --job-name=rank2029 --export=ALL,SEED=2029 slurm/train_rank_v1.slurm
 ```
 
 腳本預設 `SEED=2027`，也可直接修改該行。每份作業先準備該 seed 資料，再啟動訓練；存在 `last.json` 時自動續跑。預設 24 小時、64 CPU、1400 GiB RAM；是否同時啟動由排程器決定。需要 account 時，在 `sbatch` 加 `-A <account>`。若改節點路徑，須同步調整腳本 `--chdir` 與 `PROJECT_DIR`；`PYTHON_BIN` 預設使用 `$HOME/.conda/envs/go/bin/python`。Slurm 日誌為 repo 下的 `slurm-<job-name>-<job-id>.out`。
@@ -288,11 +288,11 @@ sbatch --job-name=rank2029 --export=ALL,SEED=2029 scripts/train_rank_v1.slurm
 ### 棋力 V1 視覺化
 
 ```bash
-python scripts/plot_rank_v1.py --run-dir outputs/rank_cnn_v1_seed2027
+python -m scripts.strength.plot_rank_v1 --run-dir outputs/rank_cnn_v1_seed2027
 # 尚未完成時可只讀已完成的完整資料 loss。
-python scripts/plot_rank_v1.py --run-dir outputs/rank_cnn_v1_seed2027 --loss-only
+python -m scripts.strength.plot_rank_v1 --run-dir outputs/rank_cnn_v1_seed2027 --loss-only
 # 只畫 loss 與十級每盤平均分數分布（兩張）
-python scripts/plot_rank_v1.py --run-dir outputs/rank_cnn_v1_seed2027 --skip-confusion
+python -m scripts.strength.plot_rank_v1 --run-dir outputs/rank_cnn_v1_seed2027 --skip-confusion
 ```
 
 新格式直接讀取 `.npy` 與保存的切點，預設在 `<run-dir>/plots/` 產生 `loss_vs_step.png`、`confusion_matrix.png`、`score_distributions_cutpoints.png`；圖表只在執行此指令時產生。目前 losses.npy 的 train_loss 是當步訓練 batch loss（train mode），valid_loss 是固定抽樣 100,000 手（每級 10,000 手、不放回、由 seed 決定）的 rank-mean loss（eval mode）；舊版 legacy_full_losses.json 定義不同，不混接。混淆矩陣分 k 桶，每盤分布由指定玩家的逐手 score 先取盤內平均，每盤等權。切點由 training 每盤平均分數擬合。可用 `--output-dir`、`--bins`，或搬移資料時用 `--dataset-dir`／`--cache-dir`。新格式需 CPU PyTorch 讀取 `model.pt`，不使用 GPU。
@@ -316,7 +316,7 @@ sbatch slurm/rank_ahc_predict.slurm
 # 0. 官方 CSV 放 data/raw/ → GameStore（寬鬆解析：pass、setup 石、奇怪 header 只計數不中斷）
 python -m go_aicup.data.preprocess release --raw-dir data/raw --out-dir data/processed
 # 1. Day-0 稽核（EXECUTION_PLAN §5 的 1–7、9；L10 另跑）
-python scripts/day0_audit.py --store-dir data/processed --raw-dir data/raw --out outputs/day0_audit/report.json
+python -m scripts.release.day0_audit --store-dir data/processed --raw-dir data/raw --out outputs/day0_audit/report.json
 # 2. 競賽一：GE2E 保險向量（1 張 GPU，4 個 store 約 10 分鐘，A-053）→ public／private 各自獨立（CPU，每個池約 40 秒）
 python -m go_aicup.tasks.identity.insurance --store-dir data/processed \
     --name pid_public pid_private pool_public pool_private --work-dir outputs/pid_submit/insurance
@@ -330,7 +330,7 @@ sbatch slurm/strength_predict.slurm   # 預設 data/processed → outputs/rank_s
 
 - 競賽一預設 D4 正規化＋pp+slot＋GE2E 保險（λ＝8，A-035、A-053）＋Sinkhorn／Hungarian（A-029）；不加 `--insurance-dir` 即為只用開局；`--orient raw`、`--assign sinkhorn|none` 留給 11/04 稽核後切換。每盤要有 ≥16 手且前 16 手黑白交替才用於開局分數；無可用盤的題目所有候選人同分（有計數）。
 - 競賽二使用 `outputs/v2_strength/model.pt`（A-024）與 `outputs/v2_agg_calibration/result.json` 的 T_k；`num_games` 不在 5／10／15／20 時用最近的 k；整題無可用盤時用其他題的平均機率（有計數）。
-- **彩排：** `python scripts/make_fake_release.py` 把 Valid-U 題目與合成候選庫 split 1／2 轉成官方寬格式（`outputs/rehearsal/raw/`），跑完上面 0–3 步（`--raw-dir outputs/rehearsal/raw --out-dir outputs/rehearsal/store` 等）後，`python scripts/rehearsal_check.py` 檢查 T1 gate。
+- **彩排：** `python -m scripts.release.make_fake_release` 把 Valid-U 題目與合成候選庫 split 1／2 轉成官方寬格式（`outputs/rehearsal/raw/`），跑完上面 0–3 步（`--raw-dir outputs/rehearsal/raw --out-dir outputs/rehearsal/store` 等）後，`python -m scripts.release.rehearsal_check` 檢查 T1 gate。
 
 ### 競賽二 HumanSL 路徑（A-039～A-042）
 
@@ -349,13 +349,13 @@ python -m go_aicup.tasks.strength.humansl_predict aggregate --work $W --submissi
 
 - 模型 `outputs/humansl_model/model.pkl` 由 `python -m go_aicup.tasks.strength.humansl_predict fit --method B2` 產生（S-fit＋S-select 驗證盤）。
 - 每節點每位使用者最多 2,048 個執行緒，KataGo 每個引擎約用 analysis threads × 2；`configs/strength/humansl_analysis.cfg` 設 120，8 個作業擠在同一節點也不會超過。
-- 彩排檢查：`python scripts/humansl_rehearsal_check.py`。
+- 彩排檢查：`python -m scripts.release.humansl_rehearsal_check`。
 
 ## 結構
 
 詳見 CLAUDE.md 第 10 節。重點：
 
-- `src/go_aicup/` 放可重用程式（用 `python -m go_aicup....` 執行）；`scripts/` 放一次性報告與命令列入口
+- `src/go_aicup/` 放可重用程式（用 `python -m go_aicup....` 執行）；`scripts/` 依 data／environment／identity／strength／release 分類，放一次性報告與命令列入口（[目錄索引](scripts/README.md)）
 - 兩賽共用 `data/`、`features/`、`metrics.py`；各自的訓練、推論、提交檔放 `tasks/strength/`、`tasks/identity/`。棋力版本共用模型主幹放在 `tasks/strength/shared/model.py`，V1 head 放在 `tasks/strength/v1/model.py`
 - 切分只能由 `go_aicup/data/cv.py` 產生；特徵要過 `go_aicup/features/feature_policy.py`
 - 新的實驗 run 一律寫到 `outputs/<run-id>/`（run-id 以 `rank_`／`pid_` 開頭），存 config、seed、git commit、log、OOF、權重、分k桶分數

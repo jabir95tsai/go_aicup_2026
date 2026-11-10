@@ -9,7 +9,7 @@ SIGTERM/SIGINT; rerunning the same command resumes from it.
 After the last step, every gallery and question game of config["eval_splits"]
 is embedded with ALL its black moves from ply 20 on, and rank 0 writes
 embeddings_split{n}.npz (game_index, vector = mean move embedding) next to
-model.pt. Scoring is CPU-only: scripts/identity_ge2e_eval.py.
+model.pt. Scoring is CPU-only: scripts/identity/identity_ge2e_eval.py.
 
     torchrun --standalone --nproc-per-node=8 -m go_aicup.tasks.identity.train_ge2e \\
         --config configs/identity/pid_ge2e_v1_short.json

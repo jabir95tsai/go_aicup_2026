@@ -99,7 +99,7 @@ H200 佇列限制**每張 GPU 最多 12 CPU 核心、200GB 主記憶體**；200G
 
 **仍未知：** 專案 account／QoS、剩餘 GPU 小時、RQ／NRQ 身分、實際 driver／CUDA／PyTorch／NCCL 版本與排隊時間。晶創 26 另有 GB200／Arm 資源；本專案目前的 HPC 支援範圍限定上述 H200 佇列。
 
-**依賴安裝基準（2026-10-11）：** 本機 Windows 與 Nano4 Linux x86_64 共用 `requirements.txt` 的直接依賴 pins，使用標準 CPython 3.11–3.13、`torch==2.6.0+cu124` 與官方 CUDA 12.4 額外索引。Linux CUDA wheel 的 NCCL 依賴由 pip 安裝；系統 module 不必恰好是 CUDA 12.4，但 driver 必須相容。Nano4 的 Conda **`go`** 環境已建置（2026-10-11 使用者確認）；上述依賴 pins 是否已完整安裝、實際套件版本與多卡測試結果仍待驗證。安裝、driver／glibc 檢查與 `scripts/check_torch_ddp.py` 的 1／2／8 卡驗證方式見 [README 的 Nano4 段落](README.md#nano4-linux單節點多卡)；環境紀錄放 `outputs/rank_env_nano4/`。2026-10-12 已依確認的 V1 計畫撰寫 DDP 模型訓練入口；使用者要求先寫程式不驗證，因此單／多卡 loss 與梯度、SyncBN、尾批及續跑皆尚未驗收，環境通過不代表訓練程式通過。
+**依賴安裝基準（2026-10-11）：** 本機 Windows 與 Nano4 Linux x86_64 共用 `requirements.txt` 的直接依賴 pins，使用標準 CPython 3.11–3.13、`torch==2.6.0+cu124` 與官方 CUDA 12.4 額外索引。Linux CUDA wheel 的 NCCL 依賴由 pip 安裝；系統 module 不必恰好是 CUDA 12.4，但 driver 必須相容。Nano4 的 Conda **`go`** 環境已建置（2026-10-11 使用者確認）；上述依賴 pins 是否已完整安裝、實際套件版本與多卡測試結果仍待驗證。安裝、driver／glibc 檢查與 `scripts/environment/check_torch_ddp.py` 的 1／2／8 卡驗證方式見 [README 的 Nano4 段落](README.md#nano4-linux單節點多卡)；環境紀錄放 `outputs/rank_env_nano4/`。2026-10-12 已依確認的 V1 計畫撰寫 DDP 模型訓練入口；使用者要求先寫程式不驗證，因此單／多卡 loss 與梯度、SyncBN、尾批及續跑皆尚未驗收，環境通過不代表訓練程式通過。
 
 **棋力 V1 已確認例外與程式狀態（2026-10-12）：** 第一版依 [STRENGTH_V1_PLAN.md](STRENGTH_V1_PLAN.md) 與 [STRENGTH_V1_IMPLEMENTATION.md](STRENGTH_V1_IMPLEMENTATION.md) 使用固定黑／白 18 層歷史輸入、256-channel／20-block scalar ResNet、全域級別平均排序 loss、每級按棋局 80,000／20,000 切分與 training-only 切點校準；本檔以下我方／對方、softmax 與 player-disjoint 設定保留為其他路線規範，不取代本版已確認設定。V1 模型、DataLoader、索引、loss、DDP／checkpoint 及評估程式已撰寫；本次未執行驗證、全量資料處理或訓練，未產生權重、索引或分數。操作與路徑見 [README.md](README.md#棋力-v1資料準備訓練與評估)，後續驗收仍依兩份 V1 計畫執行。
 
@@ -167,7 +167,7 @@ H200 佇列限制**每張 GPU 最多 12 CPU 核心、200GB 主記憶體**；200G
 ### 稽核已確認的事實（2026-09-24，見 `RESULTS.md` A-001）
 
 - **v1.0 訓練集 SGF 僅有 `SZ[19]` 與落子（歷史結果）。** v1.1 新增 `HD[n]`，其餘內容相同；仍無 `HA`、`KM`、`AB/AW`。2026-11-06 稽核：訓練 HD=0／1／≥2 分別 792,610／170,969／36,421 盤；棋力 Public／Private 各 5,000 盤皆有 HD，且全部為 0／1。讓子表以 `(rank, game_id)` join，不能只用 game_id。分析、重跑方式與待確認實驗見 [HANDICAP_V11.md](HANDICAP_V11.md)。
-- **HD 語意（官方 Q&A Q13，2026-10-22 版；該題標「待確認」，2026-11-07 以訓練資料驗證，`scripts/audit_handicap_semantics.py`）：** 全部為日本規則。HD0＝互先、貼 6.5 目；HD1＝讓先、不貼目、和棋白勝（≈ KataGo 貼目 0.5），SGF 黑白標記與實際一致；**HD2–9＝讓子棋，讓子石不在 SGF、須依 Q13 星位自行補黑子，且 SGF 著手 B／W 標記與實際相反**（第一手標 B 的其實是白棋）。驗證：36,421 盤 HD≥2 的前 10 手**零盤**落在對應星位，第一手為白棋掛角（HD2 最常見 `pp`／`qp`／`pq`）。**`color` 欄位是實際顏色，不需對調**（Q13 此點未定案；資料推論：HD≥2 中 6D 的 color＝B 僅 27.5%，D 為 63.7%，符合強者執白讓子）。
+- **HD 語意（官方 Q&A Q13，2026-10-22 版；該題標「待確認」，2026-11-07 以訓練資料驗證，`scripts/data/audit_handicap_semantics.py`）：** 全部為日本規則。HD0＝互先、貼 6.5 目；HD1＝讓先、不貼目、和棋白勝（≈ KataGo 貼目 0.5），SGF 黑白標記與實際一致；**HD2–9＝讓子棋，讓子石不在 SGF、須依 Q13 星位自行補黑子，且 SGF 著手 B／W 標記與實際相反**（第一手標 B 的其實是白棋）。驗證：36,421 盤 HD≥2 的前 10 手**零盤**落在對應星位，第一手為白棋掛角（HD2 最常見 `pp`／`qp`／`pq`）。**`color` 欄位是實際顏色，不需對調**（Q13 此點未定案；資料推論：HD≥2 中 6D 的 color＝B 僅 27.5%，D 為 63.7%，符合強者執白讓子）。
 - **⚠️ 既有管線在 HD≥2 棋局取錯玩家（2026-11-07 發現）：** 本人落子以「SGF 標記顏色＝`color` 欄位」選取（`board_cache.py`），HD≥2 的標記相反、欄位卻是實際顏色 → **36,421 盤（3.6%）的本人／對手落子整組互換，且盤面缺讓子石**。V2、HumanSL、C、B2、SE 系列的訓練／擬合與 Valid-U 本地驗證都含這些盤。**棋力 Public／Private 測試題沒有 HD≥2，推論本身不受影響**；競賽一以 SGF 偶數手當黑方開局，若候選庫／查詢題含 HD≥2 也會取到白方（11/11 資料到手後先統計）。修正與相關實驗須依 §9 先確認。
 - **唯一鍵是 `(rank, game_id)`**，不是 `game_id`——1M 列只有 100,000 個 distinct `game_id`。只用 `game_id` join/去重會 10:1 靜默塌縮
 - **100 萬盤來自 8,007 位玩家，每人只屬於一個 rank**（跨 rank 玩家數為 0）→ 棋力標籤是玩家級屬性，評估跨玩家泛化時的獨立單位是玩家，不能把 100 萬盤當成獨立樣本；須留意模型記住玩家習慣而非學會棋力的風險
@@ -298,7 +298,7 @@ H200 佇列限制**每張 GPU 最多 12 CPU 核心、200GB 主記憶體**；200G
 - 上傳前 `RESULTS.md` 先有一行：tag / 驗證分數（分 k 桶）/ 預期 LB / 假設。上傳後補實際 LB 與 Δ
 - **一次探針只改一個變數**，否則結果無法歸因
 - 新元件的高驗證增益 → 先做**同尺寸受控探針**再 promote，不要直接塞進 best blend
-- 最終選擇：**信 LB 驗證過的數字，不信內部驗證**（上屆就是靠這條避開 AutoGluon 的災難）
+- 最終選擇（2026-11-09 使用者修訂；最終排名看 Private LB，泛化優先）：**以本地 player-disjoint 多 seed 證據（分 k）＋能推廣到未見玩家的機制為主；Public LB（400 題，標準誤約 0.02）只作方向確認**。Public 差距小於約 0.02、本地又沒有支持的改動，不升為基底或最終檔；每次上傳前先寫好 LB 升／降／持平時各保留哪個檔。上屆避開 AutoGluon 災難的教訓仍適用：本地驗證必須依玩家分組，外部 holdout 先問切法
 
 ---
 
@@ -373,7 +373,7 @@ project/
 │   └── tasks/
 │       ├── strength/          # 競賽二：shared/ 共用基礎、v1/ 專用模型與訓練評估
 │       └── identity/          # 競賽一：train_pid_vN、推論、提交檔
-├── scripts/                   # 一次性報告／命令列入口（audit_train、eda_report…），不放可重用邏輯
+├── scripts/                   # data／environment／identity／strength／release；索引見 scripts/README.md
 ├── tests/
 ├── configs/{strength,identity}/  # 每個 run 一個 yaml（報告要用）
 ├── outputs/<run-id>/          # 不進 git；新 run 一律放這：config、log、OOF、權重、分數（run-id 以 rank_/pid_ 開頭）
@@ -382,7 +382,7 @@ project/
 └── notebooks/                 # EDA 只讀，不放訓練邏輯
 ```
 
-執行方式：可重用模組用 `python -m go_aicup.<子套件>.<模組>`（例如 `python -m go_aicup.data.cv`），一次性報告用 `python scripts/<name>.py`。
+執行方式：可重用模組用 `python -m go_aicup.<子套件>.<模組>`（例如 `python -m go_aicup.data.cv`），一次性報告用 `python -m scripts.<分類>.<name>`；分類見 [scripts/README.md](scripts/README.md)。
 
 ---
 
@@ -399,7 +399,7 @@ project/
 3. **`cv.py`（Day 2）**：GroupKFold by player_id + 競賽一的合成候選庫產生器，附零重疊 assert
 4. **`feature_policy.py`（Day 2）**：把第 4 節的檢查清單寫成 code（禁用欄位名單 + fold-safe encoder）
 5. **後續工作**：依第 7 節與 EXECUTION_PLAN.md 的 T1–T6 執行；11/04 前僅本地驗證，不安排官方上傳。
-6. **主力現況（2026-10-26；競賽二 11/08 更新）**：競賽二首選為 **P1＋P2＋P3**（AH＋C 的 B2 只以 Valid-S HD≤1 擬合、加兩個讓先旗標、讓先局 H／C 以貼目 0.5 重算；`scripts/humansl_hd_filter.py`、`scripts/humansl_p3_komi.py`；Public LB 0.7197）。原首選為 A-024＋HumanSL＋C2 級別向量＋B2（AH＋C，A-055／A-056，LB 0.7103），對照 AH（A-024＋HumanSL＋B2），備援 V2 ResNet＋C2；競賽一為 D4 開局模型＋不靠開局的 GE2E 保險模型（λ＝8，A-053），**預設不做 L6 指派**（D-004：在確認一對一之前假設不是一對一；Hungarian 版只作 LB 探針，A-059）。一鍵提交流程 `scripts/run_release.sh`（A-054；10/26 加入 AH＋C 與 AH 對照檔，彩排通過，A-056）。
+6. **主力現況（2026-10-26；競賽二 11/08 更新）**：競賽二首選為 **P1＋P2＋P3**（AH＋C 的 B2 只以 Valid-S HD≤1 擬合、加兩個讓先旗標、讓先局 H／C 以貼目 0.5 重算；`scripts/strength/humansl_hd_filter.py`、`scripts/strength/humansl_p3_komi.py`；Public LB 0.7197）。原首選為 A-024＋HumanSL＋C2 級別向量＋B2（AH＋C，A-055／A-056，LB 0.7103），對照 AH（A-024＋HumanSL＋B2），備援 V2 ResNet＋C2；競賽一為 D4 開局模型＋不靠開局的 GE2E 保險模型（λ＝8，A-053），**預設不做 L6 指派**（D-004：在確認一對一之前假設不是一對一；Hungarian 版只作 LB 探針，A-059）。一鍵提交流程 `scripts/release/run_release.sh`（A-054；10/26 加入 AH＋C 與 AH 對照檔，彩排通過，A-056）。
 
 
 ### 2026-11-01：reproduce_paper 第三步逐有效盤面 v script

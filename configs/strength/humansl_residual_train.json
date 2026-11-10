@@ -45,13 +45,13 @@
     "allow_tf32": false
   },
   "stage1": {
-    "updates": null,
-    "lr": null,
+    "updates": 20000,
+    "lr": 0.001,
     "lr_schedule": []
   },
   "stage2": {
-    "updates": null,
-    "lr": null,
+    "updates": 20000,
+    "lr": 0.0003,
     "lr_schedule": []
   },
   "monitoring": {
@@ -75,8 +75,8 @@
     "num_shards": 8
   },
   "baseline": {
-    "updates": null,
+    "updates": 20000,
     "batch_positions": 128,
-    "lr": null
+    "lr": 0.01
   }
 }

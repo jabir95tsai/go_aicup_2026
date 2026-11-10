@@ -93,7 +93,7 @@ def load_params(orient: str) -> dict:
 
 
 def opening_scores(prefix, gallery_games, query_games, population, params) -> np.ndarray:
-    """The eval script's pp+slot scorer (scripts/identity_opening_eval.py)."""
+    """The eval script's pp+slot scorer (scripts/identity/identity_opening_eval.py)."""
     hashes = opening.prefix_hashes(prefix)
     plies = black_plies(params["moves"])
     pop = opening.population_prior(prefix, population, plies)

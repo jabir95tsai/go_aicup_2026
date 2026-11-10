@@ -258,7 +258,7 @@ run：`outputs/rank/reproduce_paper_2/se_seed2026_adamw70k/`。使用原 SE 的 
 
 ### 2026-11-03：SE／SE2 論文式同級抽盤評估（CPU）
 
-使用者要求檢查「論文同級抽盤、競賽同玩家組題」是否造成差距。新增 `scripts/se_paper_eval.py`，只重用三個模型既有逐盤分數；N=1..100，每級每 N 有放回抽樣 500 次，各級等權、位置等權聚合、nearest-centroid，seed=2026。模型間共用抽樣。另從 validation 每級固定抽 100 candidate／900 query，棋局互斥、玩家可重疊；candidate 另建 centroid。沒有 GPU 訓練或新推論。
+使用者要求檢查「論文同級抽盤、競賽同玩家組題」是否造成差距。新增 `scripts/strength/se_paper_eval.py`，只重用三個模型既有逐盤分數；N=1..100，每級每 N 有放回抽樣 500 次，各級等權、位置等權聚合、nearest-centroid，seed=2026。模型間共用抽樣。另從 validation 每級固定抽 100 candidate／900 query，棋局互斥、玩家可重疊；candidate 另建 centroid。沒有 GPU 訓練或新推論。
 
 下表為**完全正確率**，四欄依 N=5／10／15／20；不可與官方分數混用。
 
@@ -278,7 +278,7 @@ candidate100/query900 的官方分數 N=5／10／15／20：原 SE＝0.5784／0.6
 
 ## 6. 已可產出的提交候選
 
-一鍵入口：`scripts/run_release.sh <raw-dir> <out-dir>`。`<part>` 為 public／private；檔案寫在指定輸出目錄。以下為管線輸出約定，正式提交格式仍待 11/04 確認；由使用者手動上傳。
+一鍵入口：`scripts/release/run_release.sh <raw-dir> <out-dir>`。`<part>` 為 public／private；檔案寫在指定輸出目錄。以下為管線輸出約定，正式提交格式仍待 11/04 確認；由使用者手動上傳。
 
 | 任務／候選 | 模型位置 | 預測檔 | 本地參考／預期 LB |
 |---|---|---|---|
@@ -382,7 +382,7 @@ candidate100/query900 的官方分數 N=5／10／15／20：原 SE＝0.5784／0.6
 
 交付入口：`sbatch slurm/rank_ahc_predict.slurm`（單節點八卡、96 CPU、800GB RAM、時限 90 分鐘；此檔依既有 Git 規則忽略）。沿用上述模型與特徵程式，八個分片使用各自 GPU；引擎 analysis threads 改 64，BLAS／OMP／編譯各限制一個執行緒，以避開同節點 2,048-thread 上限，尚未重跑 GPU 驗收。預設 work 為 `outputs/rank_test_ahc_<jobid>/`，最終檔為 `submissions/rank/submission_rank_ah_c_b2_<jobid>.csv`（11/08 起改為 `ahc_<jobid>_rank.csv`）。可於提交前設定 `WORK_DIR=outputs/rank_release_20261106` 重用本次已完成的前處理／V2，H／C 仍會重算。
 
-新增 `scripts/export_rank_submission.py` 只負責最終合併，要求全部題目都有完整 AH＋C 特徵、無 fallback、機率有限且歸一、段位合法、ID／順序／欄位與 sample 一致，通過後才原子發布 CSV。小型 CPU 匯出邊界測試 **6 項通過（0.50s）**，包含 sample 排序、重複／缺題 ID、非法段位、缺盤、fallback 與非有限機率；`bash -n` 與 `git diff --check` 通過。沒有上傳；完整八卡流程尚未完成驗收，上述分數僅為既有 Valid-U 本地成績，並非正式測試得分。
+新增 `scripts/strength/export_rank_submission.py` 只負責最終合併，要求全部題目都有完整 AH＋C 特徵、無 fallback、機率有限且歸一、段位合法、ID／順序／欄位與 sample 一致，通過後才原子發布 CSV。小型 CPU 匯出邊界測試 **6 項通過（0.50s）**，包含 sample 排序、重複／缺題 ID、非法段位、缺盤、fallback 與非有限機率；`bash -n` 與 `git diff --check` 通過。沒有上傳；完整八卡流程尚未完成驗收，上述分數僅為既有 Valid-U 本地成績，並非正式測試得分。
 
 ## 2026-11-06：SE3＋H＋C＋B2 兩層分類頭實作與 CPU 驗收
 
@@ -417,7 +417,7 @@ final 在 U_newgames 的候選 gate 未通過，對照 AH＋C 的 k=5／10／15�
 
 ## 2026-11-07：官方 Q&A 讓子語意驗證；HD≥2 本人／對手互換；競賽一測試集重發
 
-**讓子語意（官方 Q&A Q13，標「待確認」）以訓練資料驗證**，`scripts/audit_handicap_semantics.py`，CPU 69 秒，結果 `outputs/rank_handicap_audit_v11/semantics.json`：
+**讓子語意（官方 Q&A Q13，標「待確認」）以訓練資料驗證**，`scripts/data/audit_handicap_semantics.py`，CPU 69 秒，結果 `outputs/rank_handicap_audit_v11/semantics.json`：
 
 - HD2–9 共 36,421 盤，前 10 手落在 Q13 星位的盤數**全部為 0**；第一手是白棋掛角（HD2：`pp` 5,108、`qp`、`pq`）→ SGF B／W 標記與實際相反、讓子石在 Q13 星位，兩者成立。
 - HD≥2 中 color＝B 比例，D…6D＝.637／.592／.634／.661／.638／.671／.745／.643／.774／**.275**（互先 .47–.54）→ `color` 欄位是實際顏色、不需對調（推論，Q13 此點未定稿）。
@@ -427,7 +427,7 @@ final 在 U_newgames 的候選 gate 未通過，對照 AH＋C 的 k=5／10／15�
 
 ## 2026-11-07：P1 B2 擬合排除 HD≥2（AH＋C）—— gate 未通過，列 LB 探針候選
 
-`scripts/humansl_hd_filter.py`，Slurm **721980**（dev，15 分 33 秒，純 CPU），結果 `outputs/rank/humansl/hd_filter/result.json`。只改擬合棋局：all＝Valid-S 全部 65,223 盤／5,000 人（同正式模型）；hd01＝排除 HD≥2 後 62,867 盤／4,885 人。特徵、B2、C=1、score_rank 不變。特徵組裝檢查：正式 `humansl_rankvec_model/model.pkl` 經本腳本特徵在 E1 重現 **0.6934**（各桶完全一致）。
+`scripts/strength/humansl_hd_filter.py`，Slurm **721980**（dev，15 分 33 秒，純 CPU），結果 `outputs/rank/humansl/hd_filter/result.json`。只改擬合棋局：all＝Valid-S 全部 65,223 盤／5,000 人（同正式模型）；hd01＝排除 HD≥2 後 62,867 盤／4,885 人。特徵、B2、C=1、score_rank 不變。特徵組裝檢查：正式 `humansl_rankvec_model/model.pkl` 經本腳本特徵在 E1 重現 **0.6934**（各桶完全一致）。
 
 評估（Valid-U，從不擬合）：E1＝原 1,000 題；E1_hd01＝E1 中不含 HD≥2 的 840 題（偏向沒有讓子棋的玩家，只作診斷）；**E2＝新出的 HD≤1 題組（gate 用）**，每 k 500 題、每級 50 題，同玩家同色、seed 2027，存於 `questions_e2_hd01.parquet`，之後比較可重用。
 
@@ -446,7 +446,7 @@ B2 合成題抽樣 5 個 seed 的 E2 差值（hd01−all）：Equal-k **+0.0075�
 
 ## 2026-11-07：P2 每題讓先比例特徵 —— gate 差 0.0004 未通過；P1 探針提交檔
 
-Slurm **722045**（dev，19 分 28 秒，純 CPU）。`scripts/humansl_hd_filter.py` 改為子命令 `p1`／`p2`／`fit_hd01`；檢查：P2 對照組 seed 2027 重現 P1 對照組（E2 0.7150、E1 0.6888），`fit_hd01` 重現 P1 hd01 臂（E2 0.7225），重構沒有改變結果。
+Slurm **722045**（dev，19 分 28 秒，純 CPU）。`scripts/strength/humansl_hd_filter.py` 改為子命令 `p1`／`p2`／`fit_hd01`；檢查：P2 對照組 seed 2027 重現 P1 對照組（E2 0.7150、E1 0.6888），`fit_hd01` 重現 P1 hd01 臂（E2 0.7225），重構沒有改變結果。
 
 **P2**（結果 `outputs/rank/humansl/hd_filter/result_p2.json`）：擬合棋局同正式模型（Valid-S 全部 65,223 盤），AH＋C 再加兩欄「讓先且本人執黑」「讓先且本人執白」，題內平均＝該執色下的讓先比例。讓先比例：Valid-S 執黑 8.1%／執白 8.4%，Valid-U 9.1%／10.8%。
 
@@ -460,7 +460,7 @@ Slurm **722045**（dev，19 分 28 秒，純 CPU）。`scripts/humansl_hd_filter
 
 五個 B2 抽樣 seed 的 E2 Equal-k 差：+0.0046／+0.0042／+0.0085／+0.0079／+0.0044（平均 +0.0059）；k=5 每個 seed 都為正（+0.004～+0.013），k=15 也都為正（+0.010～+0.017）。**gate 未通過**：seed 2027 的 Equal-k +0.0046 比門檻少 0.0004（各 k 都不退步），區間跨零。與 P1 互補：P1 傷 k=5、幫 k=15／20，P2 幫 k=5。
 
-**P1 探針提交檔**：`submissions/rank/ahc-hd01_722045_rank.csv`（SHA-256 `51f958de…cdc9fd`），模型 `outputs/rank/humansl/hd_filter/model_hd01.pkl`＝P1 hd01 臂（Valid-S HD≤1 共 62,867 盤，seed 2027），沿用 713770 的測試特徵，800 列、官方順序、無 fallback。與首選 `ahc_713770_rank.csv` 比較：Public 47／400 題不同、Private 54／400；幾乎都差一級。`scripts/export_rank_submission.py` 新增 `--predictions`（預設不變），匯出測試 6 項＋release 測試 4 項通過。
+**P1 探針提交檔**：`submissions/rank/ahc-hd01_722045_rank.csv`（SHA-256 `51f958de…cdc9fd`），模型 `outputs/rank/humansl/hd_filter/model_hd01.pkl`＝P1 hd01 臂（Valid-S HD≤1 共 62,867 盤，seed 2027），沿用 713770 的測試特徵，800 列、官方順序、無 fallback。與首選 `ahc_713770_rank.csv` 比較：Public 47／400 題不同、Private 54／400；幾乎都差一級。`scripts/strength/export_rank_submission.py` 新增 `--predictions`（預設不變），匯出測試 6 項＋release 測試 4 項通過。
 
 | tag／狀態 | k=5 本地參考（E2） | k=10 | k=15 | k=20 | Equal-k | 預期 LB／假設 |
 |---|---:|---:|---:|---:|---:|---|
@@ -468,7 +468,7 @@ Slurm **722045**（dev，19 分 28 秒，純 CPU）。`scripts/humansl_hd_filter
 
 ## 2026-11-07：P1＋P2 合併（排除 HD≥2 擬合＋讓先比例特徵）—— gate 通過
 
-`scripts/humansl_hd_filter.py p12`，Slurm **722175**（dev，16 分 11 秒，純 CPU），結果 `outputs/rank/humansl/hd_filter/result_p12.json`。對照＝正式設定（Valid-S 全部 65,223 盤、AH＋C）；處理＝Valid-S HD≤1 的 62,867 盤＋兩欄讓先旗標（本人執黑／執白）。題組、gate、seed 與 P1／P2 相同；對照組數字與 P1／P2 對照組完全一致。
+`scripts/strength/humansl_hd_filter.py p12`，Slurm **722175**（dev，16 分 11 秒，純 CPU），結果 `outputs/rank/humansl/hd_filter/result_p12.json`。對照＝正式設定（Valid-S 全部 65,223 盤、AH＋C）；處理＝Valid-S HD≤1 的 62,867 盤＋兩欄讓先旗標（本人執黑／執白）。題組、gate、seed 與 P1／P2 相同；對照組數字與 P1／P2 對照組完全一致。
 
 | 題組（seed 2027） | 臂 | k=5 | k=10 | k=15 | k=20 | Equal-k | 差 95%（玩家 bootstrap） |
 |---|---|---:|---:|---:|---:|---:|---|
@@ -485,7 +485,7 @@ Slurm **722045**（dev，19 分 28 秒，純 CPU）。`scripts/humansl_hd_filter
 
 ## 2026-11-07：P1＋P2 提交檔
 
-Slurm **722279**（dev，1 分 45 秒，純 CPU）。`scripts/humansl_hd_filter.py fit_p12` 擬合最終模型 `outputs/rank/humansl/hd_filter/model_p12.pkl`（Valid-S HD≤1 共 62,867 盤、seed 2027，欄位＝正式 AH＋C 60 欄＋`hd1_black`／`hd1_white`），在 E2 重現 0.7360。`humansl_predict aggregate` 新增 `--raw-csv`：模型欄位以兩欄 HD1 結尾時，從官方題目 CSV 讀每盤 HD[n]（store 只存屬性名稱），檢查執色一致、遇 HD≥2 直接報錯；其他模型行為不變。回歸檢查：正式 AH＋C 模型經修改後的 aggregate 在 Public／Private 真實測試資料上的輸出，與原 `rankvec_predictions.parquet` **逐列完全相同**。新增 `tests/test_hd1_features.py` 3 項，連同匯出 6 項、release 4 項共 13 項通過。
+Slurm **722279**（dev，1 分 45 秒，純 CPU）。`scripts/strength/humansl_hd_filter.py fit_p12` 擬合最終模型 `outputs/rank/humansl/hd_filter/model_p12.pkl`（Valid-S HD≤1 共 62,867 盤、seed 2027，欄位＝正式 AH＋C 60 欄＋`hd1_black`／`hd1_white`），在 E2 重現 0.7360。`humansl_predict aggregate` 新增 `--raw-csv`：模型欄位以兩欄 HD1 結尾時，從官方題目 CSV 讀每盤 HD[n]（store 只存屬性名稱），檢查執色一致、遇 HD≥2 直接報錯；其他模型行為不變。回歸檢查：正式 AH＋C 模型經修改後的 aggregate 在 Public／Private 真實測試資料上的輸出，與原 `rankvec_predictions.parquet` **逐列完全相同**。新增 `tests/test_hd1_features.py` 3 項，連同匯出 6 項、release 4 項共 13 項通過。
 
 輸出 `submissions/rank/ahc-p12_722279_rank.csv`（SHA-256 `ba4531c0…bd5f23`），800 列、官方順序、無 fallback。與首選 `ahc_713770_rank.csv` 比：Public 59／400 題不同（−3：1、−2：1、−1：29、+1：28），Private 58／400，預測級別分布相近。
 
@@ -536,7 +536,7 @@ P1 單獨探針（hd01，對首選 47 題不同）預期增益更小、雜訊相
 
 ### 2026-11-08：級別先驗探針（Slurm 724435，CPU）
 
-**假設：** B2 合成題按玩家等機率抽，隱含先驗＝Valid-S 玩家級別比例（不均勻）；若測試每級等量，往均勻先驗校正應有增益。三種解碼都只改 P1＋P2 的最後一步（`scripts/rank_prior_probes.py`）：`uprior` 把先驗換成均勻；`em` 以 Saerens EM 由預測估計題組先驗；`balanced` 強制每級題數相等（期望分數指派）。
+**假設：** B2 合成題按玩家等機率抽，隱含先驗＝Valid-S 玩家級別比例（不均勻）；若測試每級等量，往均勻先驗校正應有增益。三種解碼都只改 P1＋P2 的最後一步（`scripts/strength/rank_prior_probes.py`）：`uprior` 把先驗換成均勻；`em` 以 Saerens EM 由預測估計題組先驗；`balanced` 強制每級題數相等（期望分數指派）。
 
 | 本地（P1＋P2 模型） | k=5 | k=10 | k=15 | k=20 | Equal-k | 差值（bootstrap 95%） | 改變題數 |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -566,14 +566,14 @@ P1 單獨探針（hd01，對首選 47 題不同）預期增益更小、雜訊相
 
 **判讀：測試集級別不是每級等量，往均勻先驗校正有害。** balanced 在 59 題上淨失約 16.6 分（強迫配額把 D 題改成 6D 等），uprior 的 21 題主要是 A／2D→1D（11 題），淨失約 3.5 分，表示測試中 1D 比均勻少；方向與「按玩家抽題、級別比例接近玩家數比例」一致（1D 玩家最少），而 B2 原本隱含的就是玩家比例先驗。結論：維持 P1＋P2 原解碼，不做任何級別平衡或均勻化；em 檔不上傳。本地 E2（構造為等量）對這類假設無判別力，以 LB 為準。
 
-**玩家重疊檢查（`scripts/rank_player_overlap.py`，開局指紋 TF-IDF，CPU，`outputs/rank/player_overlap/report.json`）：結論不確定，指紋太弱。**
+**玩家重疊檢查（`scripts/strength/rank_player_overlap.py`，開局指紋 TF-IDF，CPU，`outputs/rank/player_overlap/report.json`）：結論不確定，指紋太弱。**
 - 題目間同一玩家（Check 1）：門檻設在模擬「全不同人」每份約 1 對誤報（0.4297）。模擬中刻意放入的 100 對同人只抓到 4–12 對（召回約 8%）。測試 Public 9 對、Private 7 對超過門檻，高於虛無的約 1 對；但測試整體相似度分布（中位數、p90）也普遍高於模擬，可能只是測試棋局的開局族群與訓練不同，不能據此推論有同一玩家。即使真有，8% 召回能合併的題目極少，增益估計 < 0.005。
 - 測試玩家在訓練集（Check 2）：同樣指紋在 16k 個玩家×顏色中找到正確玩家的比率只有 30%（k=5 22%、k=20 41%），「在／不在」兩情境的 top-1 相似度幾乎重疊（超過門檻 3.5% vs 1%）。測試 top-1 中位數（0.387／0.393）高於兩種模擬情境，同樣顯示族群偏移，比例估計（Public 60%、Private 30%）不可信。配合 SE3 LB 落回 unseen 水準的證據，L10 成立的可能性仍判斷為低。
 - 若要再查，需要更強的指紋（競賽一 GE2E 只支援黑方，約 1 GPU-h）並設計不受族群偏移影響的檢定；預期回報低，未排程。
 
 ### 2026-11-08：B2 延伸 A（勝負近似）／B（題內離散度、MLP）——全部未過 gate（Slurm 724619，CPU 47 分）
 
-`scripts/rank_b2_extensions.py`；P1＋P2 設定（Valid-S HD≤1＋HD1 旗標），所有組共用 B2 同一批合成題抽樣，對照組重現 E2 0.7360。A 特徵由 `features/game_stats.py` 重播：最後一手是否本人（中盤認輸時多為勝方）、手數、終局子數佔比、提子統計，以及「最後一手是本人」×對手 HumanSL 特徵（贏過什麼程度的對手）。
+`scripts/strength/rank_b2_extensions.py`；P1＋P2 設定（Valid-S HD≤1＋HD1 旗標），所有組共用 B2 同一批合成題抽樣，對照組重現 E2 0.7360。A 特徵由 `features/game_stats.py` 重播：最後一手是否本人（中盤認輸時多為勝方）、手數、終局子數佔比、提子統計，以及「最後一手是本人」×對手 HumanSL 特徵（贏過什麼程度的對手）。
 
 | E2，seed 2027 | k=5 | k=10 | k=15 | k=20 | Equal-k | 差值（bootstrap 95%） | 五 seed 平均差 |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -635,7 +635,7 @@ P1＋P2＋P3 設定，E2 Equal-k：首選 seed 2027 為 0.7372，五 seed 0.7372
 - `ahc-p3-noA-bag10_731431_rank.csv`（SHA `2bca912d…`，Slurm 731431，36 分）：noA 10 seed 平均；對 noA 改 22／16 題。
 - `ahc-p3-noA-allpbag10_731431_rank.csv`（SHA `72cc8ae2…`）：noA-allp 10 seed 平均；對 noA-allp 改 16／17 題。本地 bag10 無增益（−0.0016），屬低優先探針。
 
-**noA＋train20（2026-11-09，使用者同意，約 10 GPU-h）：** `scripts/rank_train20_hc.py`、`slurm/rank_train20_hc.slurm`（Slurm 733177，8 卡；後續 CPU 733179 先匯出 `ahc-p3-noA-t20`、`ahc-p3-noA-t20-allp` 再跑 E2／E1 五 seed）。A-047 的 train20（每位 train 切分玩家最多 20 盤）去掉 HD≥2 與學 C 向量用過的 15,000 盤：HD0 68,513 盤補 C（貼 6.5，H 已有），HD1 18,235 盤以貼 0.5 重算 H＋C。可組題（玩家、顏色）k=5／10／15／20 由 3,807／2,178／1,305／816 增為 9,948／6,542／3,502／2,112。增益未知。
+**noA＋train20（2026-11-09，使用者同意，約 10 GPU-h）：** `scripts/strength/rank_train20_hc.py`、`slurm/rank_train20_hc.slurm`（Slurm 733177，8 卡；後續 CPU 733179 先匯出 `ahc-p3-noA-t20`、`ahc-p3-noA-t20-allp` 再跑 E2／E1 五 seed）。A-047 的 train20（每位 train 切分玩家最多 20 盤）去掉 HD≥2 與學 C 向量用過的 15,000 盤：HD0 68,513 盤補 C（貼 6.5，H 已有），HD1 18,235 盤以貼 0.5 重算 H＋C。可組題（玩家、顏色）k=5／10／15／20 由 3,807／2,178／1,305／816 增為 9,948／6,542／3,502／2,112。增益未知。
 - GPU 733177：8 卡 81 分（約 10.8 GPU-h），86,748／86,748 盤特徵完整。擬合盤數 62,867 → 149,615；B2 可抽玩家（依 player_id，≥k 盤）k=5／10／15／20：2,685／1,847／1,359／1,036 → 5,604／5,177／4,500／3,146。
 - `ahc-p3-noA-t20-allp_733179_rank.csv`（SHA `bd14b596…`）：Valid-S＋train20＋Valid-U；對 noA-allp 改 40／49 題。**LB 11/09 16:57:42（jabir95tsai）Public 0.7404805（15/103），對 noA-allp +0.0018**（40 題不同，淨多約 0.7 分，雜訊範圍）；目前 Public 最高分。
 - `ahc-p3-noA-t20_733179_rank.csv`（SHA `695140f6…`）：Valid-S＋train20；對 noA-allp 改 66／59 題（對 noA 76／80）。
@@ -650,7 +650,7 @@ P1＋P2＋P3 設定，E2 Equal-k：首選 seed 2027 為 0.7372，五 seed 0.7372
 
   seed 2027 E2 分 k：−0.0089／−0.0125／−0.0248／−0.0093，bootstrap [−0.0288, +0.0006]；E1 分 k：+0.0028／−0.0080／−0.0061／+0.0166。未過 gate；E2（每級 50 題、級別均勻）偏負，與 1D 預測減少的先驗偏移方向一致；E1 不變。判讀：在擬合玩家已含 Valid-U 時，再加 train 切分玩家的淨效果接近 0（LB +0.0018、E1 +0.0009）；資料增益可能被先驗偏移抵消，兩者未分離（未知）。
 
-**先驗對齊（2026-11-09，使用者同意，`scripts/rank_more_players.py`，CPU）：** B2 合成題原本對「≥k 盤的玩家」均勻抽，隱含先驗＝各級可抽玩家占比，加 train20 後該占比改變（1D 預測 52→34、A 111→128）。`PriorMatched`：先依參考先驗抽級別，再在該級均勻抽玩家，其餘（20,000 題／k、LR C=1）不變。
+**先驗對齊（2026-11-09，使用者同意，`scripts/strength/rank_more_players.py`，CPU）：** B2 合成題原本對「≥k 盤的玩家」均勻抽，隱含先驗＝各級可抽玩家占比，加 train20 後該占比改變（1D 預測 52→34、A 111→128）。`PriorMatched`：先依參考先驗抽級別，再在該級均勻抽玩家，其餘（20,000 題／k、LR C=1）不變。
 - **本地（Slurm 736587，4 分）：** Valid-S 擬合 vs Valid-S＋train20 擬合＋Valid-S 先驗，Valid-U 評分。
 
 | 差值（t20＋先驗 − noA） | seed 2027 | 2028 | 2029 | 2030 | 2031 | 平均 |
@@ -659,8 +659,26 @@ P1＋P2＋P3 設定，E2 Equal-k：首選 seed 2027 為 0.7372，五 seed 0.7372
 | E1 Equal-k | +0.0158 | +0.0241 | +0.0114 | +0.0163 | +0.0164 | **+0.0168** |
 
   seed 2027 分 k：E1 0.6158／0.7129／0.7487／0.7204 → 0.6198／0.7280／0.7672／0.7461（Equal-k 0.6994 → 0.7153，bootstrap [+0.0016, +0.0305]）；E2 0.6843／0.7456／0.7713／0.7753 → 0.6912／0.7433／0.7773／0.7722（0.7441 → 0.7460，[−0.0110, +0.0148]）。兩組五 seed 全正。對照未對齊的 t20（E2 −0.0102、E1 +0.0009）：**先驗對齊把 train20 的資料增益釋放出來**，支持「增益被先驗偏移抵消」的假設。E1 過 gate（bootstrap 下界 > 0）。
-- `ahc-p3-noA-t20-allp-prior_736589_rank.csv`（SHA `d98def9c…`，Slurm 736589，3 分）：Valid-S＋train20＋Valid-U，先驗＝Valid-S＋U（HD≤1）的玩家占比；同作業重算最佳檔逐題相同（0／0 題）。對最佳檔 `ahc-p3-noA-t20-allp_733179` 改 Public 27／Private 33 題，全為差一級（A→1D 12、2D→1D 4、B→A 4…）。預測分布 88／87／105／112／49／72／65／84／73／65（最佳檔 86／92／98／128／34／70／66／87／72／67）。
+- `ahc-p3-noA-t20-allp-prior_736589_rank.csv`（SHA `d98def9c…`，Slurm 736589，3 分）：Valid-S＋train20＋Valid-U，先驗＝Valid-S＋U（HD≤1）的玩家占比；同作業重算最佳檔逐題相同（0／0 題）。對最佳檔 `ahc-p3-noA-t20-allp_733179` 改 Public 27／Private 33 題，全為差一級（A→1D 12、2D→1D 4、B→A 4…）。**LB 11/09 21:50:35（jabir95tsai）Public 0.7508820（12/106），對 noA-t20-allp +0.0104**（27 題全差一級，淨多約 4.2 分）；本地 E1 +0.0168／E2 +0.0033 同方向，依泛化原則升為**新基底**。目前 Public 最高分。預測分布 88／87／105／112／49／72／65／84／73／65（最佳檔 86／92／98／128／34／70／66／87／72／67）。
 - **fold −1 排除玩家（794 人，每人最多 40 盤 HD≤1，共 24,747 盤）的 H＋C：** 第一次 Slurm 736586 落在 25a-hgpn083，8 卡皆只有約 300 positions/s（train20 在 hgpn119 為 3,515），2 小時逾時、無產出（抽取程式不能續跑，浪費 16 GPU-h；節點慢的原因未知）。重送 737126（排除 hgpn083、上限 2.5 小時；開跑 30 秒約 2,400 positions/s，正常），匯出 737127 接續。
+  - 737126 共 64 分（約 8.5 GPU-h），24,747／24,747 盤特徵完整；匯出 737127（5 分）重現最佳檔 0／0 題，`-prior` 與 736589 逐位元相同。
+  - `ahc-p3-noA-t20-allp-ex_737127_rank.csv`（SHA `854468a7…`）：一般 B2（無先驗對齊）＋794 人；對最佳檔改 27／25 題，對 `-prior` 改 38／30 題。預測分布 86／89／97／135／32／72／65／88／68／68：1D 再減、A 再增，與未對齊 t20 的先驗偏移同方向（該偏移在本地 E2 −0.0102）。**無本地分數，暫不升為基底。**
+  - 補做（2026-11-09 21:50，使用者同意）：`rank_more_players.py local-ex`（Slurm 737644）以 Valid-U E1／E2 五 seed 比較「＋794 人」的增益，先驗對齊與一般 B2 各一組；`export` 新增 `-prior-ex` 臂（Slurm 737645）。
+  - `737645-priorex.csv`（原名 `ahc-p3-noA-t20-allp-prior-ex_737645_rank.csv`，22:30 改名；SHA `dc847f3d…`）：先驗對齊＋794 人；對新基底 `-prior`（0.7509）改 Public 24／Private 13 題，全為差一級（1D→2D 6、B→A 5、C→B 5…）。同作業重算 `-prior` 逐位元相同。
+  - **local-ex 五 seed（Slurm 737644，CPU 31 分，`local_ex.json`；＋794 人 − Valid-S＋train20，Valid-U 評分）：**
+
+| 差值 | 2027 | 2028 | 2029 | 2030 | 2031 | 平均 | 分 k 平均（5／10／15／20） |
+|---|---:|---:|---:|---:|---:|---:|---|
+| 先驗對齊 E1 | +0.0013 | −0.0022 | +0.0062 | −0.0058 | −0.0076 | **−0.0016** | +0.0009／−0.0029／+0.0052／−0.0097 |
+| 先驗對齊 E2 | −0.0048 | −0.0018 | +0.0001 | +0.0012 | +0.0017 | **−0.0007** | −0.0048／−0.0040／+0.0060／−0.0001 |
+| 一般 B2 E1 | −0.0044 | +0.0065 | +0.0034 | −0.0016 | +0.0000 | +0.0008 | +0.0011／+0.0108／+0.0009／−0.0097 |
+| 一般 B2 E2 | +0.0083 | +0.0007 | +0.0018 | +0.0023 | +0.0062 | +0.0039 | +0.0035／+0.0034／+0.0043／+0.0043 |
+
+  seed 2027 bootstrap：先驗 E1 [−0.0081, +0.0106]、E2 [−0.0127, +0.0028]；一般 E2 [−0.0008, +0.0172]。判讀：先驗對齊後再加 794 人沒有增益（兩組平均略負、未過 gate）。一般 B2 的 E2 五 seed 全正，但它的對照是未對齊、先驗已偏的 t20；794 人的級別組成（1D 42 人＝5.3%）可能把隱含先驗拉回一點，增益較可能來自先驗而非資料（未驗證）。推測 train20 之後擬合玩家數已不是瓶頸（未驗證）。**`737645-priorex.csv` 不升為基底，LB 探針優先度低。**
+  - **上傳判斷（22:17 上傳前登記）：** 本地沒有支持 → 不升為基底，只當資訊探針用掉今日最後一次額度。預期 LB 與 0.7509 差距在 ±0.02 內（雜訊）；不論升降，基底維持 `-prior`，除非之後本地證據轉正。
+  - **LB 11/09 22:18:13（jabir95tsai）Public 0.7508820（12/106）**，與 21:50 的 `-prior` 到第 7 位小數完全相同。使用者當時在 IDE 開的是 `ahc-p3-noA-t20-allp-prior_737645_rank.csv`（與 `-prior_736589` 逐位元相同），**使用者確認誤傳了重複檔**，`-prior-ex` 未上傳、仍無 LB 分數；此次額度浪費，不影響基底。
+  - **命名規則（2026-11-09 使用者要求，`go_aicup.tasks.strength.submission_files.write_rank_csv`）：** 平台會把長檔名截成 `ahc-p3-noA-t20-a...csv`，前綴相同的檔看起來一樣。新檔一律 `<job>-<tag>.csv`（tag ≤ 8 字元，全名 ≤ 19 字元，例 `737645-priorex.csv`），完整來源記在本檔；與既有檔內容相同時不再另寫。`rank_more_players.py` 已改用；其他舊匯出腳本下次使用時再改。
+  - **決策原則（同日使用者修訂 CLAUDE.md §6）：** 最終排名看 Private LB，以本地多 seed 證據＋機制為主，Public 差距 < 約 0.02 視為雜訊。`-prior` 上傳的事前規則：除非 Public 掉超過 0.02，否則保留為候選基底。
 
 
 ### 2026-11-09：HumanSL residual B2 三階段程式與 Slurm

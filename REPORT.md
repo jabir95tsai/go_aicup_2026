@@ -68,7 +68,7 @@
 
 ## 6. 訓練與推論步驟
 
-- 一鍵推論：`bash scripts/run_release.sh <官方 CSV 目錄> <輸出目錄>`（A-054），輸出 `submissions/` 與 `SUMMARY.md`。
+- 一鍵推論：`bash scripts/release/run_release.sh <官方 CSV 目錄> <輸出目錄>`（A-054），輸出 `submissions/` 與 `SUMMARY.md`。
 - 重新訓練：V2（`slurm/v2_train.slurm`、`configs/strength/rank_cnn_v2_seed2027.json`）；HumanSL 擬合特徵抽取（`slurm/humansl.slurm`）與 B2（`python -m go_aicup.tasks.strength.humansl_predict fit --method B2`）；GE2E（`configs/identity/pid_ge2e_v1_short.json`）。〔待補：完整重現指令與時間〕
 
 ## 7. 參數與權重

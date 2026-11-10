@@ -14,7 +14,7 @@
 
 ```bash
 curl -fL --retry 3 -o /tmp/aicup2026_go_training_v1.1.tar.xz https://github.com/AILAB-NDHU/aicup2026-go-dataset/releases/download/v1.1/aicup2026_go_training_v1.1.tar.xz
-PYTHONPATH=src python scripts/extract_training_handicap.py /tmp/aicup2026_go_training_v1.1.tar.xz
+PYTHONPATH=src python -m scripts.data.extract_training_handicap /tmp/aicup2026_go_training_v1.1.tar.xz
 ```
 
 腳本要求既有十份 training CSV，先驗官方 SHA-256，再解壓至暫存目錄，全量比對完成才逐檔原子替換。支援來源為 v1.0 或已更新的 v1.1；發布中斷可重跑，但十份 CSV 並非整組交易。成功更新後，舊版可由移除 root `HD[n]` 還原內容，不另存 1.3 GB 備份。官方 SHA-256：`e0880a3e8723f776e931ecce7fbc09eace9a0dd42b18a1d8ebac4a1628d2395e`。
@@ -83,7 +83,7 @@ SE3 現有預測分層如下。這是同一模型的事後診斷，兩組玩家�
 
 讓子石（Q13 標準星位，SGF 座標）：2＝pd dp；3＝＋dd；4＝＋pp；5＝4 子＋jj；6＝4 子＋dj pj；7＝6 子＋jj；8＝6 子＋jd jp；9＝8 子＋jj。範例：`HD[2];B[pp];W[dd]…` 應還原為 `HA[2]AB[pd][dp]PL[W];W[pp];B[dd]…`。
 
-**驗證**（`scripts/audit_handicap_semantics.py`，CPU 69 秒，結果 `outputs/rank_handicap_audit_v11/semantics.json`）：
+**驗證**（`scripts/data/audit_handicap_semantics.py`，CPU 69 秒，結果 `outputs/rank_handicap_audit_v11/semantics.json`）：
 
 1. **B/W 標記相反＋星位正確：** HD2–9 共 36,421 盤，前 10 手落在該讓子數星位上的盤數，各 HD **全部為 0**。HD2 第一手最常見為 `pp`（5,108）、`qp`、`pq`；HD4 為 `qf`、`nq`。都是白棋對讓子石的掛角。假如標記沒有相反、盤上也沒有讓子石，第一手應常下在 `pd`（互先黑第一手 54.9%）。
 2. **`color` 欄位是實際顏色、不需對調：** HD≥2 棋局中 color＝B 的比例，D／C／B／A／1D／2D／3D／4D／5D／6D＝.637／.592／.634／.661／.638／.671／.745／.643／.774／**.275**；互先約 .47–.54。最強的 6D 多數執白讓子，符合實際顏色。若欄位也被反轉，就變成 6D 有 72.5% 的盤在被讓子，不合理。這是推論，不是官方確認。

@@ -7,7 +7,7 @@ import pytest
 
 from go_aicup.paths import ROOT
 
-spec = importlib.util.spec_from_file_location('extract_hd', ROOT / 'scripts/extract_training_handicap.py')
+spec = importlib.util.spec_from_file_location('extract_hd', ROOT / 'scripts/data/extract_training_handicap.py')
 extract = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(extract)
 

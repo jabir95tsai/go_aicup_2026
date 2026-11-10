@@ -169,7 +169,7 @@ def test_resume_matches_uninterrupted_and_only_four_final_files(compact_data, tm
     import subprocess
     import sys
     plots = tmp_path / "plots"
-    subprocess.run([sys.executable, "scripts/plot_rank_v1.py", "--run-dir", str(first),
+    subprocess.run([sys.executable, "-m", "scripts.strength.plot_rank_v1", "--run-dir", str(first),
                     "--output-dir", str(plots)], check=True, capture_output=True, text=True)
     assert {path.name for path in plots.iterdir()} == {
         "loss_vs_step.png", "confusion_matrix.png", "score_distributions_cutpoints.png"}

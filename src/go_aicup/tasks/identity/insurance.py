@@ -8,7 +8,7 @@ pass cannot misplace a move), bf16 as in training. One GPU.
 
 Output <work>/<store>/ge2e.npz: store_row, vector (mean move embedding), moves.
 identity/predict.py --insurance-dir fuses them: opening + lambda * w * cosine
-(scripts/identity_ge2e_eval.py; lambda and w from the run's eval_summary.json
+(scripts/identity/identity_ge2e_eval.py; lambda and w from the run's eval_summary.json
 and model.pt).
 
     python -m go_aicup.tasks.identity.insurance --store-dir data/processed --name pool_public \\
