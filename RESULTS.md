@@ -690,3 +690,12 @@ P1＋P2＋P3 設定，E2 Equal-k：首選 seed 2027 為 0.7372，五 seed 0.7372
 短測設定 `configs/strength/humansl_residual_smoke100.json` 的兩階段各 100 updates、AdamW LR=0.001；C 對照 100 updates、LR=0.01，均只作工程起點，未實跑 GPU。正式 `humansl_residual_train.json` 的 updates／LR 留 null，需量測後明訂；smoke 不允許鎖定 U／release。C 對照為有界全盤位置均勻抽樣 Adam／cosine，保留原 likelihood 目標，不宣稱逐步重現舊 epoch packs 訓練。
 
 唯讀查核發現 `data/processed/cv/` 為空，預設的原 seed=2027 完整玩家 fold 表尚不存在；prepare 要求取回原表並明確驗證，不自行重抽。未建立本版官方資料／題庫、啟動真 teacher／GPU 短測、正式訓練／全量推論、提交 Slurm 或上傳；真實收斂、CUDA／SyncBN、顯存／吞吐與完整成本未知。輸出隔離於 `outputs/rank/humansl_residual_b2/<run_id>/`；三階段及輔助 Slurm 位於套件內 `slurm/`，操作、前置條件、全部命令與量測界線見 [README](src/go_aicup/tasks/strength/humansl_residual_b2/README.md) 及 PLAN §13。
+
+
+## 2026-11-10：HumanSL residual teacher 匯入 SE3 與八分片續跑
+
+已新增 `teacher_reuse.py`，透過 `outputs/value_resume_672603_recovery.json` 留存的八個原始 manifest，以及 SE3 的 `data_identity.json` 綁定舊 value／prepared checksum；確認 KataGo engine、model、analysis config 雜湊與日本規則、貼目 6.5、1 visit、完整歷史及指定玩家視角相符後，僅匯入 HD0 本人位置，其他位置補算。原八片 23,302 盤完成資料全部通過 checksum，未覆寫；共 407,329 盤 HD0 開發棋局可對齊，原可重用位置合計 39,151,903（含已完成棋局，非未完成部分的節省量）。全舊 value 值域／有限值通過，逐片各抽 100 盤實際 moves/colors 與 ply 對齊通過。稽核報告 `data/processed/humansl_residual_b2/teacher_v1/se3_resume_audit.json`。
+
+保留原 identity／分片 manifest，明列原 labeler SHA-256 作為相容續跑版本；已完成棋局略過，未完成棋局先匯入再補缺值，整盤才提交 checksum/done。共用初始化改用等待式檔案鎖、分片用獨占非等待鎖，程序退出自動釋放；Slurm exec Python 並在 USR1/TERM/INT 後完成當前棋局再停止。確認八個舊作業已取消且無 teacher 工作後，清理八個殘留 `.writer.lock`。
+
+來源／索引拒絕、HD1 排除、八片匯入／中斷重試、不覆寫已完成值、鎖競爭與既有資料／訓練／模型回歸共 25 項 CPU 測試通過（50.38 秒）；Slurm bash 語法通過。未啟動 GPU 補算或 Slurm，實際提速、剩餘時間與 k=5/10/15/20 棋力增益未知。兩份既有 config 已啟用匯入，續跑指令見套件 README。

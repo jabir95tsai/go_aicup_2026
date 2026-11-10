@@ -14,4 +14,4 @@
 source src/go_aicup/tasks/strength/humansl_residual_b2/slurm/environment.sh
 # Submit the eight shards explicitly with: sbatch --array=0-7 .../teacher.slurm
 SHARD="${SLURM_ARRAY_TASK_ID:-${SHARD:-0}}"
-"$PYTHON_BIN" -m "$MODULE.teacher" --config "$CONFIG" --phase "$PHASE" --shard "$SHARD" "$@"
+exec "$PYTHON_BIN" -m "$MODULE.teacher" --config "$CONFIG" --phase "$PHASE" --shard "$SHARD" "$@"

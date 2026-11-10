@@ -163,3 +163,20 @@ OMP_NUM_THREADS=1 python -m pytest -q tests/test_humansl_residual_*.py
 ```
 
 尚未執行真實 GPU／SyncBN、100 步資源短測、官方 teacher、完整訓練／推論或上傳；真實分 k 成績、吞吐、顯存與 GPU-hours 未知。`summary` 的磁碟空間取檔案系統數值，不取代 Nano4 每目錄配額；正式作業前須另查 100GB 配額剩餘量。成本需包含 dev/release 各五套兩階段模型、五份 C 對照、teacher、兩組候選全位置特徵、M 監控及 CPU B2。
+
+
+## SE3 匯入與八分片續跑（2026-11-10）
+
+兩份 config 的 `teacher.se3_reuse` 已指向既有 SE3 value、prepared 索引、訓練身分紀錄及 `outputs/value_resume_672603_recovery.json`。啟動先驗證 value／索引 checksum、原八分片 teacher 身分、KataGo 引擎／網路／設定、規則、貼目、visits 與完整歷史條件；缺證據或不一致時停止，不默默混用。HD0 且在舊 training 的棋局，逐盤核對 rank、game_id、player_color、length，逐位置驗證原 ply 為指定玩家落子前位置。HD1、舊 training 未涵蓋棋局和對手位置仍由 KataGo 補算。
+
+直接續跑八個分片：
+
+```bash
+sbatch --array=0-7 src/go_aicup/tasks/strength/humansl_residual_b2/slurm/teacher.slurm
+```
+
+已完成棋局驗證 checksum 後略過；未完成棋局重新匯入相容的 SE3 位置並補算缺值，整盤成功才提交 checksum／done。每片 `se3_import.json` 保存匯入來源 checksum，`metrics.json` 分開記錄 `imported_positions` 與新分析的 `new_positions`。匯入發生在續跑時，並非一次性將全部舊值預先寫入。
+
+新 `.teacher.lock` 使用作業系統檔案鎖：共用身分初始化等待鎖；同分片重複 writer 立即拒絕。程序結束會自動釋放鎖，檔案保留不代表仍被鎖定。舊 `.writer.lock` 仍會明確拒絕，必須先確認舊程序停止才清理。2026-11-10 已確認原八個作業取消、extern 完成且沒有 teacher 排程後，清除八片殘留的舊鎖。
+
+原 labeler 的特定 SHA-256 被列為相容版本，保留既有 identity 及全部分片 manifest，不重標或覆寫已完成棋局；其他資料／模型／設定／encoder 身分差異仍拒絕。SIGUSR1／TERM／INT 會請求在當前棋局完成後停止，狀態記為 `stopped`；Slurm 腳本以 exec 傳遞訊號。若取消作業同時終止 KataGo 子程序，或發生硬終止，當前未完成棋局重做。四小時作業上限維持原值，續跑後的節省時間仍待 GPU 實測。

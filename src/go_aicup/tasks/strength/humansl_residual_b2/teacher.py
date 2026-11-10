@@ -3,14 +3,53 @@ import argparse
 import json
 import hashlib
 import time
+import signal
+from contextlib import contextmanager
 from pathlib import Path
 import numpy as np
 import pandas as pd
 from go_aicup.artifacts import file_hash, object_hash, write_json
 from go_aicup.features.katago_engine import MODEL
 from go_aicup.tasks.strength.reproduce_paper.label_value import Engine, make_query, parse_root
-from go_aicup.tasks.strength.SE_H_C_B2.common import atomic_table, writer_lock
+from go_aicup.tasks.strength.SE_H_C_B2.common import atomic_table
 from .data import MoveStore, games, load_prepared
+
+
+# This labeler preserves the original pre-action targets and whole-game commit format.
+LEGACY_CODE = 'b0bb8f9457d3bb826fd23fa49343f663cd728cba6236b64a119d5b8594e322be'
+
+
+@contextmanager
+def teacher_lock(directory, *, wait=False):
+    import fcntl
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory / '.teacher.lock').open('a') as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+        if (directory / '.writer.lock').exists():
+            raise ValueError('legacy writer lock remains; confirm old job stopped before removing it')
+        yield
+
+
+@contextmanager
+def stop_signals():
+    stopped = [False]
+    def stop(*_):
+        stopped[0] = True
+    previous = {s: signal.signal(s, stop) for s in (signal.SIGUSR1, signal.SIGTERM, signal.SIGINT)}
+    try:
+        yield stopped
+    finally:
+        for s, handler in previous.items():
+            signal.signal(s, handler)
+
+
+def compatible_identity(saved, current):
+    # Only the explicitly supported original implementation may resume across this labeler upgrade.
+    expected = dict(current)
+    if saved.get('teacher_code_sha256') == LEGACY_CODE:
+        expected['teacher_code_sha256'] = LEGACY_CODE
+    return saved == expected
 
 
 def teacher_identity(config, table):
@@ -54,7 +93,7 @@ class TeacherLabels:
             raise ValueError('teacher prepared move sources changed')
         for field, path in [('teacher_code_sha256', Path(__file__)),
                             ('dataset_code_sha256', Path(__file__).with_name('dataset.py'))]:
-            if self.record.get(field) != file_hash(path):
+            if self.record.get(field) != file_hash(path) and not (field == 'teacher_code_sha256' and self.record.get(field) == LEGACY_CODE):
                 raise ValueError('teacher encoder/labeler code identity changed')
         for path, digest in self.record.get('source_files', {}).items():
             if file_hash(Path(path)) != digest:
@@ -102,16 +141,18 @@ def label(config, *, phase='dev', shard=0, limit_games=None):
     identity_table = games(config, 'dev') if release else table
     identity = teacher_identity(config, identity_table)
     root = Path(config['data']['teacher_dir']); root.mkdir(parents=True, exist_ok=True)
-    with writer_lock(root):
+    with teacher_lock(root, wait=True):
         if (root / 'identity.json').exists():
-            if json.loads((root / 'identity.json').read_text()) != identity:
+            saved = json.loads((root / 'identity.json').read_text())
+            if not compatible_identity(saved, identity):
                 raise ValueError('teacher source/settings changed; use a new teacher_dir')
+            identity = saved
         else:
             write_json(root / 'identity.json', identity)
     source = table[table.game_index.mod(num_shards).eq(shard)].copy().reset_index(drop=True)
     source['row'] = np.arange(len(source)); source['offset'] = np.r_[0, np.cumsum(source.length.to_numpy()[:-1] - 30)]
     count = int(np.sum(source.length - 30)); out = _shard(config, shard)
-    with writer_lock(out):
+    with teacher_lock(out), stop_signals() as stopped:
         marker = out / 'manifest.json'
         if marker.exists():
             record = json.loads(marker.read_text())
@@ -141,15 +182,23 @@ def label(config, *, phase='dev', shard=0, limit_games=None):
             if limit_games < 1:
                 raise ValueError('limit_games must be positive')
             training = training.iloc[:limit_games]
+        reuse = None
+        if cfg.get('se3_reuse'):
+            from .teacher_reuse import SE3Values
+            reuse = SE3Values(cfg['se3_reuse'], identity)
+            receipt = out / 'se3_import.json'
+            if receipt.exists() and json.loads(receipt.read_text()) != reuse.receipt:
+                raise ValueError('SE3 import source changed')
+            write_json(receipt, reuse.receipt)
         store = MoveStore(config['data']['store_dir'])
         setup_seconds = time.monotonic() - started
-        new_games = new_positions = 0
+        new_games = new_positions = imported_positions = 0
         engine = None
         success = False
         try:
-            engine = Engine(Path(cfg['engine']), Path(cfg['model_path']), Path(cfg['analysis_config']),
-                            out / 'engine.log', cfg.get('timeout', 300))
             for game in training.itertuples():
+                if stopped[0]:
+                    break
                 index = int(game.row)
                 if done[index]:
                     existing = values[int(game.offset):int(game.offset) + int(game.length) - 30]
@@ -157,27 +206,40 @@ def label(config, *, phase='dev', shard=0, limit_games=None):
                         raise ValueError('completed teacher row is corrupt')
                     continue
                 moves, colors = store.game(int(game.store_index)); plies = np.arange(30, len(moves))
-                query = make_query(f'{game.rank}/{game.game_id}', moves, colors, plies, 1, 'japanese', 6.5 if game.hd == 0 else .5)
-                completed = set()
-                for ply, response in engine.analyze(query):
-                    _, value, _, _, _ = parse_root(response, int(colors[ply]))
-                    values[int(game.offset) + ply - 30] = value; completed.add(ply)
-                    new_positions += 1
+                imported, targets = reuse.positions(game, colors) if reuse else (np.empty(0, np.int64), None)
+                # Incomplete games are rebuilt; uncommitted mmap values are never trusted after interruption.
+                values[int(game.offset):int(game.offset) + len(moves) - 30] = np.nan
+                values[int(game.offset) + imported - 30] = targets if targets is not None else []
+                imported_positions += len(imported)
+                missing = np.setdiff1d(plies, imported)
+                completed = set(imported)
+                if len(missing):
+                    if engine is None:
+                        engine = Engine(Path(cfg['engine']), Path(cfg['model_path']), Path(cfg['analysis_config']),
+                                        out / 'engine.log', cfg.get('timeout', 300))
+                    query = make_query(f'{game.rank}/{game.game_id}', moves, colors, missing, 1, 'japanese', 6.5 if game.hd == 0 else .5)
+                    for ply, response in engine.analyze(query):
+                        if ply not in missing or ply in completed:
+                            raise ValueError('unexpected/duplicate teacher ply')
+                        _, value, _, _, _ = parse_root(response, int(colors[ply]))
+                        values[int(game.offset) + ply - 30] = value; completed.add(ply)
+                        new_positions += 1
                 if completed != set(plies):
                     raise ValueError('teacher failed to return every required actual-side target')
                 values.flush()
                 checksums[index] = value_digest(values[int(game.offset):int(game.offset) + int(game.length) - 30]); checksums.flush()
                 done[index] = True; done.flush()
                 new_games += 1
-            success = True
+            success = not stopped[0]
         finally:
             if engine is not None:
                 engine.close()
             seconds = time.monotonic() - started
             metrics = dict(phase=phase, shard=shard, training_games=len(training), completed_games=int(done.sum()),
                            teacher_id=object_hash(identity), prepared_id=prepared['dataset_id'],
-                           status='complete' if success else 'failed', seconds=seconds, setup_seconds=setup_seconds,
-                           new_games=new_games, new_positions=new_positions,
+                           status='complete' if success else ('stopped' if stopped[0] else 'failed'), seconds=seconds, setup_seconds=setup_seconds,
+                           new_games=new_games, new_positions=new_positions, imported_positions=imported_positions,
+                           runtime_code_sha256=file_hash(Path(__file__)),
                            positions_per_second=new_positions / seconds if seconds else 0.,
                            gpu_count=1, gpu_hours=seconds / 3600)
             write_json(out / 'metrics.json', metrics)

@@ -72,7 +72,13 @@
     "analysis_config": "configs/strength/se_value_analysis.cfg",
     "visits": 1,
     "timeout": 120,
-    "num_shards": 8
+    "num_shards": 8,
+    "se3_reuse": {
+      "dataset_dir": "data/processed/reproduce_paper/seed2026",
+      "value_path": "data/processed/reproduce_paper/value_v1/train/value.npy",
+      "recovery_path": "outputs/value_resume_672603_recovery.json",
+      "training_identity_path": "outputs/rank/reproduce_paper_3/se3_seed2026_15pos/data_identity.json"
+    }
   },
   "baseline": {
     "updates": 100,
