@@ -41,7 +41,7 @@ import scripts.strength.humansl_p3_komi as p3
 import scripts.strength.rank_train20_hc as t20
 
 OUT = ROOT / "outputs" / "rank" / "humansl" / "more_players"
-BEST = ROOT / "submissions" / "rank" / "ahc-p3-noA-t20-allp_733179_rank.csv"   # Public 0.7405
+BEST = ROOT / "submissions" / "rank" / "archive" / "ahc-p3-noA-t20-allp_733179_rank.csv"   # Public 0.7405
 PER_PLAYER = 40
 TAGS = {"noA-t20-allp-prior": "prior", "noA-t20-allp-ex": "ex", "noA-t20-allp-prior-ex": "priorex"}
 

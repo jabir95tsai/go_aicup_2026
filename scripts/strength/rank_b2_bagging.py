@@ -34,7 +34,7 @@ import scripts.strength.humansl_p3_komi as p3
 OUT = ROOT / "outputs" / "rank" / "humansl" / "b2_bagging"
 BAG = tuple(range(2027, 2037))   # 10 seeds; 2027 is the primary's
 PRIMARY = ROOT / "submissions" / "rank" / "ahc-p12-komihc_725150_rank.csv"
-NOA = ROOT / "submissions" / "rank" / "ahc-p3-noA_725504_rank.csv"   # Public 0.7271, best on 11/09
+NOA = ROOT / "submissions" / "rank" / "archive" / "ahc-p3-noA_725504_rank.csv"   # Public 0.7271, best on 11/09
 ARMS = ("bag10", "allp", "allpbag10", "noA", "noA-allp", "noA-bag10", "noA-allpbag10")
 
 
