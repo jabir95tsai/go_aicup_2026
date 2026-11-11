@@ -34,16 +34,17 @@ LOSS_CLIP = 20.0                      # points; larger swings are capped (decide
 LOSS_THRESHOLDS = (1.0, 3.0, 7.0)    # points
 
 
-def query(game: int, moves, colors, komi: float) -> bytes:
+def query(game: int, moves, colors, komi: float, visits: int = 1) -> bytes:
     return (json.dumps({
         "id": str(game), "moves": [["BW"[c], gtp(m)] for m, c in zip(moves, colors)],
         "rules": RULES, "komi": komi, "boardXSize": 19, "boardYSize": 19,
-        "analyzeTurns": list(range(len(moves) + 1)), "maxVisits": 1, "includePolicy": True},
+        "analyzeTurns": list(range(len(moves) + 1)), "maxVisits": visits, "includePolicy": True},
         separators=(",", ":")) + "\n").encode()
 
 
 def run(games, out: Path, *, in_flight: int = 48, komi: float = KOMI, allow_failures: bool = False,
-        overrides: str | None = None, katago: Path = KATAGO, model: Path = MODEL, config: Path = CONFIG) -> dict:
+        overrides: str | None = None, katago: Path = KATAGO, model: Path = MODEL, config: Path = CONFIG,
+        visits: int = 1) -> dict:
     out.mkdir(parents=True, exist_ok=True)
     (ROOT / "outputs" / "humansl_logs").mkdir(parents=True, exist_ok=True)
     positions = np.array([len(m) + 1 for m, _ in games], dtype=np.int64)
@@ -63,7 +64,7 @@ def run(games, out: Path, *, in_flight: int = 48, komi: float = KOMI, allow_fail
             try:
                 for g, (moves, colors) in enumerate(games):
                     slots.acquire()
-                    engine.stdin.write(query(g, moves, colors, komi))
+                    engine.stdin.write(query(g, moves, colors, komi, visits))
                     engine.stdin.flush()
             finally:
                 engine.stdin.close()
@@ -117,7 +118,7 @@ def run(games, out: Path, *, in_flight: int = 48, komi: float = KOMI, allow_fail
                         ("offsets", offsets), ("done", done),
                         ("colors", np.concatenate([c for _, c in games]).astype(np.int8))):
         np.save(out / f"{name}.npy", array)
-    meta = {"model": model.name, "rules": RULES, "komi": komi, "games": len(games),
+    meta = {"model": model.name, "rules": RULES, "komi": komi, "visits": visits, "overrides": overrides, "games": len(games),
             "games_complete": int(done.sum()), "positions": evaluated, "seconds": round(seconds, 1),
             "positions_per_second": round(evaluated / seconds, 1), "katago_returncode": engine.returncode,
             "rejected_queries": len(rejected)}
@@ -177,6 +178,7 @@ def main(argv=None) -> int:
     parser.add_argument("--komi", type=float, default=KOMI)
     parser.add_argument("--override-config")
     parser.add_argument("--allow-failures", action="store_true")
+    parser.add_argument("--visits", type=int, default=1, help="maxVisits per position (A-048 used 1)")
     args = parser.parse_args(argv)
     table = pd.read_parquet(args.games).iloc[args.shard::args.num_shards]
     if args.limit:
@@ -184,7 +186,7 @@ def main(argv=None) -> int:
     args.out.mkdir(parents=True, exist_ok=True)
     table.to_parquet(args.out / "games.parquet")
     meta = run(cache_games(table["game_index"], args.cache), args.out, in_flight=args.in_flight, komi=args.komi,
-               allow_failures=args.allow_failures, overrides=args.override_config)
+               allow_failures=args.allow_failures, overrides=args.override_config, visits=args.visits)
     print(json.dumps(meta), flush=True)
     return 0
 

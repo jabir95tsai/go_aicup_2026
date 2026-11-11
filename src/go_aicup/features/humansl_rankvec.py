@@ -113,7 +113,7 @@ def _games(path: Path, shard: int, num_shards: int, limit: int | None):
     return table.iloc[:limit] if limit else table
 
 
-def pack(table: pd.DataFrame, out: Path, cache: Path, workers: int) -> dict:
+def pack(table: pd.DataFrame, out: Path, cache: Path, workers: int, komi: float | None = None) -> dict:
     out.mkdir(parents=True, exist_ok=True)
     table.reset_index(drop=True).to_parquet(out / "games.parquet")
     _katago()
@@ -123,7 +123,7 @@ def pack(table: pd.DataFrame, out: Path, cache: Path, workers: int) -> dict:
     games = cache_games(table["game_index"], cache)
     parts = {"bits": [], "globals": [], "target": [], "own": [], "game": []}
     started = time.monotonic()
-    with mp.get_context("spawn").Pool(workers, initializer=_init_worker, initargs=(config,)) as pool:
+    with mp.get_context("spawn").Pool(workers, initializer=_init_worker, initargs=(config, komi)) as pool:
         for g, (bins, globals_, played) in enumerate(pool.imap(encode_game, games, chunksize=4)):
             if bins.shape[1] != PLANES:
                 raise ValueError(f"expected {PLANES} input planes, got {bins.shape[1]}")
@@ -137,7 +137,7 @@ def pack(table: pd.DataFrame, out: Path, cache: Path, workers: int) -> dict:
     seconds = time.monotonic() - started
     positions = int(sum(len(t) for t in parts["target"]))
     meta = {"games": len(table), "positions": positions, "seconds": round(seconds, 1),
-            "positions_per_second": round(positions / seconds, 1)}
+            "positions_per_second": round(positions / seconds, 1), "komi": 6.5 if komi is None else komi}
     (out / "meta.json").write_text(json.dumps(meta, indent=1))
     return meta
 
@@ -243,17 +243,31 @@ def _monitor_games(run: Path, model, vectors, data, monitor) -> dict:
             "score_rank_official": round(float(((decoded == truth) + (np.abs(decoded - truth) == 1) / np.e).mean()), 4)}
 
 
-def extract(table: pd.DataFrame, vectors_path: Path, out: Path, cache: Path, workers: int,
-            batch_positions: int = 409, komi: float | None = None) -> dict:
+def load_finetuned(model, path: Path, device):
+    """Load a humansl_finetune checkpoint (RankPolicy state: net.* and vectors) into the frozen
+    network; returns its rank vectors."""
+    import torch
+    state = torch.load(path, map_location=device)["model"]
+    net = {k.removeprefix("net."): v for k, v in state.items() if k.startswith("net.")}
+    model.load_state_dict(net, strict=True)
+    return state["vectors"].detach()
+
+
+def extract(table: pd.DataFrame, vectors_path: Path | None, out: Path, cache: Path, workers: int,
+            batch_positions: int = 409, komi: float | None = None, finetuned: Path | None = None) -> dict:
     """Positions of consecutive games are pooled into fixed batches (batch_positions x RANKS
-    evaluations) for torch.compile: 10.5k vs 4.5k evaluations/s eager on an H200 (A-055)."""
+    evaluations) for torch.compile: 10.5k vs 4.5k evaluations/s eager on an H200 (A-055).
+    finetuned: a humansl_finetune checkpoint (network weights and vectors) instead of vectors_path."""
     import torch
     out.mkdir(parents=True, exist_ok=True)
     table.reset_index(drop=True).to_parquet(out / "games.parquet")
     device = torch.device("cuda")
     model, _ = load_frozen(device)
+    if finetuned is not None:
+        vectors = load_finetuned(model, finetuned, device)
+    else:
+        vectors = torch.load(vectors_path, map_location=device)["vectors"]
     forward = torch.compile(model, dynamic=False)
-    vectors = torch.load(vectors_path, map_location=device)["vectors"]
     games = cache_games(table["game_index"], cache)
     sums = torch.zeros((len(table) * 2, RANKS), device=device)
     counts = np.zeros(len(table) * 2, dtype=np.int64)
@@ -303,7 +317,8 @@ def extract(table: pd.DataFrame, vectors_path: Path, out: Path, cache: Path, wor
     meta = {"columns": [f"own_r{r}" for r in range(RANKS)] + [f"opp_r{r}" for r in range(RANKS)],
             "games": len(table), "games_complete": int(done.sum()), "positions": positions,
             "seconds": round(seconds, 1), "positions_per_second": round(positions / seconds, 1),
-            "vectors": str(vectors_path), "precision": "tf32, torch.compile",
+            "vectors": str(vectors_path), "finetuned": None if finetuned is None else str(finetuned),
+            "precision": "tf32, torch.compile",
             "komi": 6.5 if komi is None else komi}
     (out / "meta.json").write_text(json.dumps(meta, indent=1))
     return meta
@@ -339,7 +354,8 @@ def main(argv=None) -> int:
     parser.add_argument("--lr", type=float, default=3e-3)
     parser.add_argument("--monitor-positions", type=int, default=50_000)
     parser.add_argument("--every", type=int, default=500)
-    parser.add_argument("--komi", type=float, help="extract: white komi of the input features (default rules: 6.5)")
+    parser.add_argument("--komi", type=float, help="pack / extract: white komi of the input features (default rules: 6.5)")
+    parser.add_argument("--finetuned", type=Path, help="extract: humansl_finetune checkpoint (weights + vectors)")
     args = parser.parse_args(argv)
     if args.command == "train":
         result = train(args.run, epochs=args.epochs, batch=args.batch, lr=args.lr,
@@ -348,9 +364,10 @@ def main(argv=None) -> int:
         return 0
     table = _games(args.games, args.shard, args.num_shards, args.limit)
     if args.command == "pack":
-        meta = pack(table, args.out, args.cache, args.workers)
+        meta = pack(table, args.out, args.cache, args.workers, komi=args.komi)
     else:
-        meta = extract(table, args.vectors, args.out, args.cache, args.workers, komi=args.komi)
+        meta = extract(table, args.vectors, args.out, args.cache, args.workers, komi=args.komi,
+                       finetuned=args.finetuned)
     print(json.dumps(meta), flush=True)
     return 0
 

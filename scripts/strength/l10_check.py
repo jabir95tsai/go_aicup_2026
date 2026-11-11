@@ -73,6 +73,8 @@ def main() -> int:
     parser.add_argument("--names", nargs="+", default=["rank_public", "rank_private"])
     parser.add_argument("--per-k", type=int, default=100, help="reference questions per k")
     parser.add_argument("--out", type=Path, default=ROOT / "outputs" / "day0_audit" / "l10.json")
+    parser.add_argument("--reference", type=Path, default=V2_DIR / "strength_v2_valid_unseen_questions.parquet",
+                        help="unseen-player questions (columns k, color, player_id, games=training row indices)")
     args = parser.parse_args()
     params = load_params("d4")
     min_plies = 2 * max(params["moves"], params["slot_moves"]) + 1
@@ -83,7 +85,9 @@ def main() -> int:
     candidates = np.array(sorted(set(player)))
     cand_index = {p: i for i, p in enumerate(candidates)}
 
-    unseen = pd.read_parquet(V2_DIR / "strength_v2_valid_unseen_questions.parquet")
+    unseen = pd.read_parquet(args.reference)
+    if pd.api.types.is_integer_dtype(unseen["color"]):  # humansl_residual_b2 questions encode B=0, W=1
+        unseen["color"] = np.where(unseen["color"].to_numpy() == 1, "W", "B")
     rng = np.random.default_rng(2027)
     reference = pd.concat([g.iloc[rng.permutation(len(g))[:args.per_k]] for _, g in unseen.groupby("k")])
     held_out = np.concatenate(list(reference["games"]))
@@ -95,6 +99,9 @@ def main() -> int:
         tests[name] = (pre, ok, q_meta)
 
     result = {"params": params, "reference_questions": len(reference)}
+    rank_of = dict(zip(player, meta["rank"].astype(str).to_numpy()))
+    details = []
+    null_raw = []
     gaps = {"seen": [], "unseen": []}
     test_gaps = {name: [] for name in tests}
     for color in (0, 1):
@@ -123,6 +130,7 @@ def main() -> int:
             gaps["seen"].append(gap(s))
             s[np.arange(len(s)), truth] = -np.inf
             gaps["unseen"].append(gap(s))
+            null_raw.append(gaps["unseen"][-1])
             print(f"color {color}: {len(ref)} reference questions scored", flush=True)
         for name, (pre, ok, q_meta) in tests.items():
             in_color = q_meta["color"].astype(str).to_numpy() == ("W" if color else "B")
@@ -131,8 +139,11 @@ def main() -> int:
                 continue
             index = np.flatnonzero(in_color & ok)
             queries = [offsets[name] + index[r] for r in rows.values()]
-            test_gaps[name].append(gap(score_questions(prefix, hashes, galleries, queries, population,
-                                                       color, params)))
+            s = score_questions(prefix, hashes, galleries, queries, population, color, params)
+            test_gaps[name].append(gap(s))
+            details.extend(dict(part=name, question_id=q, color=int(color), gap=float(v), top1=str(candidates[i]),
+                                top1_rank=str(rank_of[candidates[i]]))
+                           for q, v, i in zip(rows.keys(), gap(s), np.argmax(s, axis=1)))
             print(f"color {color}: {name} {len(queries)} questions scored", flush=True)
 
     seen, null = np.concatenate(gaps["seen"]), np.concatenate(gaps["unseen"])
@@ -145,6 +156,12 @@ def main() -> int:
         values = np.concatenate(parts) if parts else np.array([])
         result[name] = {"questions": len(values), "share_above": float((values > threshold).mean()) if len(values) else None,
                         "median_gap": float(np.median(values)) if len(values) else None}
+    if details:
+        frame = pd.DataFrame(details)
+        frame["above_null_max"] = frame["gap"] > float(null.max())
+        frame.to_csv(args.out.with_suffix(".questions.csv"), index=False)
+        result["null_max_gap"] = float(null.max())
+        result["above_null_max"] = frame.groupby("part")["above_null_max"].sum().astype(int).to_dict()
     print(json.dumps(result, indent=1))
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(result, indent=1))

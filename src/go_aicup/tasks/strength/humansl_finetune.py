@@ -18,6 +18,11 @@ under all 10 rank hypotheses and loss = NLL(true rank) + LAMBDA * CE(true rank |
 softmax over ranks of log p(played move)). Positions per step are then --batch,
 forward passes --batch x 10.
 
+C4x (cross-fitted retry, RESULTS 2026-11-11) adds: --vectors (initial rank vectors),
+--monitor (a directory of pack_* shards; default <data>/monitor/pack_0 as C4),
+--rank-balance (each position weighted by 1 / its rank's share, so every rank
+weighs the same) and --no-step-checkpoints (only last.pt). Defaults reproduce C4.
+
     torchrun --standalone --nproc-per-node=8 -m go_aicup.tasks.strength.humansl_finetune \\
         --data outputs/humansl_finetune --out outputs/c4_s2 [--max-positions N] [--resume]
 """
@@ -40,7 +45,7 @@ from go_aicup.features import humansl_rankvec as rv
 from go_aicup.metrics import score_rank
 from go_aicup.paths import ROOT
 
-VECTORS = ROOT / "outputs" / "humansl_rankvec" / "vectors.pt"
+VECTORS = ROOT / "outputs" / "rank" / "humansl" / "humansl_rankvec" / "vectors.pt"   # A-055 (moved 10/28)
 TRAINABLE = ("conv_spatial.", "linear_global.", "blocks.", "norm_trunkfinal.", "policy_head.")
 EVAL_POSITIONS = 409   # x RANKS evaluations per compiled monitor batch (as A-055 extract)
 
@@ -151,6 +156,10 @@ def main(argv=None) -> int:
     parser.add_argument("--no-compile", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--seed", type=int, default=2027)
+    parser.add_argument("--vectors", type=Path, default=VECTORS, help="initial rank vectors (vectors.pt)")
+    parser.add_argument("--monitor", type=Path, help="dir of monitor pack_* shards (default <data>/monitor/pack_0)")
+    parser.add_argument("--rank-balance", action="store_true", help="weight positions so every rank weighs the same")
+    parser.add_argument("--no-step-checkpoints", action="store_true", help="keep only last.pt")
     args = parser.parse_args(argv)
     rank, world, device = setup()
     args.out.mkdir(parents=True, exist_ok=True)
@@ -164,10 +173,18 @@ def main(argv=None) -> int:
 
     shards = sorted(p for p in args.data.glob("pack_*") if (p / "meta.json").exists())[:args.shards]
     data = load_shards(shards[rank::world], device)
-    mon = load_shards([args.data / "monitor" / "pack_0"], device)
+    monitor_shards = [args.data / "monitor" / "pack_0"] if args.monitor is None else \
+        sorted(p for p in args.monitor.glob("pack_*") if (p / "meta.json").exists())
+    if not monitor_shards:
+        raise FileNotFoundError(f"no monitor shards in {args.monitor}")
+    mon = load_shards(monitor_shards, device)
     probe = torch.as_tensor(np.random.default_rng(args.seed).permutation(len(mon["target"]))[:args.monitor_positions],
                             device=device)
-    model = RankPolicy(device, torch.load(VECTORS, map_location=device)["vectors"])
+    # per-rank position weights: total / (RANKS * count_r) over all processes' data (mean weight 1)
+    counts = all_sum(torch.bincount(data["rank"], minlength=rv.RANKS).double())
+    rank_weight = (counts.sum() / (rv.RANKS * counts.clamp(min=1))).float() if args.rank_balance \
+        else torch.ones(rv.RANKS, device=device)
+    model = RankPolicy(device, torch.load(args.vectors, map_location=device)["vectors"])
     trainable = [p for n, p in model.net.named_parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW([{"params": trainable, "lr": args.lr},
                                    {"params": [model.vectors], "lr": args.vector_lr}], weight_decay=0.0)
@@ -191,8 +208,11 @@ def main(argv=None) -> int:
     eval_forward = model if args.no_compile else torch.compile(model, dynamic=False)
     log({"event": "start", "world": world, "shards": len(shards), "positions_rank0": len(data["target"]),
          "steps_per_epoch": steps_per_epoch, "total_steps": total, "global_batch": args.batch * world,
-         "trainable_parameters": sum(p.numel() for p in trainable), "resume_step": step, "args": vars(args) | {
-             "data": str(args.data), "out": str(args.out)}})
+         "trainable_parameters": sum(p.numel() for p in trainable), "resume_step": step,
+         "rank_positions": counts.long().tolist(), "rank_weight": [round(float(w), 4) for w in rank_weight],
+         "monitor_shards": [str(p) for p in monitor_shards], "args": vars(args) | {
+             "data": str(args.data), "out": str(args.out), "vectors": str(args.vectors),
+             "monitor": str(args.monitor)}})
     if step == 0:
         log({"step": 0, **monitor(model, eval_forward, mon, probe, rank, world)})
     started, window, window_disc, seen, monitor_seconds = time.monotonic(), [], [], 0, 0.0
@@ -222,14 +242,16 @@ def main(argv=None) -> int:
                                            data["side"][index].repeat_interleave(rv.RANKS, 0))
                 logp = legal_logp(logits, xr, data["target"][index].repeat_interleave(rv.RANKS, 0)).reshape(-1, rv.RANKS)
                 truth = data["rank"][index]
-                nll = -logp.gather(1, truth[:, None]).mean()
-                discrimination = torch.nn.functional.cross_entropy(logp, truth)
+                weight = rank_weight[truth]
+                nll = -(weight * logp.gather(1, truth[:, None])[:, 0]).mean()
+                discrimination = (weight * torch.nn.functional.cross_entropy(logp, truth, reduction="none")).mean()
                 loss = nll + args.mmi * discrimination
                 window_disc.append(discrimination.detach())
             else:
                 with torch.autocast("cuda", dtype=torch.bfloat16):
                     logits = train_forward(x, data["globals"][index], data["rank"][index], data["side"][index])
-                loss = nll = -legal_logp(logits, x, data["target"][index]).mean()
+                weight = rank_weight[data["rank"][index]]
+                loss = nll = -(weight * legal_logp(logits, x, data["target"][index])).mean()
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
@@ -249,11 +271,14 @@ def main(argv=None) -> int:
                 log({"step": step, **monitor(model, eval_forward, mon, probe, rank, world),
                      "monitor_seconds": round(time.monotonic() - tic, 1)})
                 monitor_seconds += time.monotonic() - tic
-                save(f"step{step:06d}.pt")
+                if not args.no_step_checkpoints:
+                    save(f"step{step:06d}.pt")
             if step % args.checkpoint_every == 0:
                 save("last.pt")
     save("last.pt")
     log({"event": "done", "step": step, "seconds": round(time.monotonic() - started, 1)})
+    if rank == 0:
+        (args.out / "done.json").write_text(json.dumps({"step": step, "total_steps": total}))
     if dist.is_initialized():
         dist.barrier()
         dist.destroy_process_group()
