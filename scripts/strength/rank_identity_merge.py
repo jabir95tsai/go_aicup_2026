@@ -11,9 +11,12 @@ export  Refit the base (-prior_736589: PriorMatched B2 on Valid-S + train20 + Va
           l10        questions above the L10 unseen-null max take the matched player's rank
           pairs      each detected same-player component is scored as one merged question
           pairs-l10  both (an L10 match sets its whole component)
+overlay Apply the L10 overrides to an existing submission file (no refit; the override only
+        depends on the L10 table), e.g. the cvec2 base: writes <job>-<tag>.csv
 
     python -m scripts.strength.rank_identity_merge pairs
     python -m scripts.strength.rank_identity_merge export --job ID
+    python -m scripts.strength.rank_identity_merge overlay --base 751959-cvec2.csv --job 751959 --tag cv2-l10
 """
 from __future__ import annotations
 
@@ -250,9 +253,31 @@ def export(job: str, threshold_name: str, tags: list[str]) -> None:
     print(json.dumps(out, indent=1))
 
 
+def overlay(base_name: str, job: str, tag: str) -> None:
+    """L10 overrides (questions above the unseen-null max) on top of an existing submission file."""
+    from go_aicup.tasks.strength.submission_files import write_rank_csv
+
+    base = pd.read_csv(ROOT / "submissions" / "rank" / base_name, dtype=str).set_index("question_id")["pred_rank"]
+    l10 = pd.read_csv(L10)
+    l10 = l10[l10["above_null_max"]].set_index("question_id")["top1_rank"]
+    result = base.copy()
+    result.loc[l10.index] = l10
+    changed = result != base
+    detail = [{"question_id": q, "before": base[q], "after": result[q]} for q in l10.index]
+    out = {"base": base_name, "l10_questions": int(len(l10)),
+           "public": int(changed[changed.index.str.startswith("pub")].sum()),
+           "private": int(changed[changed.index.str.startswith("priv")].sum()), "detail": detail}
+    if changed.any():
+        out["file"] = write_rank_csv(result.rename("pred_rank").reset_index(), tag, job).name
+    (OUT / f"overlay_{job}-{tag}.json").write_text(json.dumps(out, indent=1))
+    print(json.dumps(out, indent=1))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["pairs", "export"])
+    parser.add_argument("command", choices=["pairs", "export", "overlay"])
+    parser.add_argument("--base", default="751959-cvec2.csv", help="overlay: file in submissions/rank/")
+    parser.add_argument("--tag", default="cv2-l10", help="overlay: output tag")
     parser.add_argument("--job", default="local")
     parser.add_argument("--threshold", default="null_max", choices=["null_q999", "null_q9999", "null_max"])
     parser.add_argument("--tags", nargs="+", default=["l10"], choices=["l10", "pairs", "pairs-l10"],
@@ -261,6 +286,8 @@ def main() -> int:
     OUT.mkdir(parents=True, exist_ok=True)
     if args.command == "pairs":
         pairs()
+    elif args.command == "overlay":
+        overlay(args.base, args.job, args.tag)
     else:
         export(args.job, args.threshold, args.tags)
     return 0

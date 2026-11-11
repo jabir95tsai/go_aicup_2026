@@ -812,7 +812,42 @@ P1＋P2＋P3 設定，E2 Equal-k：首選 seed 2027 為 0.7372，五 seed 0.7372
 | 16 visits，`numAnalysisThreads=256,nnMaxBatchSize=256` | 100 | 23,087 | 735 |
 | 32 visits，同上 | 100 | 23,087 | 423 |
 
-估算（以 735／423 位置每秒、單卡）：A-048 試算集約 420 萬位置 → 16 visits 約 1.6 GPU-h、32 visits 約 2.8 GPU-h；擴大到全擬合池（約 4,600 萬位置，未精算）16 visits 約 17 GPU-h、32 visits 約 30 GPU-h；測試 1 萬盤約 230 萬位置 16 visits 約 0.9 GPU-h。短測含引擎啟動時間，長跑應略快。尚未提交試算。
+估算（以 735／423 位置每秒、單卡）：A-048 試算集約 420 萬位置 → 16 visits 約 1.6 GPU-h、32 visits 約 2.8 GPU-h；擴大到全擬合池（約 4,600 萬位置，未精算）16 visits 約 17 GPU-h、32 visits 約 30 GPU-h；測試 1 萬盤約 230 萬位置 16 visits 約 0.9 GPU-h。短測含引擎啟動時間，長跑應略快。
+
+### 2026-11-11：強引擎 16／32 visits 試算 → 未過 gate，不擴大
+
+使用者同意後執行。A-048 同一批 18,772 盤，同一切分（4 片，與 A-048 分片逐盤相同），貼目一律 6.5。Slurm 752680（16 visits，4×1 卡，`numAnalysisThreads=128,nnMaxBatchSize=128`；先前 752622_0–3 用 256 執行緒、4 片落在同一節點，超過每使用者 2,048 程序上限，KataGo `Resource temporarily unavailable` 失敗，重送）、752622_4–7（32 visits，256 執行緒）。全部 4,693／片完成、0 拒絕。實測 16 visits 826 位置／秒、每片 21 分（**1.4 GPU-h**）；32 visits 493 位置／秒、每片 35 分（**2.4 GPU-h**）。比較 Slurm 752698（1 卡 CPU 用，1 小時 17 分），`scripts/strength/engine_visits_pilot.py`，輸出 `outputs/rank/humansl/engine_visits_pilot/result.json`。
+
+設定：基底改為現行 noA 特徵（H〔P3 貼目〕＋C＋讓先旗標，52 維）；B2 以 q1000 S-fit 的 HD≤1 盤擬合（9,116 盤、499 人），在 qsel S-select 評估（剔除含 HD≥2 盤的題，856 題：k=5／10／15／20＝225／230／200／201）；5 個 B2 抽樣 seed 平均；玩家 bootstrap 為 seed 2027。事前 gate：最佳 E 版 − HC ≥ +0.01 且各 k ≥ −0.005。
+
+| S-select，5 seed 平均 | Equal-k | Δ vs HC | Δk=5 | Δk=10 | Δk=15 | Δk=20 | bootstrap 95% |
+|---|---:|---:|---:|---:|---:|---:|---|
+| HC | 0.7129 | | | | | | |
+| HC＋E 1 visit（A-048 特徵） | 0.6952 | −0.0177 | −0.0324 | +0.0017 | −0.0015 | −0.0387 | [−0.0346, +0.0031] |
+| HC＋E 16 visits | 0.7079 | −0.0050 | −0.0223 | +0.0295 | −0.0117 | −0.0154 | [−0.0233, +0.0155] |
+| HC＋E 32 visits | 0.7026 | −0.0102 | −0.0155 | +0.0088 | −0.0166 | −0.0177 | [−0.0277, +0.0126] |
+
+- **未過 gate：** 三個 E 版都低於 HC；16 visits 比 1 visit 好 +0.013，但 32 visits 沒有再進步，看不到「visits 越高特徵越好」的趨勢。
+- 機制（推測，未驗證）：引擎著手品質（目數損失、與引擎首選一致率）在中段級別與 H／C 高度重疊（11/11 LDA 診斷：加 E 中段 d′ 無增量）；在只有 499 位擬合玩家時，多 14 維主要增加 B2 的變異數。擴大擬合池可能縮小負值，但目前沒有任何一臂為正，**不做 17–30 GPU-h 的全量擴大**。
+- 本試算共約 3.8 GPU-h（含 752622_0–3 失敗的數十秒）。不產生提交檔。
+
+### 2026-11-11：B2 合成題級別先驗改均勻 → 增益約 +0.002，不是槓桿（Slurm 753754，1 卡 CPU 用，29 分）
+
+使用者同意後執行。動機：現行基底的測試預測 1D 偏少（每份 400 題只 23–26 題），推測是合成題依擬合玩家比例抽級別所致；若測試每級等量，均勻先驗才對。`scripts/strength/rank_uniform_prior.py`，輸出 `outputs/rank/humansl/uniform_prior/{local,test}.json`（第一次 753743 因基底路徑寫錯失敗，修正後重送）。
+
+- **前提只有一半成立：** 擬合池「有 ≥k 盤的玩家」的級別比例本來就接近均勻（k=20：A 6.9%、其他 9.4–11.3%；k=5：A 14.4%、1D 7.6%），不是全體 8,007 人的 433／1,582 懸殊比例。
+- 本地（擬合 Valid-S＋train20 HD≤1，E2＝Valid-U 每 k×級別各 50 題，5 seed）；以兩種測試情境重新加權每 (k, 級別) 平均分：
+
+| Equal-k | 測試每級等量 | Δ | 測試照玩家比例 | Δ |
+|---|---:|---:|---:|---:|
+| 玩家比例先驗（基底） | 0.7447 | | 0.7523 | |
+| 均勻先驗 | 0.7468 | +0.0021（各 seed −0.000～+0.005） | 0.7512 | −0.0011 |
+| 各半混合 | 0.7472 | +0.0024 | 0.7533 | +0.0011 |
+
+- 分 k（等量情境，均勻 − 基底）：k=5 −0.0005、k=10 +0.0046、k=15 −0.0011、k=20 +0.0053。逐級（k 平均）：均勻先驗讓 1D 0.611→0.662，但 B 0.813→0.796、2D 0.623→0.603、3D 0.602→0.596——1D 偏少主要是特徵在 A／1D／2D 之間分不開，換先驗只是把分數在相鄰級之間搬動。
+- 測試：基底臂逐題重現 `-prior_736589`（0 題不同）。均勻先驗改 Public 38／Private 31 題，1D 變 41／33；混合改 30／25 題。
+- **判讀：** 兩種情境下差異都在 ±0.003 內，遠小於 Public LB 雜訊（約 0.02），上傳也無法分辨。**不產生提交檔、不建議上傳。**
+- **補註（事後查帳）：** 這個實驗與 11/08「級別先驗探針」重複——當時 LB 已顯示 uprior −0.0088、balanced −0.0416，判定測試級別不是每級等量、1D 比均勻少。本次提案前漏查該節；本次結果（影響很小）與該結論一致，不改變任何決定。
 
 
 ## 2026-11-11：HumanSL residual B2 stage 1 單折 smoke100（Slurm 751237）→ 停止
@@ -860,6 +895,11 @@ P1＋P2＋P3 設定，E2 Equal-k：首選 seed 2027 為 0.7372，五 seed 0.7372
 **預期增益：未知，可能很小。** 同日拆解顯示拿掉整塊 C 只少 0.002–0.005（H 與 C 大部分重疊），改善 C 的品質可能也只在這個量級以內，未必達到 +0.005。
 **估算（依實測速度：抽 C 約 4.5 盤/秒/GPU、v1 學習 3.9 步/秒）：** pack 8 卡約 20–30 分（純 CPU 編碼，約 3 GPU-h）；學習 1 卡約 70 分＋G0 約 30 分（約 1.7 GPU-h）；抽 C 8 卡約 1.5–1.8 小時（約 13 GPU-h）；G1／export 為 CPU。**合計約 18 GPU-h**，G0 不過則只花約 5 GPU-h。Slurm：`slurm/rank_cvec_v2_{pack,learn,extract}.slurm`（皆排除慢節點 hgpn083；抽取可跳過已完成分片續跑）。輸出 `outputs/rank/humansl/cvec_v2/`；提交檔 `<job>-cvec2.csv`（export 先以 v1 重算並要求與基底 `-prior_736589` 逐題相同）。
 - **11/11 使用者決定：不做 G0 判別，直接跑全程。** 學習作業不再跑 G0、抽取不再檢查 g0.json；G1 照登記判讀。作業鏈（afterok）：pack 751956（8 卡）→ learn 751957（1 卡）→ extract 751958（8 卡）→ eval 751959（1 卡，G1＋`751959-cvec2.csv`）。預估合計約 16 GPU-h。
+- **G1 結果（eval 751959，2,714 秒；`outputs/rank/humansl/cvec_v2/result.json`）：v2 − v1 Equal-k 五 seed 平均 E1 −0.0008、E2 +0.0015 → 依登記判定 stop。** 各 seed：E1 −0.0035／−0.0041／+0.0009／+0.0015／+0.0011；E2 +0.0045／−0.0022／+0.0039／+0.0022／−0.0007。E2 各 k 平均 k=5／10／15／20＝+0.0041／+0.0063／−0.0023／−0.0019；E1 各 k 平均（由各 seed 計）−0.0040／−0.0004／+0.0002／+0.0010。正負號隨 seed 變動，差異在雜訊內；與「拿掉整塊 C 只少 0.002–0.005」的上限一致。
+- 提交檔 `submissions/rank/751959-cvec2.csv`（SHA `5471b8be`）：v1 重算與 `-prior_736589` 逐題相同（0／0 題）；v2 對基底改 Public 10／Private 11 題，預測分布 88／88／103／110／52／71／67／83／73／65（基底 88／87／105／112／49／72／65／84／73／65）。
+- **11/11 使用者決定：不理 gate，cvec2 升為競賽二新基底**（本地證據為持平：E1 −0.0008／E2 +0.0015；採用理由為 v2 修正了讓子污染與貼目不一致、學習資料 2.7 倍，機制上較乾淨）。尚未上傳、無 LB 分數。後續以 C v2（`outputs/rank/humansl/cvec_v2/learn/vectors.pt`）為 C 特徵；C4x 改用 `INIT=…/cvec_v2/learn/vectors.pt`、`BASE=v2`。`-prior_736589` 保留在 `submissions/rank/` 頂層，因 `rank_c4x.py`／`rank_cvec_v2.py`／`rank_identity_merge.py` 以它做 v1 重現檢查。L10 覆寫（`750633-l10.csv`）是疊在舊基底上，尚未套到 cvec2。
+- **新基底＋L10：`submissions/rank/751959-cv2-l10.csv`（SHA `d6cc3fc5`）。** `rank_identity_merge.py overlay`（新指令，不重擬合；L10 覆寫只依 `l10_real_test.questions.csv`）：7 題 L10 中 cvec2 實改 4 題，與舊 L10 相同（pub_q_0135 3D→2D、pub_q_0046 4D→6D、priv_q_0047 4D→3D、priv_q_0168 4D→5D，另 3 題原本相同）。驗證：同指令套在 `-prior_736589` 上，輸出與 `750633-l10.csv` 逐位元相同。對 `750633-l10.csv` 改 Public 10／Private 11 題（即 cvec2 對舊基底的差異，全為差一級），預測分布 88／88／103／110／52／72／67／80／74／66。
+- **LB 11/11（jason.hsiao05）：`751959-cv2-l10.csv` 20:27:18 Public 0.7499623；`751959-cvec2.csv` 20:27:39 Public 0.7483820（13/120）。** 對照舊版：cvec2 對舊基底 `-prior_736589`（0.7508820）−0.0025；cv2-l10 對 `750633-l10.csv`（0.7524623）−0.0025。兩組差值相同，都是 −0.0025＝1/400，也就是那 10 題 Public 合計淨少 1.0 分（例如約 1.6 題由對變鄰級），在 ±0.02 雜訊內，與本地 E1 −0.0008／E2 +0.0015 的「持平」一致。L10 在新基底上同樣 +0.0016（0.7483820→0.7499623），與舊基底一致。基底依使用者 11/11 決定維持 cvec2。平台上競賽二最後一筆為 `751959-cvec2.csv`。
 
 ### 2026-11-11：C4／C4b 失敗原因複查（只讀紀錄與程式，未花算力）
 
@@ -884,7 +924,7 @@ P1＋P2＋P3 設定，E2 Equal-k：首選 seed 2027 為 0.7372，五 seed 0.7372
 - G1（Valid-U，基底設定：Valid-S＋train20 擬合、Valid-S 先驗、seed 2027–2031）：swap − base。升為基底：E1 或 E2 五 seed 平均 Equal-k ≥ +0.005、另一組 ≥ 0、E2 各 k 五 seed 平均皆 ≥ −0.005；兩組皆 ≥ 0 但未達 → 只當 LB 探針；否則停止。
 **估算：** pack 8 卡約 45 分（約 5 GPU-h）；訓練 gen 每半約 30 分（約 4 GPU-h，兩半 8）、mmi 每半約 1.5 h（約 12 GPU-h，兩半 24）；抽特徵每臂 239,781 盤約 1.9 h × 8 卡（約 15 GPU-h）；G1／匯出 CPU。**兩臂都過 G0 約 68 GPU-h，都不過約 37 GPU-h。** 四個訓練作業可同時跑（32 卡＝帳號上限）。pack 約 26 GB（/work 剩 36 GB；cvec2 完成後可刪其 learn pack 約 9 GB）。
 **驗證（CPU，未用 GPU）：** 乾跑以 C v1 冒充 C4（兩 view 相同）：swap − base 在 E1／E2 皆 0.0000，base 重現 11/11 拆解的 E1 0.7153／E2 0.7460，匯出逐題重現 `-prior_736589`（0／0 題）。`humansl_finetune.py` 新選項（`--vectors`、`--monitor`、`--rank-balance`、`--no-step-checkpoints`；預設值不變，C4 可重現）與 `humansl_rankvec extract --finetuned` 尚未在 GPU 上跑過；第一個訓練作業的第 0 步監控應等於 C v1。
-**執行順序：** `tables`（已完成）→ `slurm/rank_c4x_pack.slurm` → `ARM={gen,mmi} HALF={A,B} slurm/rank_c4x_train.slurm` → `rank_c4x g0 --arm` → `ARM= slurm/rank_c4x_extract.slurm` → `ARM= [BASE=v1|v2] slurm/rank_c4x_eval.slurm`。若 cvec2 升為基底，改用 `INIT=outputs/rank/humansl/cvec_v2/learn/vectors.pt`、`BASE=v2`（由使用者決定）。
+**執行順序：** `tables`（已完成）→ `slurm/rank_c4x_pack.slurm` → `ARM={gen,mmi} HALF={A,B} slurm/rank_c4x_train.slurm` → `rank_c4x g0 --arm` → `ARM= slurm/rank_c4x_extract.slurm` → `ARM= [BASE=v1|v2] slurm/rank_c4x_eval.slurm`。若 cvec2 升為基底，改用 `INIT=outputs/rank/humansl/cvec_v2/learn/vectors.pt`、`BASE=v2`（由使用者決定）。**11/11：cvec2 已升為基底 → 採 v2 設定。**
 
 ### 2026-11-11：k=20 天花板診斷（`scripts/strength/rank_ceiling.py`，登入節點 CPU 約 8 分）
 
@@ -920,3 +960,6 @@ P1＋P2＋P3 設定，E2 Equal-k：首選 seed 2027 為 0.7372，五 seed 0.7372
 - **G1 不變**（swap − base），另報 Valid-U 題目層級中段 d′（k=1／5／20，本人／對手／全部；LDA 在擬合池同 k 的題目上擬合）。base 參考值：本人 0.374／0.717／0.855（2.29）、對手 0.357／0.797／1.223（3.43）、全部 0.452／0.936／1.293（2.86）；中段每級約 70–80 位 Valid-U 玩家有 ≥20 盤，屬診斷用。
 - **驗證（CPU）：** d′ 計算以已知分離的合成資料檢查（0.527，正負號正確）；相鄰級 CE 在 D／中段／6D 與手算一致；G0 四種情況判定正確；評估端中段診斷在現有特徵上可跑（16 秒）。GPU 端仍未跑過。
 - **估算更新：** adj 每位置 3 次前向，預估每半約 35 分（約 5 GPU-h，兩半 10）；mmi 兩半約 24；pack 約 5；抽特徵每臂約 15。兩臂都過 G0 約 70 GPU-h，都不過約 39 GPU-h。
+- **11/11 20:45 送出（C v2 基底：`INIT=outputs/rank/humansl/cvec_v2/learn/vectors.pt`、`BASE=v2`；兩臂 adj＋mmi）。** 使用者決定：**G0 只看「不傷害」（兩模型終點單盤官方分數都 ≥ 第 0 步）就抽特徵**，不再要求 +0.01／中段 d′ +0.05；`g0_<arm>.json` 的 `pass` 仍照原登記寫出供紀錄。G0 改在抽特徵作業開頭自動計算（`slurm/rank_c4x_extract.slurm`），整鏈以 afterok 串接；eval 時間上限 1:30→3:00（cvec2 eval 實測 80 分）。G1 不擋匯出，結論見 `result_<arm>_v2.json`。
+  - pack 753665（dev 8 卡）→ adj：train A 753666／B 753667 → extract 753668 → eval 753669；mmi：train A 753670／B 753671 → extract 753672 → eval 753673（後兩者因 dev 每人提交數上限改送 `8gpus`）。
+  - 預估：pack 約 45 分；adj 訓練每半約 35 分、mmi 約 1.5 h（GPU 未實測；帳號 32 卡上限扣他人占用，mmi B 可能等 adj 結束）；抽特徵每臂約 2 h；eval 約 1.5–2 h。adj 結果約 11/12 02:00、mmi 約 03:30。兩臂都抽約 75 GPU-h。
