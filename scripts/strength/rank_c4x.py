@@ -14,22 +14,29 @@ training players. C4x changes the data, not the model / loss / optimiser:
     the mean of the B2 probabilities of the two views. In the final export, each Valid-U player
     (used as fitting data there) is assigned one view at random (seed 2027).
 Arms (separate fine-tunes; each gated by G0 before extraction):
-  gen : generative NLL, 2 epochs                        (C4 objective)
-  mmi : NLL + 1.0 x rank CE over 10 hypotheses, 1 epoch (C4b objective)
+  mmi : NLL + 1.0 x rank CE over all 10 hypotheses, 1 epoch          (C4b objective; reference)
+  adj : NLL + 1.0 x rank CE over {r-1, r, r+1} only, 1 epoch          (aims at neighbouring ranks)
+  gen : generative NLL, 2 epochs (C4 objective; kept in code, not in the 11/11 plan: C4 showed the
+        generative objective does not separate ranks)
 B2 arms: base (current H + C), swap (C replaced by C4, primary), add (H + C + C4, diagnostic).
+Mid-range diagnostics (goal: resolution of 1D/2D, 2D/3D, 3D/4D): the monitor logs the single-game
+d' of the per-move log-likelihood ratio (own / opponent / all moves); evaluate reports, on Valid-U
+questions of k = 1 / 5 / 20, the d' of an LDA fitted on fitting-pool questions (own / opp / all),
+for base and swap.
 
     python -m scripts.strength.rank_c4x tables
     sbatch slurm/rank_c4x_pack.slurm                                    # 8 GPUs (CPU encode)
-    ARM=mmi HALF=A sbatch slurm/rank_c4x_train.slurm                    # x {gen, mmi} x {A, B}
+    ARM=mmi HALF=A sbatch slurm/rank_c4x_train.slurm                    # x {mmi, adj} x {A, B}
     python -m scripts.strength.rank_c4x g0 --arm mmi                     # CPU, reads the logs
     ARM=mmi sbatch slurm/rank_c4x_extract.slurm                          # only if G0 passes
     python -m scripts.strength.rank_c4x evaluate --arm mmi               # G1 (CPU)
     python -m scripts.strength.rank_c4x export --arm mmi --job ID        # LB file <job>-c4x-mmi.csv
 
 Gates (pre-registered, RESULTS 2026-11-11):
-  G0 (fold -1 monitor, per arm, before extraction): single-game score_rank official score of the
-     final checkpoint minus step 0, mean over M_A and M_B >= +0.01, and neither model's final
-     below its step 0. Fail -> no extraction for that arm.
+  G0 (fold -1 monitor, per arm, before extraction): no harm (each model's final single-game
+     official score >= its step 0) and at least one of: official gain (final - step 0, mean over
+     M_A and M_B) >= +0.01, or mid-range d' gain (all moves, mean of the three pairs, mean over
+     the two models) >= +0.05. Fail -> no extraction for that arm.
   G1 (Valid-U, five B2 seeds, base config: fit Valid-S + train20, Valid-S prior): swap minus base.
      promote : five-seed mean Equal-k >= +0.005 on E1 or E2, the other >= 0, and no E2 k bucket
                with five-seed mean < -0.005
@@ -68,7 +75,7 @@ HALVES = ("A", "B")
 PER_PLAYER = 20
 MONITOR, MONITOR_PER_PLAYER = 300, 8
 C_COLS = cv2.C_COLS                 # noA x = [H 30 | C 20 | HD1 flags 2]
-G0_MIN_GAIN = 0.01
+G0_MIN_GAIN, G0_MIN_MID_GAIN = 0.01, 0.05
 G1_PROMOTE, G1_MAX_K_DROP = 0.005, 0.005
 PRIMARY = "swap"
 
@@ -179,10 +186,16 @@ def g0(arm: str) -> dict:
         result["models"][half] = {"step0": mon[0]["monitor_official"], "final": mon[-1]["monitor_official"],
                                   "final_step": mon[-1]["step"], "min": min(e["monitor_official"] for e in mon),
                                   "nll_step0": mon[0]["monitor_nll"], "nll_final": mon[-1]["monitor_nll"],
-                                  "curve": [(e["step"], e["monitor_official"]) for e in mon]}
-    gains = [m["final"] - m["step0"] for m in result["models"].values()]
+                                  **{f"{k}_{when}": e.get(k) for k in ("mid_d_all", "mid_d_own", "mid_d_opp")
+                                     for when, e in (("step0", mon[0]), ("final", mon[-1]))},
+                                  "mid_pairs_step0": mon[0].get("mid_d_pairs"), "mid_pairs_final": mon[-1].get("mid_d_pairs"),
+                                  "curve": [(e["step"], e["monitor_official"], e.get("mid_d_all")) for e in mon]}
+    models = result["models"].values()
+    gains = [m["final"] - m["step0"] for m in models]
     result["mean_gain"] = round(float(np.mean(gains)), 4)
-    result["pass"] = bool(result["mean_gain"] >= G0_MIN_GAIN and min(gains) >= 0)
+    result["mean_mid_gain"] = round(float(np.mean([m["mid_d_all_final"] - m["mid_d_all_step0"] for m in models])), 4)
+    result["pass"] = bool(min(gains) >= 0 and (result["mean_gain"] >= G0_MIN_GAIN
+                                               or result["mean_mid_gain"] >= G0_MIN_MID_GAIN))
     (OUT / f"g0_{arm}.json").write_text(json.dumps(result, indent=1))
     print(json.dumps({k: v for k, v in result.items() if k != "models"} |
                      {h: {k: v for k, v in m.items() if k != "curve"} for h, m in result["models"].items()}))
@@ -248,6 +261,48 @@ def view_scores(model, eval_games, xs: list, q) -> np.ndarray:
     return official_scores(score_rank(p), q["rank_id"].to_numpy())
 
 
+# ------------------------------------------------------------------ mid-range diagnostic
+GROUPS = {"own": list(range(0, 15)) + list(range(30, 40)), "opp": list(range(15, 30)) + list(range(40, 50)),
+          "all": list(range(50))}     # x = [H own 15 | H opp 15 | C own 10 | C opp 10 | HD1 flags 2]
+MID_PAIRS, DIAG_K, DIAG_DRAWS, DIAG_MIN_GAMES = (4, 5, 6), (1, 5, 20), 3, 20
+
+
+def _questions(games: pd.DataFrame, x: np.ndarray, k: int, seed: int):
+    """DIAG_DRAWS mean-of-k questions per player with >= DIAG_MIN_GAMES games (same players for every k)."""
+    rng = np.random.default_rng(seed)
+    feats, labels = [], []
+    for rows in games.groupby(games["player_id"].astype(str)).indices.values():
+        if len(rows) < DIAG_MIN_GAMES:
+            continue
+        for _ in range(DIAG_DRAWS):
+            feats.append(x[rng.choice(rows, k, replace=False)].mean(axis=0))
+            labels.append(int(games["rank_id"].iloc[rows[0]]))
+    return np.array(feats), np.array(labels)
+
+
+def mid_scaling(fit: pd.DataFrame, x_fit: np.ndarray, eval_games: pd.DataFrame, x_eval: np.ndarray) -> dict:
+    """Mid-range question-level d' on Valid-U (HD<=1): per pair an LDA fitted on fitting-pool questions
+    of the same k, applied to Valid-U questions; mean over the three pairs, per feature group and k."""
+    from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+    f_rows = (fit["handicap"] <= 1).to_numpy()
+    e_rows = (eval_games["handicap"] <= 1).to_numpy()
+    out = {}
+    for group, cols in GROUPS.items():
+        out[group] = {}
+        for k in DIAG_K:
+            xa, ya = _questions(fit[f_rows].reset_index(drop=True), x_fit[f_rows][:, cols], k, SEED)
+            xb, yb = _questions(eval_games[e_rows].reset_index(drop=True), x_eval[e_rows][:, cols], k, SEED + 1)
+            ds = []
+            for r in MID_PAIRS:
+                a, b = np.isin(ya, (r, r + 1)), np.isin(yb, (r, r + 1))
+                z = LinearDiscriminantAnalysis().fit(xa[a], ya[a]).transform(xb[b])[:, 0]
+                lo, hi = z[yb[b] == r], z[yb[b] == r + 1]
+                ds.append(abs(hi.mean() - lo.mean()) / np.sqrt((hi.var() + lo.var()) / 2))
+            out[group][str(k)] = round(float(np.mean(ds)), 3)
+        out[group]["k20_over_k1"] = round(out[group]["20"] / out[group]["1"], 2)
+    return out
+
+
 # ------------------------------------------------------------------ G1
 def evaluate(arm: str, base: str) -> None:
     games, fit, eval_games, x_fit, x_eval = base_data(base)
@@ -262,7 +317,10 @@ def evaluate(arm: str, base: str) -> None:
     view_gap = np.abs(views["A"] - views["B"]).mean()
     result = {"arm": arm, "base": base, "fit_games": int(hd01.sum()),
               "c4_minus_c_mean_abs": round(float(shift), 4), "view_a_minus_b_mean_abs": round(float(view_gap), 4),
+              "mid_range": {"base": mid_scaling(fit, x_fit, eval_games, x_eval),
+                            "swap": mid_scaling(fit, xs["swap"][0], eval_games, np.mean(xs["swap"][1], axis=0))},
               "seeds": {}}
+    print(json.dumps({"mid_range": result["mid_range"]}), flush=True)
     for seed in hf.SEEDS:
         hs.SEED = seed
         models = {kind: more.PriorMatched(prior).fit(fit[hd01].reset_index(drop=True), pd.DataFrame(), xf[hd01])
@@ -360,7 +418,7 @@ def export(arm: str, base: str, kind: str, job: str) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("command", choices=["tables", "g0", "evaluate", "export"])
-    parser.add_argument("--arm", choices=["gen", "mmi"])
+    parser.add_argument("--arm", choices=["gen", "mmi", "adj"])
     parser.add_argument("--base", choices=["v1", "v2"], default="v1", help="C of the base (v2 = cvec2 vectors)")
     parser.add_argument("--kind", choices=["swap", "add"], default=PRIMARY, help="export: how C4 enters x")
     parser.add_argument("--job", default="local")

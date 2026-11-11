@@ -22,6 +22,10 @@ C4x (cross-fitted retry, RESULTS 2026-11-11) adds: --vectors (initial rank vecto
 --monitor (a directory of pack_* shards; default <data>/monitor/pack_0 as C4),
 --rank-balance (each position weighted by 1 / its rank's share, so every rank
 weighs the same) and --no-step-checkpoints (only last.pt). Defaults reproduce C4.
+--mmi-adjacent: the rank CE runs over {r-1, r, r+1} of the true rank r only (3 forward passes per
+position, 2 at D / 6D), so the gradient goes to separating neighbouring ranks, which is what
+score_rank and the official metric reward. The monitor also reports the mid-range (1D/2D, 2D/3D,
+3D/4D) single-game d' of the per-move log-likelihood ratio, own / opponent / all moves.
 
     torchrun --standalone --nproc-per-node=8 -m go_aicup.tasks.strength.humansl_finetune \\
         --data outputs/humansl_finetune --out outputs/c4_s2 [--max-positions N] [--resume]
@@ -104,9 +108,36 @@ def all_sum(t: torch.Tensor) -> torch.Tensor:
     return t
 
 
+MID_PAIRS = (4, 5, 6)   # 1D/2D, 2D/3D, 3D/4D
+
+
+def pair_dprime(per_move: np.ndarray, truth: np.ndarray, r: int) -> float:
+    """Signed single-game d' of the log-likelihood ratio log p(r+1) - log p(r) (per-move means)
+    between games of rank r and r+1 (positive = the right direction)."""
+    s = per_move[:, r + 1] - per_move[:, r]
+    a, b = s[truth == r], s[truth == r + 1]
+    if len(a) < 2 or len(b) < 2:
+        return float("nan")
+    return float((b.mean() - a.mean()) / np.sqrt((a.var() + b.var()) / 2))
+
+
+def mid_dprime(totals: np.ndarray, counts: np.ndarray, truth: np.ndarray) -> dict:
+    """totals [games, 2 (own, opp), RANKS] sum of log p; counts [games, 2]. Mid-range (1D-4D) d'."""
+    views = {"own": totals[:, 0] / np.maximum(counts[:, :1], 1), "opp": totals[:, 1] / np.maximum(counts[:, 1:], 1),
+             "all": totals.sum(1) / np.maximum(counts.sum(1, keepdims=True), 1)}
+    out = {}
+    for name, per_move in views.items():
+        pairs = [pair_dprime(per_move, truth, r) for r in MID_PAIRS]
+        out[f"mid_d_{name}"] = round(float(np.nanmean(pairs)), 4)
+        if name == "all":
+            out["mid_d_pairs"] = [round(p, 4) for p in pairs]
+    return out
+
+
 @torch.no_grad()
 def monitor(model: RankPolicy, forward, data: dict, probe: torch.Tensor, rank: int, world: int) -> dict:
-    """NLL under the true rank on probe positions, and single-game official score over all monitor games."""
+    """NLL under the true rank on probe positions, single-game official score over all monitor games,
+    and the mid-range (1D-4D) single-game d' of own / opponent / all moves (C4x)."""
     device = data["bits"].device
     nll = torch.zeros(2, device=device)
     for start in range(0, len(probe), 4096):
@@ -114,7 +145,8 @@ def monitor(model: RankPolicy, forward, data: dict, probe: torch.Tensor, rank: i
         x = rv.unpack(data["bits"][index])
         logits = forward(x, data["globals"][index], data["rank"][index], data["side"][index])
         nll += torch.stack([-legal_logp(logits, x, data["target"][index]).sum(), torch.tensor(len(index), device=device)])
-    totals = torch.zeros((data["games"], rv.RANKS), device=device)
+    totals = torch.zeros((data["games"] * 2, rv.RANKS), device=device)    # slot = game * 2 + side
+    moves = torch.zeros(data["games"] * 2, device=device)
     mine = torch.nonzero(data["game"] % world == rank)[:, 0]
     ranks = torch.arange(rv.RANKS, device=device).repeat(EVAL_POSITIONS)
     for start in range(0, len(mine), EVAL_POSITIONS):
@@ -126,16 +158,21 @@ def monitor(model: RankPolicy, forward, data: dict, probe: torch.Tensor, rank: i
         logits = forward(x, data["globals"][index].repeat_interleave(rv.RANKS, 0), ranks,
                          data["side"][index].repeat_interleave(rv.RANKS, 0))
         logp = legal_logp(logits, x, data["target"][index].repeat_interleave(rv.RANKS, 0)).reshape(-1, rv.RANKS)[:n]
-        totals.index_add_(0, data["game"][index[:n]], logp)
-    nll, totals = all_sum(nll), all_sum(totals)
+        slot = data["game"][index[:n]] * 2 + data["side"][index[:n]]
+        totals.index_add_(0, slot, logp)
+        moves.index_add_(0, slot, torch.ones(n, device=device))
+    nll, totals, moves = all_sum(nll), all_sum(totals), all_sum(moves)
     truth = torch.zeros(data["games"], dtype=torch.long, device=device)
     truth.index_put_((data["game"],), data["rank"])
-    totals, truth = totals.cpu().numpy(), truth.cpu().numpy()
+    sides = totals.reshape(-1, 2, rv.RANKS).cpu().numpy()
+    moves, truth = moves.reshape(-1, 2).cpu().numpy(), truth.cpu().numpy()
+    totals = sides.sum(1)
     prob = np.exp(totals - totals.max(1, keepdims=True))
     decoded = score_rank(prob / prob.sum(1, keepdims=True))
     official = (decoded == truth) + (np.abs(decoded - truth) == 1) / np.e
     return {"monitor_nll": round(float(nll[0] / nll[1]), 5), "monitor_official": round(float(official.mean()), 4),
-            "monitor_accuracy": round(float((totals.argmax(1) == truth).mean()), 4)}
+            "monitor_accuracy": round(float((totals.argmax(1) == truth).mean()), 4),
+            **mid_dprime(sides, moves, truth)}
 
 
 def main(argv=None) -> int:
@@ -160,6 +197,8 @@ def main(argv=None) -> int:
     parser.add_argument("--monitor", type=Path, help="dir of monitor pack_* shards (default <data>/monitor/pack_0)")
     parser.add_argument("--rank-balance", action="store_true", help="weight positions so every rank weighs the same")
     parser.add_argument("--no-step-checkpoints", action="store_true", help="keep only last.pt")
+    parser.add_argument("--mmi-adjacent", action="store_true",
+                        help="with --mmi: the rank CE is over the true rank and its neighbours only (3 hypotheses)")
     args = parser.parse_args(argv)
     rank, world, device = setup()
     args.out.mkdir(parents=True, exist_ok=True)
@@ -217,6 +256,7 @@ def main(argv=None) -> int:
         log({"step": 0, **monitor(model, eval_forward, mon, probe, rank, world)})
     started, window, window_disc, seen, monitor_seconds = time.monotonic(), [], [], 0, 0.0
     hypotheses = torch.arange(rv.RANKS, device=device).repeat(args.batch)
+    ADJACENT = torch.tensor([-1, 0, 1], device=device)
 
     def save(name: str) -> None:
         if rank == 0:
@@ -235,7 +275,23 @@ def main(argv=None) -> int:
                 group["lr"] = lr * scale
             index = order[local_step * args.batch:(local_step + 1) * args.batch]
             x = rv.unpack(data["bits"][index])
-            if args.mmi:
+            if args.mmi and args.mmi_adjacent:
+                truth = data["rank"][index]
+                hyp = (truth[:, None] + ADJACENT).clamp(0, rv.RANKS - 1)               # [B, 3]
+                valid = (truth[:, None] + ADJACENT >= 0) & (truth[:, None] + ADJACENT < rv.RANKS)
+                xr = x.repeat_interleave(len(ADJACENT), 0)
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    logits = train_forward(xr, data["globals"][index].repeat_interleave(len(ADJACENT), 0), hyp.reshape(-1),
+                                           data["side"][index].repeat_interleave(len(ADJACENT), 0))
+                logp = legal_logp(logits, xr, data["target"][index].repeat_interleave(len(ADJACENT), 0)) \
+                    .reshape(-1, len(ADJACENT))
+                weight = rank_weight[truth]
+                nll = -(weight * logp[:, 1]).mean()
+                local = logp.masked_fill(~valid, float("-inf"))
+                discrimination = (weight * -torch.log_softmax(local, dim=1)[:, 1]).mean()
+                loss = nll + args.mmi * discrimination
+                window_disc.append(discrimination.detach())
+            elif args.mmi:
                 xr = x.repeat_interleave(rv.RANKS, 0)
                 with torch.autocast("cuda", dtype=torch.bfloat16):
                     logits = train_forward(xr, data["globals"][index].repeat_interleave(rv.RANKS, 0), hypotheses,
