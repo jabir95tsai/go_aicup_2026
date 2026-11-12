@@ -56,6 +56,11 @@ RELEASE_FILES = {
     "pool_private": "player_identification_candidates_private.csv",
     "pid_public": "player_identification_test_public.csv",
     "pid_private": "player_identification_test_private.csv",
+    # added test set (2026-11-11): 10 games per candidate, k in {1,2,3,5}, both colours
+    "pool2_public": "player_identification_candidates2_public.csv",
+    "pool2_private": "player_identification_candidates2_private.csv",
+    "pid2_public": "player_identification_test2_public.csv",
+    "pid2_private": "player_identification_test2_private.csv",
     "rank_public": "rank_prediction_test_public.csv",
     "rank_private": "rank_prediction_test_private.csv",
 }

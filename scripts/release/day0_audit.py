@@ -36,6 +36,8 @@ from go_aicup.tasks.identity import data
 CACHE = PROCESSED / "boards" / "strength_v1"
 TRAIN_HASH = PROCESSED / "audit" / "train_move_hash.npy"
 SHORT = (16, 60, 100)
+PAIRS = (("pool_public", "pid_public"), ("pool_private", "pid_private"),
+         ("pool2_public", "pid2_public"), ("pool2_private", "pid2_private"))
 
 
 def move_hash(moves: np.ndarray) -> int:
@@ -160,12 +162,17 @@ def audit_release(store_dir: Path, raw_dirs: list[Path], identity_dir: Path | No
     out = {"format": {name: format_report(name, s[1], s[2]) for name, s in stores.items()},
            "handicap": {name: hd_report(name, s[0], s[2]) for name, s in stores.items()}}
     sizes = {}
-    for part in ("public", "private"):
-        if f"pool_{part}" in stores and f"pid_{part}" in stores:
-            questions = stores[f"pid_{part}"][2]["question_id"].nunique()
-            players = stores[f"pool_{part}"][2]["player_id"].nunique()
-            sizes[part] = {"questions": int(questions), "candidates": int(players),
-                           "one_to_one_possible": bool(questions <= players)}
+    for pool_name, q_name in PAIRS:
+        if pool_name in stores and q_name in stores:
+            questions = stores[q_name][2]["question_id"].nunique()
+            pool_meta = stores[pool_name][2]
+            players = pool_meta["player_id"].nunique()
+            per_player = pool_meta.groupby("player_id").size()
+            black = pool_meta.assign(b=pool_meta["color"].astype(str) == "B").groupby("player_id")["b"].sum()
+            sizes[q_name] = {"questions": int(questions), "candidates": int(players),
+                             "one_to_one_possible": bool(questions <= players),
+                             "games_per_candidate": per_player.value_counts().sort_index().to_dict(),
+                             "black_games_per_candidate": black.value_counts().sort_index().to_dict()}
     print("\n[4b] questions vs candidates\n" + json.dumps(sizes, indent=1))
     out["questions_vs_candidates"] = sizes
 
@@ -193,17 +200,18 @@ def audit_release(store_dir: Path, raw_dirs: list[Path], identity_dir: Path | No
     gallery, questions = data.pid_splits(train_meta)
     synthetic = gallery[gallery["split"] == 0]
     train_first = data.opening_prefix(train_meta, 60)[:, 0]
-    for part in ("public", "private"):
-        if f"pool_{part}" not in stores or f"pid_{part}" not in stores:
+    for pool_name, q_name in PAIRS:
+        if pool_name not in stores or q_name not in stores:
             continue
-        pool_first = first_black_move(*stores[f"pool_{part}"])
-        q_first = first_black_move(*stores[f"pid_{part}"])
+        part = q_name
+        pool_first = first_black_move(*stores[pool_name])
+        q_first = first_black_move(*stores[q_name])
         top = pd.Series(pool_first).value_counts(normalize=True).head(5).round(3).to_dict()
         orient[part] = {"tv_raw_query_vs_pool": round(tv(q_first, pool_first), 4),
                         "tv_d4_query_vs_pool": round(tv(orbit(q_first), orbit(pool_first)), 4),
                         "pool_top_first_moves": {str(k): v for k, v in top.items()},
                         "concentration_pool": quantiles(concentration(
-                            pool_first, stores[f"pool_{part}"][2]["player_id"].astype(str).to_numpy())),
+                            pool_first, stores[pool_name][2]["player_id"].astype(str).to_numpy())),
                         "concentration_synthetic_split0": quantiles(concentration(
                             train_first[synthetic["game"].to_numpy()], synthetic["player_id"].to_numpy()))}
     if orient:

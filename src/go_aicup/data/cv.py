@@ -471,3 +471,68 @@ def make_humansl_residual_roles(games: pd.DataFrame, original_folds: pd.DataFram
                 count = int(round(len(members) * .1))
                 players.loc[members[:count], 'role'] = 'M'
     return players
+
+
+# --------------------------------------------------------------------------
+# competition 1, added test set (2026-11-11): 600 candidates x 10 games of both
+# colours, questions of k in {1, 2, 3, 5} games, several questions may share a player
+# --------------------------------------------------------------------------
+
+PID2_POOL = 600
+PID2_GALLERY = 10
+PID2_K = (1, 2, 3, 5)
+PID2_QUESTIONS = 400
+PID2_BANK = 40
+
+
+def make_pid2_bank(meta: pd.DataFrame, handicap: np.ndarray, gallery: pd.DataFrame,
+                   bank: int = PID2_BANK, seed: int = SEED) -> pd.DataFrame:
+    """Game bank for the added-set bench: pool, player_id, game, order.
+
+    Players are those of synthetic splits 0-2 (never seen by the GE2E encoder), cut
+    into two disjoint pools of PID2_POOL (fewer when
+    not enough players have `bank` such games). Each player gets `bank` random games of
+    either colour with HD <= 1 (the official files have no HD >= 2 game); `order` is
+    the random order `draw_pid2` permutes again per draw.
+    """
+    rng = np.random.default_rng(seed + 2)
+    players = np.array(sorted(gallery.loc[gallery["split"].isin([0, 1, 2]), "player_id"].unique()))
+    rows = meta.groupby(meta["player_id"].astype(str), observed=True).indices
+    usable = {p: rows[p][handicap[rows[p]] <= 1] for p in players}
+    players = rng.permutation([p for p in players if len(usable[p]) >= bank])
+    size = min(PID2_POOL, len(players) // 2)      # a few players have mostly HD >= 2 games
+    out = []
+    for i, player in enumerate(players[:2 * size]):
+        chosen = rng.choice(usable[player], size=bank, replace=False)
+        out.append(pd.DataFrame({"pool": i // size, "player_id": player, "game": chosen,
+                                 "order": np.arange(bank)}))
+    return pd.concat(out, ignore_index=True)
+
+
+def draw_pid2(bank: pd.DataFrame, pool: int, seed: int):
+    """One bench draw -> (candidates, gallery game lists, questions frame).
+
+    Every candidate keeps PID2_GALLERY gallery games; each of the PID2_QUESTIONS
+    questions picks a candidate uniformly with replacement and takes k of that
+    player's unused non-gallery games, so query and gallery games never overlap and
+    two questions of one player share no game.
+    """
+    rng = np.random.default_rng([seed, pool])
+    part = bank[bank["pool"] == pool]
+    candidates = np.array(sorted(part["player_id"].unique()))
+    games = {p: rng.permutation(g["game"].to_numpy()) for p, g in part.groupby("player_id")}
+    used = {p: PID2_GALLERY for p in candidates}
+    gallery = [np.sort(games[p][:PID2_GALLERY]) for p in candidates]
+    ks = rng.permutation(np.repeat(PID2_K, PID2_QUESTIONS // len(PID2_K)))
+    questions = []
+    for qid, k in enumerate(ks):
+        while True:
+            player = candidates[rng.integers(len(candidates))]
+            if used[player] + k <= len(games[player]):
+                break
+        query = games[player][used[player]:used[player] + k]
+        used[player] += int(k)
+        questions.append({"question_id": qid, "player_id": player, "k": int(k), "games": np.sort(query)})
+    frame = pd.DataFrame(questions)
+    assert not set(np.concatenate(gallery).tolist()) & set(np.concatenate(frame["games"].to_list()).tolist())
+    return candidates, gallery, frame

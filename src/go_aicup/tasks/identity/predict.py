@@ -219,9 +219,8 @@ def main(argv=None) -> int:
     np.save(args.out_dir / "candidates.npy", candidates)
     table.to_parquet(args.out_dir / "predictions.parquet", index=False)
     (args.out_dir / "info.json").write_text(json.dumps(info, indent=2))
-    # Provisional format; replace once the official sample_submission is out.
-    submission = table[["question_id"]].assign(
-        prediction=table[[f"top{j}" for j in range(1, 6)]].agg(" ".join, axis=1))
+    # Official format (2026-11-11 sample_submission_player_v2.csv): question_id, top_1..top_5.
+    submission = table[["question_id"]].assign(**{f"top_{j}": table[f"top{j}"] for j in range(1, 6)})
     path = args.submission or args.out_dir / "submission.csv"
     path.parent.mkdir(parents=True, exist_ok=True)
     submission.to_csv(path, index=False)

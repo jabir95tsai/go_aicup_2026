@@ -57,6 +57,7 @@
 
 → LB 窗口原為 **21 天 × 5 次 = 每賽 105 次上傳**。11/04 前的所有決策只能靠本地驗證。
 → **競賽一（2026-11-07 依官方 11/06 公告更新）：** 有效窗口縮為 11/11 11:00–11/24，**14 天 × 5 = 最多 70 次**；排行榜已清空，最終仍以最後一次上傳計分。新增題目的內容未知；若候選庫仍為 400 人而題數增加，則必定**不是一對一**（指派維持關閉，`_hungarian`／`_sinkhorn` 探針可能失效）。截至 11/07，本機（Nano4）沒有任何競賽一真實候選庫或測試檔，Day-0 稽核尚未執行。
+→ **競賽一 11/11 官方公告（2026-11-12 回填，《更新版測試集資料及提交說明》）：** 排行榜全面重置、舊提交不計分。題目包＝原測試集（`pub_`／`priv_`，不變）＋新增測試集（`pub2_`／`priv2_`）。新增集：候選庫 `player_identification_candidates2_{public,private}.csv` **每人只有 10 盤、黑白都有**（`color`＝該玩家實際執色）；測試題 `player_identification_test2_{public,private}.csv` 各 400 題，**k ∈ {1,2,3,5} 各 100 題、黑白混合**。官方明文「同一玩家可能對應多題、候選庫可能有不對應任何題目的玩家」→ **新增集確定不是一對一**。提交格式見第 0 節「仍待確認」表。**11/12 資料到手並完成 Day-0 稽核（`RESULTS.md` 11/12）：** 新增集候選庫為 **600 人 × 10 盤**（每人黑棋 0–10 盤、平均約 5）；八個競賽一檔案 HD 只有 0／1、**沒有 HD≥2**；原測試集題目未被旋轉、候選人第一手集中度與合成庫相同，top-1 幾乎各指向不同的人（396／395 個不同候選人）→ 原測試集很可能一對一。第一份合法保底檔 `submissions/pid/756494-floor.csv`（新增集只用黑棋盤，約 25% 題目無黑棋而 0 分）；新增集的雙色模型尚未實作。
 → **競賽二：** 公告頁只有 11/02 的 HD 訓練資料更新，沒有換測試集公告，11/04 測試檔視為仍有效；11/06 暫停未波及競賽二：當天 13:03、16:24 仍成功上傳並計分（`RESULTS.md` 11/08 補登）。
 
 ### 計分 / 排名 ✅
@@ -135,7 +136,7 @@ H200 佇列限制**每張 GPU 最多 12 CPU 核心、200GB 主記憶體**；200G
 
 | 項目 | 為什麼重要 | 何時／去哪查 |
 |------|-----------|---------|
-| 提交檔格式（欄位、public/private 題是否同一檔、top-5 分隔方式、rank 用字串還是編號） | 格式錯 = 浪費一次上傳 | 競賽二已確認：Public＋Private 合併一份 800 列、`question_id,pred_rank`、級別字串（`data/raw/tests/sample_submission_rank.csv`）；**競賽一延至 11/11 公布**（原有＋新增題） |
+| 提交檔格式（欄位、public/private 題是否同一檔、top-5 分隔方式、rank 用字串還是編號） | 格式錯 = 浪費一次上傳 | 競賽二已確認：Public＋Private 合併一份 800 列、`question_id,pred_rank`、級別字串（`data/raw/tests/sample_submission_rank.csv`）；**競賽一已確認（11/11 公告）：** 單一 `submission_player.csv`、1,600 列（`pub_`／`priv_`／`pub2_`／`priv2_` 各 400）、欄位 `question_id,top_1,top_2,top_3,top_4,top_5`，ID 原樣照抄且 player_id 前綴須與 question_id 一致、同題 5 人不重複、不可缺題／重複題／未知題，否則整份不計分；前綴正確但不在候選庫的 ID 只是該名次不算 |
 | Public LB 用的是 public 題、Private LB 用的是 private 題？（推測是） | 決定 public 分數對 private 的代表性 | 11/04 / 討論區 |
 | 測試集 rank 是否平衡（每級 40 題？） | L4 先驗校正能不能用 | 無法直接看，用預測分布反推 |
 | 競賽一 baseline 為何只有 0.28（見上方警訊） | 決定合成驗證能不能信 | 11/04 測試集 + 真實候選庫 EDA |
@@ -157,6 +158,8 @@ H200 佇列限制**每張 GPU 最多 12 CPU 核心、200GB 主記憶體**；200G
 | `player_identification_candidates_private.csv` | 競賽一 Private 候選庫 | 同上，**另外 400 人** | 同上 |
 | `player_identification_test_public.csv` | 競賽一 Public 測試題 | 400 題 | `question_id, num_games, sgf_1..sgf_20, color_1..color_20(恆 B)` |
 | `player_identification_test_private.csv` | 競賽一 Private 測試題 | 400 題 | 同上 |
+| `player_identification_candidates2_{public,private}.csv` | 競賽一新增集候選庫（11/11） | **每人 10 盤、黑白都有**；人數未公布（可有不對應任何題的玩家） | `game_id, player_id, sgf_content, color(B/W)` |
+| `player_identification_test2_{public,private}.csv` | 競賽一新增集測試題（11/11） | 各 400 題，**k ∈ {1,2,3,5}** 各 100 題、黑白混合 | `question_id, num_games, sgf_1..sgf_20, color_1..color_20(B/W)` |
 | `rank_prediction_test_public.csv` | 競賽二 Public 測試題 | 400 題 | `question_id, num_games, sgf_1..sgf_20, color_1..color_20` |
 | `rank_prediction_test_private.csv` | 競賽二 Private 測試題 | 400 題 | 同上 |
 
