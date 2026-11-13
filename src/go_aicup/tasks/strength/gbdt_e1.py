@@ -1,7 +1,7 @@
 """E1: hand-crafted per-game stats + LightGBM (competition 2).
 
 Same features, questions and player-disjoint split as the A-005/A-006 linear
-probe (scripts/eda_report.py section_probe); one variable changes per variant.
+probe (scripts/data/eda_report.py section_probe); one variable changes per variant.
   eval = rank_questions f4 + holdout (14,000 questions, players never trained on)
 Variants:
   lr         LR on f0-f3 question means (reproduces A-006 0.412)

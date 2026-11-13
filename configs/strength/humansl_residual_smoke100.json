@@ -1,0 +1,99 @@
+{
+  "format_version": 1,
+  "seed": 2026,
+  "split_seed": 2027,
+  "smoke": true,
+  "run_dir": "outputs/rank/humansl_residual_b2/smoke100_seed2026",
+  "data": {
+    "store_dir": "data/processed/boards/strength_v1",
+    "metadata_path": "data/processed/boards/strength_v1/games.parquet",
+    "handicap_path": "data/raw/training/handicap.csv",
+    "folds_path": "data/processed/cv/strength_folds_seed2027.parquet",
+    "legacy_split_paths": [
+      "outputs/rank/humansl/humansl_q1000/games.parquet",
+      "outputs/rank/humansl/humansl_qsel/games.parquet",
+      "outputs/rank/humansl/humansl_vs_rest/games.parquet"
+    ],
+    "prepared_dir": "data/processed/humansl_residual_b2/seed2027",
+    "teacher_dir": "data/processed/humansl_residual_b2/teacher_v1"
+  },
+  "model": {
+    "human_checkpoint": "data/external/humansl-v0/b18c384nbt-humanv0.ckpt",
+    "channels": 256,
+    "blocks": 10
+  },
+  "device": "cuda",
+  "precision": "bf16",
+  "training": {
+    "groups_per_update": 128,
+    "positions_per_side": 15,
+    "microbatch_groups": 1,
+    "workers": 4,
+    "prefetch_factor": 1,
+    "optimizer": "adamw",
+    "weight_decay": 0.0001,
+    "betas": [
+      0.9,
+      0.999
+    ],
+    "eps": 1e-08,
+    "checkpoint_every": 25,
+    "sync_batch_norm": true,
+    "channels_last": true,
+    "cudnn_benchmark": false,
+    "deterministic": false,
+    "allow_tf32": false
+  },
+  "stage1": {
+    "updates": 100,
+    "lr": 0.001,
+    "lr_schedule": [],
+    "lr_decay": "none",
+    "min_lr_ratio": 0.0,
+    "monitor_every": 100
+  },
+  "stage2": {
+    "updates": 100,
+    "lr": 0.001,
+    "lr_schedule": [],
+    "lr_decay": "none",
+    "min_lr_ratio": 0.0,
+    "monitor_every": 100
+  },
+  "monitoring": {
+    "patience": 3,
+    "questions_per_cell": 125
+  },
+  "b2": {
+    "questions_per_k": 20000,
+    "fit_pool": "fit_all",
+    "fit_all_cap_per_color": 20,
+    "aggregation": "logp",
+    "arms": [
+      "new"
+    ]
+  },
+  "evaluation": {
+    "batch_size": 300,
+    "bootstrap": 2000
+  },
+  "teacher": {
+    "engine": "data/external/katago-v1.18.2/katago",
+    "model_path": "data/external/kata1-b18c384nbt-s9996604416/kata1-b18c384nbt-s9996604416-d4316597426.bin.gz",
+    "analysis_config": "configs/strength/se_value_analysis.cfg",
+    "visits": 1,
+    "timeout": 120,
+    "num_shards": 8,
+    "se3_reuse": {
+      "dataset_dir": "data/processed/reproduce_paper/seed2026",
+      "value_path": "data/processed/reproduce_paper/value_v1/train/value.npy",
+      "recovery_path": "outputs/value_resume_672603_recovery.json",
+      "training_identity_path": "outputs/rank/reproduce_paper_3/se3_seed2026_15pos/data_identity.json"
+    }
+  },
+  "baseline": {
+    "updates": 100,
+    "batch_positions": 128,
+    "lr": 0.01
+  }
+}

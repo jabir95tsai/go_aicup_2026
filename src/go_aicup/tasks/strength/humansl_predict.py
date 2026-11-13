@@ -13,6 +13,10 @@
                model: <work>/rankvec/shard_*) are left out of their question;
                a question with none falls back to --fallback (default the V2 C2
                prediction; the AH+C path falls back to the AH predictions).
+               A model whose columns end with hd1_black / hd1_white (P1+P2,
+               HANDICAP_V11.md) also needs --raw-csv, the official question file
+               the work directory was built from: HD[n] of every game is read
+               there (the store keeps property names only).
 
     python -m go_aicup.tasks.strength.humansl_predict fit --method B2 [--rankvec]
     python -m go_aicup.tasks.strength.humansl_predict aggregate --work outputs/rank_submit/rank_public \\
@@ -22,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 
 import numpy as np
@@ -35,13 +40,15 @@ from go_aicup.paths import PROCESSED, ROOT
 from go_aicup.tasks.strength.humansl import RankModel
 from go_aicup.tasks.strength.v2.predict import question_table
 
-MODEL = ROOT / "outputs" / "humansl_model" / "model.pkl"
-RANKVEC_MODEL = ROOT / "outputs" / "humansl_rankvec_model" / "model.pkl"
+MODEL = ROOT / "outputs" / "rank" / "humansl" / "humansl_model" / "model.pkl"
+RANKVEC_MODEL = ROOT / "outputs" / "rank" / "humansl" / "humansl_rankvec_model" / "model.pkl"
 RANKVEC_RUNS = (ROOT / "outputs" / "humansl_rankvec_feat", ROOT / "outputs" / "humansl_rankvec_feat_vu")
 FIT_RUNS = (ROOT / "outputs" / "humansl_q1000", ROOT / "outputs" / "humansl_qsel", ROOT / "outputs" / "humansl_vs_rest")
 FIT_ROLES = ("S-fit", "S-select", "S-extra")   # Valid-U is never fitted
-A024 = ROOT / "outputs" / "v2_strength"
+A024 = ROOT / "outputs" / "rank" / "v2" / "v2_strength"
 DATASET = PROCESSED / "strength_v2" / "seed2027"
+HD1_COLUMNS = ["hd1_black", "hd1_white"]
+HD_RE = re.compile(r"HD\[(\d+)\]")
 
 
 def a024_per_game(category: np.ndarray) -> pd.DataFrame:
@@ -58,6 +65,30 @@ def features(a024: pd.DataFrame, human: pd.DataFrame, rankvec: pd.DataFrame | No
     if rankvec is not None:
         table = table.join(rankvec.set_index("game_index").add_prefix("c_"), how="inner")
     return table
+
+
+def hd1_features(work: Path, raw_csv: Path) -> pd.DataFrame:
+    """Per cache game: [HD1 and player black, HD1 and player white] from HD[n] in the raw
+    question file. HD>=2 is rejected: its move labels are reversed (Q&A Q13) and the
+    model was fitted on HD<=1 games only."""
+    meta = pd.read_parquet(work / "store_meta.parquet")
+    games = pd.read_parquet(work / "cache" / "games.parquet")
+    raw = pd.read_csv(raw_csv, dtype=str, keep_default_na=False).set_index("question_id")
+    rows = meta.iloc[games["store_row"].to_numpy()]
+    handicap = []
+    for question_id, slot, color in zip(rows["question_id"], rows["slot"], rows["color"].astype(str)):
+        if raw.at[question_id, f"color_{slot}"] != color:
+            raise ValueError(f"{question_id} slot {slot}: colour differs from {raw_csv.name}")
+        found = HD_RE.findall(raw.at[question_id, f"sgf_{slot}"])
+        if len(found) != 1:
+            raise ValueError(f"{question_id} slot {slot}: expected one HD[n], found {len(found)}")
+        handicap.append(int(found[0]))
+    handicap = np.array(handicap)
+    if (handicap >= 2).any():
+        raise ValueError(f"{int((handicap >= 2).sum())} games with HD>=2; the HD1 model covers HD<=1 only")
+    black = (rows["color"].astype(str) == "B").to_numpy()
+    return pd.DataFrame({"hd1_black": (handicap == 1) & black, "hd1_white": (handicap == 1) & ~black},
+                        index=games["game_index"].to_numpy()).astype(float)
 
 
 def rankvec_features(runs) -> pd.DataFrame:
@@ -106,13 +137,18 @@ def release_features(run: Path) -> pd.DataFrame:
 
 
 def aggregate(work: Path, model_path: Path, submission: Path | None,
-              predictions: str = "humansl_predictions.parquet", fallback: str = "predictions.parquet") -> pd.DataFrame:
+              predictions: str = "humansl_predictions.parquet", fallback: str = "predictions.parquet",
+              raw_csv: Path | None = None) -> pd.DataFrame:
     """fallback: predictions file inside work (p_<rank> columns) for questions without usable games."""
     model, info = RankModel.load(model_path)
     with_c = any(c.startswith("c_") for c in info["columns"])
     table = features(a024_per_game(np.load(work / "category.npy", allow_pickle=False)),
                      release_features(work / "humansl"),
                      rankvec_features([work / "rankvec"]) if with_c else None)
+    if info["columns"][-len(HD1_COLUMNS):] == HD1_COLUMNS:
+        if raw_csv is None:
+            raise ValueError("this model uses HD1 columns: pass --raw-csv")
+        table = table.join(hd1_features(work, raw_csv), how="inner")
     if len(table) and list(table.columns) != info["columns"]:
         raise ValueError("feature columns differ from the fitted model")
     questions = question_table(work)
@@ -157,11 +193,12 @@ def main(argv=None) -> int:
     a.add_argument("--submission", type=Path)
     a.add_argument("--predictions", default="humansl_predictions.parquet", help="file name inside --work")
     a.add_argument("--fallback", default="predictions.parquet", help="file inside --work for questions without games")
+    a.add_argument("--raw-csv", type=Path, help="official question CSV of --work (models with HD1 columns)")
     args = parser.parse_args(argv)
     if args.command == "fit":
         fit(args.method, args.out or (RANKVEC_MODEL if args.rankvec else MODEL), args.rankvec)
     else:
-        aggregate(args.work, args.model, args.submission, args.predictions, args.fallback)
+        aggregate(args.work, args.model, args.submission, args.predictions, args.fallback, args.raw_csv)
     return 0
 
 

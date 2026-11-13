@@ -44,7 +44,7 @@ python -m go_aicup.tasks.strength.v1.train --config configs/strength/rank_cnn_v1
 python -m go_aicup.tasks.strength.v1.evaluate --run-dir outputs/rank_cnn_v1_seed2027
 ```
 
-根目錄的舊轉接檔已移除，僅保留套件用的 `__init__.py`。命令與 import 統一使用上述 `shared` 或 `v1` 路徑；例如 `strength.train_rank_v1` 改用 `strength.v1.train`，`strength.dataset` 改用 `strength.shared.dataset`，設定讀取改用 `strength.v1.config`。`scripts/plot_rank_v1.py` 與 `configs/strength/rank_cnn_v1_seed*.json` 皆屬 V1 專用。
+根目錄的舊轉接檔已移除，僅保留套件用的 `__init__.py`。命令與 import 統一使用上述 `shared` 或 `v1` 路徑；例如 `strength.train_rank_v1` 改用 `strength.v1.train`，`strength.dataset` 改用 `strength.shared.dataset`，設定讀取改用 `strength.v1.config`。`scripts/strength/plot_rank_v1.py` 與 `configs/strength/rank_cnn_v1_seed*.json` 皆屬 V1 專用。
 
 程式搬移後，新資料準備紀錄與 checkpoint 的 code fingerprint 會記錄新實作位置。既有已完成資料可由 `load_dataset_manifest` 讀取，既有模型 state dict 與續跑格式保留；若對舊 processed 目錄重新執行 prepare，原有 generator hash 防護仍會要求改用新目錄，不覆寫舊資料。
 
@@ -91,3 +91,8 @@ python -m go_aicup.tasks.strength.v2.evaluate --run-dir outputs/v2_strength
 ```
 
 切分：`data.cv.make_strength_v2_split` 的 fold 0＝Valid-U（未見玩家），fold 1–4＝train 並每玩家顏色組留出 10%＝Valid-S，fold −1 不使用。每 200 steps 與最後一步監控 `monitor_unseen`／`monitor_seen`（每級各 2,500 整盤）。成功的 run 目錄只留 `model.pt`、`losses.npy`、`validation_unseen_category.npy`、`validation_seen_category.npy`，評估圖在 `plot/`。`evaluate` 的題目規則（每盤平均機率、題內 1/k、`metrics.score_rank`）只作 10/19 舊規則對照；V2 正式解碼已改為 C2（D-002，`predict.py`），競賽二首選已改為 HumanSL AH＋C（A-055／A-056，見 CLAUDE.md 第 11 節第 6 項）。CUDA 驗收測試 `tests/test_strength_v2_cuda.py` 需在配置 2 張 GPU 的計算節點執行。
+
+
+## SE3 分類實驗
+
+獨立的 18-block／十級 CE＋policy／value、每盤十五位置、固定題組 early stopping 實作與操作見 [reproduce_paper_3/README.md](reproduce_paper_3/README.md)。CPU／Gloo 工程驗收已完成，八卡短測與正式分數尚未取得；使用獨立 `se3_*.json` 與輸出目錄。

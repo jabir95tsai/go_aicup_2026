@@ -9,7 +9,7 @@ SIGTERM/SIGINT; rerunning the same command resumes from it.
 After the last step, every gallery and question game of config["eval_splits"]
 is embedded with ALL its black moves from ply 20 on, and rank 0 writes
 embeddings_split{n}.npz (game_index, vector = mean move embedding) next to
-model.pt. Scoring is CPU-only: scripts/identity_ge2e_eval.py.
+model.pt. Scoring is CPU-only: scripts/identity/identity_ge2e_eval.py.
 
     torchrun --standalone --nproc-per-node=8 -m go_aicup.tasks.identity.train_ge2e \\
         --config configs/identity/pid_ge2e_v1_short.json
@@ -32,7 +32,7 @@ from torch.nn.parallel import DistributedDataParallel
 from go_aicup.data.board_cache import BoardCache, assemble_inputs
 from go_aicup.paths import ROOT
 from go_aicup.tasks.identity import data
-from go_aicup.tasks.identity.ge2e import GE2EBatches, IdentityEncoder, ge2e_loss, own_plies
+from go_aicup.tasks.identity.ge2e import MIN_PLY, GE2EBatches, IdentityEncoder, ge2e_loss, own_plies
 from go_aicup.tasks.strength.shared.runtime import autocast_context, distributed, setup_distributed
 from go_aicup.tasks.strength.shared.training import (configure_torch, environment, log_event,
                                                      scheduler_for, seed_process)
@@ -52,14 +52,23 @@ def read_config(path: Path) -> dict:
     return config
 
 
-def training_players(config: dict) -> tuple[list[np.ndarray], np.ndarray, int]:
+def training_players(config: dict):
+    """(game lists per player, lengths, held-out players, player colour per game or None).
+
+    config["sampling"] = {"colors": "both", "min_ply": n} trains on the player's own moves in
+    games of either colour (white moves colour-swapped); absent = black games, ply >= MIN_PLY."""
     meta = data.load_meta()
     gallery, _ = data.pid_splits(meta)
     held = set(gallery.loc[gallery["split"].isin(config["exclude_splits"]), "player_id"])
-    black = meta[(meta["color"].astype(str) == "B") & ~meta["player_id"].astype(str).isin(held)]
-    groups = black.groupby(black["player_id"].astype(str), observed=True)["game_index"].apply(np.asarray)
+    both = config.get("sampling", {}).get("colors", "black") == "both"
+    keep = ~meta["player_id"].astype(str).isin(held)
+    if not both:
+        keep &= meta["color"].astype(str) == "B"
+    games = meta[keep]
+    groups = games.groupby(games["player_id"].astype(str), observed=True)["game_index"].apply(np.asarray)
     player_games = [g for g in groups if len(g) >= config["batch"]["games"]]
-    return player_games, meta["length"].to_numpy(), len(held)
+    color = meta["player_color"].to_numpy().astype(np.int8) if both else None
+    return player_games, meta["length"].to_numpy(), len(held), color
 
 
 class EvalChunks(torch.utils.data.Dataset):
@@ -145,7 +154,7 @@ def main(argv=None) -> int:
         out.mkdir(parents=True, exist_ok=True)
         (out / "config.json").write_text(json.dumps(config, indent=2))
         (out / "environment.json").write_text(json.dumps(environment(device, world), indent=2))
-    player_games, lengths, held = training_players(config)
+    player_games, lengths, held, player_color = training_players(config)
     batch, training = config["batch"], config["training"]
     if batch["players"] > len(player_games):
         raise ValueError("not enough training players for one GE2E group")
@@ -188,7 +197,9 @@ def main(argv=None) -> int:
     dataset = GE2EBatches(config["paths"]["cache_dir"], player_games, lengths, players=batch["players"],
                           games=batch["games"], moves=batch["moves"], steps=training["steps"],
                           seed=config["seed"], rank=rank, start_step=start,
-                          max_open_shards=config["loader"]["max_open_shards"])
+                          max_open_shards=config["loader"]["max_open_shards"], player_color=player_color,
+                          min_ply=config.get("sampling", {}).get("min_ply", MIN_PLY),
+                          player_d4=config.get("sampling", {}).get("player_d4", False))
     workers = config["loader"]["num_workers"]
     loader = torch.utils.data.DataLoader(dataset, batch_size=None, num_workers=workers, pin_memory=True,
                                          prefetch_factor=config["loader"]["prefetch_factor"] if workers else None,

@@ -113,7 +113,7 @@ def _games(path: Path, shard: int, num_shards: int, limit: int | None):
     return table.iloc[:limit] if limit else table
 
 
-def pack(table: pd.DataFrame, out: Path, cache: Path, workers: int) -> dict:
+def pack(table: pd.DataFrame, out: Path, cache: Path, workers: int, komi: float | None = None) -> dict:
     out.mkdir(parents=True, exist_ok=True)
     table.reset_index(drop=True).to_parquet(out / "games.parquet")
     _katago()
@@ -123,7 +123,7 @@ def pack(table: pd.DataFrame, out: Path, cache: Path, workers: int) -> dict:
     games = cache_games(table["game_index"], cache)
     parts = {"bits": [], "globals": [], "target": [], "own": [], "game": []}
     started = time.monotonic()
-    with mp.get_context("spawn").Pool(workers, initializer=_init_worker, initargs=(config,)) as pool:
+    with mp.get_context("spawn").Pool(workers, initializer=_init_worker, initargs=(config, komi)) as pool:
         for g, (bins, globals_, played) in enumerate(pool.imap(encode_game, games, chunksize=4)):
             if bins.shape[1] != PLANES:
                 raise ValueError(f"expected {PLANES} input planes, got {bins.shape[1]}")
@@ -137,7 +137,7 @@ def pack(table: pd.DataFrame, out: Path, cache: Path, workers: int) -> dict:
     seconds = time.monotonic() - started
     positions = int(sum(len(t) for t in parts["target"]))
     meta = {"games": len(table), "positions": positions, "seconds": round(seconds, 1),
-            "positions_per_second": round(positions / seconds, 1)}
+            "positions_per_second": round(positions / seconds, 1), "komi": 6.5 if komi is None else komi}
     (out / "meta.json").write_text(json.dumps(meta, indent=1))
     return meta
 
@@ -243,24 +243,42 @@ def _monitor_games(run: Path, model, vectors, data, monitor) -> dict:
             "score_rank_official": round(float(((decoded == truth) + (np.abs(decoded - truth) == 1) / np.e).mean()), 4)}
 
 
-def extract(table: pd.DataFrame, vectors_path: Path, out: Path, cache: Path, workers: int,
-            batch_positions: int = 409) -> dict:
+def load_finetuned(model, path: Path, device):
+    """Load a humansl_finetune checkpoint (RankPolicy state: net.* and vectors) into the frozen
+    network; returns its rank vectors."""
+    import torch
+    state = torch.load(path, map_location=device)["model"]
+    net = {k.removeprefix("net."): v for k, v in state.items() if k.startswith("net.")}
+    model.load_state_dict(net, strict=True)
+    return state["vectors"].detach()
+
+
+def extract(table: pd.DataFrame, vectors_path: Path | None, out: Path, cache: Path, workers: int,
+            batch_positions: int = 409, komi: float | None = None, finetuned: Path | None = None,
+            per_move: bool = False) -> dict:
     """Positions of consecutive games are pooled into fixed batches (batch_positions x RANKS
-    evaluations) for torch.compile: 10.5k vs 4.5k evaluations/s eager on an H200 (A-055)."""
+    evaluations) for torch.compile: 10.5k vs 4.5k evaluations/s eager on an H200 (A-055).
+    finetuned: a humansl_finetune checkpoint (network weights and vectors) instead of vectors_path.
+    per_move: also save every position's log p (move_logp.npy float16 [N, RANKS], move_slot.npy
+    = 2 * game row + (0 own / 1 opponent), move_ply.npy), in game then ply order."""
     import torch
     out.mkdir(parents=True, exist_ok=True)
     table.reset_index(drop=True).to_parquet(out / "games.parquet")
     device = torch.device("cuda")
     model, _ = load_frozen(device)
+    if finetuned is not None:
+        vectors = load_finetuned(model, finetuned, device)
+    else:
+        vectors = torch.load(vectors_path, map_location=device)["vectors"]
     forward = torch.compile(model, dynamic=False)
-    vectors = torch.load(vectors_path, map_location=device)["vectors"]
     games = cache_games(table["game_index"], cache)
     sums = torch.zeros((len(table) * 2, RANKS), device=device)
     counts = np.zeros(len(table) * 2, dtype=np.int64)
     pending: list[tuple] = []
+    moves: list[tuple] = []
 
     def flush(final: bool) -> list[tuple]:
-        bins, globals_, played, own, slot = (np.concatenate(a) for a in zip(*pending))
+        bins, globals_, played, own, slot, ply = (np.concatenate(a) for a in zip(*pending))
         while len(played) >= batch_positions or (final and len(played)):
             n = min(batch_positions, len(played))
             chunk = [a[:n] for a in (bins, globals_, played, own)]
@@ -269,18 +287,21 @@ def extract(table: pd.DataFrame, vectors_path: Path, out: Path, cache: Path, wor
             logp = game_logp(forward, vectors, *chunk, batch=batch_positions * RANKS)[:n]
             sums.index_add_(0, torch.as_tensor(slot[:n], device=device), logp)
             np.add.at(counts, slot[:n], 1)
-            bins, globals_, played, own, slot = (a[n:] for a in (bins, globals_, played, own, slot))
-        return [(bins, globals_, played, own, slot)] if len(played) else []
+            if per_move:
+                moves.append((slot[:n].astype(np.int32), ply[:n], logp.cpu().numpy().astype(np.float16)))
+            bins, globals_, played, own, slot, ply = (a[n:] for a in (bins, globals_, played, own, slot, ply))
+        return [(bins, globals_, played, own, slot, ply)] if len(played) else []
 
     started = last = time.monotonic()
     positions = waiting = 0
-    with mp.get_context("spawn").Pool(workers, initializer=_init_worker, initargs=(model.config,)) as pool:
+    with mp.get_context("spawn").Pool(workers, initializer=_init_worker, initargs=(model.config, komi)) as pool:
         for g, encoded in enumerate(pool.imap(_encode_or_none, games, chunksize=4)):
             own = games[g][1] == table["player_color"].iloc[g]
             if encoded is None or not own.any() or own.all():
                 continue
             bins, globals_, played = encoded
-            pending.append((bins, globals_, played, own, 2 * g + (~own).astype(np.int64)))
+            pending.append((bins, globals_, played, own, 2 * g + (~own).astype(np.int64),
+                            np.arange(len(played), dtype=np.int16)))
             positions += len(played)
             waiting += len(played)
             if waiting >= batch_positions:
@@ -300,10 +321,15 @@ def extract(table: pd.DataFrame, vectors_path: Path, out: Path, cache: Path, wor
     feature = np.where(done[:, None], mean, 0).astype(np.float32)
     np.save(out / "feature.npy", feature)
     np.save(out / "done.npy", done)
+    if per_move:
+        for name, part in zip(("move_slot", "move_ply", "move_logp"), zip(*moves)):
+            np.save(out / f"{name}.npy", np.concatenate(part))
     meta = {"columns": [f"own_r{r}" for r in range(RANKS)] + [f"opp_r{r}" for r in range(RANKS)],
             "games": len(table), "games_complete": int(done.sum()), "positions": positions,
             "seconds": round(seconds, 1), "positions_per_second": round(positions / seconds, 1),
-            "vectors": str(vectors_path), "precision": "tf32, torch.compile"}
+            "vectors": str(vectors_path), "finetuned": None if finetuned is None else str(finetuned),
+            "precision": "tf32, torch.compile", "per_move": per_move,
+            "komi": 6.5 if komi is None else komi}
     (out / "meta.json").write_text(json.dumps(meta, indent=1))
     return meta
 
@@ -338,6 +364,9 @@ def main(argv=None) -> int:
     parser.add_argument("--lr", type=float, default=3e-3)
     parser.add_argument("--monitor-positions", type=int, default=50_000)
     parser.add_argument("--every", type=int, default=500)
+    parser.add_argument("--komi", type=float, help="pack / extract: white komi of the input features (default rules: 6.5)")
+    parser.add_argument("--per-move", action="store_true", help="extract: also save per-position log p")
+    parser.add_argument("--finetuned", type=Path, help="extract: humansl_finetune checkpoint (weights + vectors)")
     args = parser.parse_args(argv)
     if args.command == "train":
         result = train(args.run, epochs=args.epochs, batch=args.batch, lr=args.lr,
@@ -346,9 +375,10 @@ def main(argv=None) -> int:
         return 0
     table = _games(args.games, args.shard, args.num_shards, args.limit)
     if args.command == "pack":
-        meta = pack(table, args.out, args.cache, args.workers)
+        meta = pack(table, args.out, args.cache, args.workers, komi=args.komi)
     else:
-        meta = extract(table, args.vectors, args.out, args.cache, args.workers)
+        meta = extract(table, args.vectors, args.out, args.cache, args.workers, komi=args.komi,
+                       finetuned=args.finetuned, per_move=args.per_move)
     print(json.dumps(meta), flush=True)
     return 0
 

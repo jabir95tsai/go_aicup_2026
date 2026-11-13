@@ -10,6 +10,17 @@ from go_aicup.features.sgf_planes import moves_to_planes, sgf_to_planes
 from go_aicup.paths import DATA
 
 
+@pytest.mark.parametrize("handicap", [0, 1, 2, 9])
+def test_v11_handicap_preserves_moves_colors_and_boards(handicap):
+    original = "(;SZ[19];B[pd];W[dp];B[qp])"
+    updated = original.replace("SZ[19]", f"SZ[19]HD[{handicap}]")
+    old, new = sgflib.parse(original), sgflib.parse(updated)
+    assert new.ok and new.props["HD"] == [str(handicap)]
+    np.testing.assert_array_equal(new.moves, old.moves)
+    np.testing.assert_array_equal(new.colors, old.colors)
+    np.testing.assert_array_equal(sgf_to_planes(updated), sgf_to_planes(original))
+
+
 def test_coordinates_post_move_planes_and_color_channels():
     planes = sgf_to_planes("(;SZ[19];B[pd];W[dp];B[qp])")
     assert planes.shape == (3, 2, 19, 19)
@@ -81,6 +92,9 @@ def test_move_array_entrypoint_matches_sgf_without_mutating_inputs():
     "(;SZ[19]AW[aa];B[bb])", "(;SZ[19];B[aa];AE[aa];W[bb])",
     "(;W[pd])", "(;FF[4]GM[1]SZ[19];B[pd])", "(;SZ[19];B[])",
     "(;SZ[19];B[tt])",
+    "(;SZ[19]HD[-1];B[aa])", "(;SZ[19]HD[];B[aa])",
+    "(;SZ[19]HD[1.5];B[aa])", "(;SZ[19]HD[1]HD[2];B[aa])",
+    "(;SZ[19]HD[2]AB[dd][pp];W[aa])", "(;SZ[19]HA[2];B[aa])",
 ])
 def test_invalid_or_unsupported_sgf_is_rejected(content):
     with pytest.raises(ValueError):

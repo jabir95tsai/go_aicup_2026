@@ -1,0 +1,77 @@
+{
+  "format_version": 1,
+  "seed": 2026,
+  "split_seed": 2026,
+  "paths": {
+    "cache_dir": "data/processed/boards/strength_v1",
+    "dataset_dir": "data/processed/reproduce_paper/seed2026",
+    "output_dir": "outputs/rank/reproduce_paper_3/se3_seed2026_15pos",
+    "label_dir": "data/processed/reproduce_paper/value_v1/train"
+  },
+  "split": {
+    "expected_games_per_rank": 100000,
+    "train_games_per_rank": 80000
+  },
+  "positions": {
+    "min_ply": 30,
+    "positions_per_rank": 15
+  },
+  "loader": {
+    "max_open_shards": 8
+  },
+  "model": {
+    "channels": 256,
+    "blocks": 18,
+    "policy_size": 362,
+    "input_encoding": "pre_action_own_opponent"
+  },
+  "training": {
+    "groups_per_update": 128,
+    "updates": 100000,
+    "optimizer": "adamw",
+    "lr": 0.01,
+    "weight_decay": 0.0001,
+    "lr_drop_after_updates": 70000,
+    "lr_after_drop": 0.005,
+    "channels_last": true,
+    "cudnn_benchmark": false,
+    "microbatch_groups": 16,
+    "checkpoint_every": 1000,
+    "workers": 4,
+    "sync_batch_norm": true,
+    "deterministic": false,
+    "allow_tf32": false,
+    "betas": [
+      0.9,
+      0.999
+    ],
+    "eps": 1e-08,
+    "sampling": "shuffle_without_replacement"
+  },
+  "loss_weights": {
+    "strength": 1.0,
+    "policy": 1.0,
+    "value": 1.0
+  },
+  "teacher": {
+    "target": "per_effective_pre_action_position",
+    "rules": "japanese",
+    "komi": 6.5,
+    "visits": 1
+  },
+  "questions": {
+    "validation": 10000
+  },
+  "device": "cuda",
+  "precision": "bf16",
+  "evaluation": {
+    "per_gpu_batch_size": 2240
+  },
+  "monitoring": {
+    "every": 5000,
+    "questions": 5000,
+    "seed": 2026,
+    "patience": 3
+  },
+  "smoke": false
+}

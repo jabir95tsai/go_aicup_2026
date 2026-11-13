@@ -1,7 +1,7 @@
 # W1 訊號 EDA — 棋力與玩家指紋在哪裡
 
 產生時間：2026-10-03 10:53　資料：全量訓練集 1,000,000 盤
-產生方式：`python -m go_aicup.features.game_stats && python scripts/eda_report.py`（全程 CPU，約 2 分鐘）
+產生方式：`python -m go_aicup.features.game_stats && python -m scripts.data.eda_report`（全程 CPU，約 2 分鐘）
 
 > 結構面稽核（欄位、重複、長度、玩家數）見 `01_audit.md` 與 `RESULTS.md` A-001～A-003，本報告不重複。
 > 本報告回答的是：**訊號在哪裡、有多強、隨 k 怎麼變、兩賽的需求哪裡衝突。**

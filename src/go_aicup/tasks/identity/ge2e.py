@@ -21,6 +21,7 @@ from torch import nn
 import torch.nn.functional as F
 
 from go_aicup.data.board_cache import BoardCache, assemble_inputs
+from go_aicup.tasks.strength.shared.dataset import apply_d4
 from go_aicup.tasks.strength.v2.model import StrengthResNet
 
 MIN_PLY = 20
@@ -68,9 +69,16 @@ def ge2e_loss(games: torch.Tensor, w: torch.Tensor, b: torch.Tensor):
     return loss, accuracy
 
 
-def own_plies(length: int) -> np.ndarray:
-    """Black (judged) plies from MIN_PLY on: MIN_PLY, MIN_PLY + 2, ..."""
-    return np.arange(MIN_PLY, length, 2)
+def own_plies(length: int, color: int = 0, min_ply: int = MIN_PLY) -> np.ndarray:
+    """The plies of `color` (0 black, 1 white) from min_ply on; default = black from MIN_PLY."""
+    return np.arange(min_ply + (color - min_ply) % 2, length, 2)
+
+
+def as_black(histories: np.ndarray, colors: np.ndarray):
+    """Exchange the stone planes of white moves and mark every move as black to play."""
+    white = colors == 1
+    histories[white] = histories[white][:, :, ::-1]
+    return histories, np.zeros_like(colors)
 
 
 class GE2EBatches(torch.utils.data.Dataset):
@@ -78,7 +86,14 @@ class GE2EBatches(torch.utils.data.Dataset):
 
     def __init__(self, cache_dir, player_games: list[np.ndarray], lengths: np.ndarray, *, players: int,
                  games: int, moves: int, steps: int, seed: int, rank: int, start_step: int = 0,
-                 max_open_shards: int = 8):
+                 max_open_shards: int = 8, player_color: np.ndarray | None = None, min_ply: int = MIN_PLY,
+                 player_d4: bool = False):
+        # player_color[game] (0 black, 1 white): sample that colour's moves, white ones colour-swapped
+        # (added test set, 2026-11-12). None = the original black-only sampling.
+        # player_d4: every board of one sampled player gets the same random D4 transform, so a
+        # player seen under 8 orientations acts as 8 training players while the within-player
+        # orientation habits stay consistent (2026-11-13).
+        self.player_color, self.min_ply, self.player_d4 = player_color, min_ply, player_d4
         self.cache_dir, self.player_games, self.lengths = cache_dir, player_games, lengths
         self.shape = (players, games, moves)
         self.steps, self.seed, self.rank, self.start = steps, seed, rank, start_step
@@ -95,7 +110,8 @@ class GE2EBatches(torch.utils.data.Dataset):
         game_index, plies = [], []
         for player in chosen:
             for game in rng.choice(self.player_games[player], size=m, replace=False):
-                candidates = own_plies(int(self.lengths[game]))
+                color = 0 if self.player_color is None else int(self.player_color[game])
+                candidates = own_plies(int(self.lengths[game]), color, self.min_ply)
                 game_index.append(np.full(s, game))
                 plies.append(rng.choice(candidates, size=s, replace=len(candidates) < s))
         return np.concatenate(game_index), np.concatenate(plies)
@@ -105,9 +121,20 @@ class GE2EBatches(torch.utils.data.Dataset):
             self._cache = BoardCache(self.cache_dir, max_open_shards=self.max_open_shards)
         games, plies = self.sample(self.start + item)
         histories, colors = self._cache.history_batch(games, plies)
-        if np.any(colors != 0):
-            raise ValueError("GE2E sample is not a black move")
-        return torch.from_numpy(assemble_inputs(histories, colors))
+        if self.player_color is None:
+            if np.any(colors != 0):
+                raise ValueError("GE2E sample is not a black move")
+        else:
+            if not np.array_equal(colors, self.player_color[games]):
+                raise ValueError("GE2E sample is not the player's move")
+            histories, colors = as_black(histories, colors)
+        planes = assemble_inputs(histories, colors)
+        if self.player_d4:
+            n, m, s = self.shape
+            transforms = np.random.default_rng([self.seed, self.rank, self.start + item, 4]).integers(8, size=n)
+            blocks = planes.reshape(n, m * s, *planes.shape[1:])
+            planes = np.concatenate([apply_d4(block, int(t)) for block, t in zip(blocks, transforms)])
+        return torch.from_numpy(planes)
 
     def __getstate__(self):
         state = self.__dict__.copy()

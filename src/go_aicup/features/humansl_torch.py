@@ -65,19 +65,24 @@ def profile_metadata(name: str):
 
 
 _FEATURES = None
+_KOMI = None   # None = the rules' default (Japanese, 6.5)
 
 
-def _init_worker(config: dict) -> None:
-    global _FEATURES
+def _init_worker(config: dict, komi: float | None = None) -> None:
+    global _FEATURES, _KOMI
     _, features, _, _ = _katago()
     _FEATURES = features.Features(config, 19)
+    _KOMI = komi
 
 
 def encode_game(item):
     """CPU worker: binary planes (uint8), global inputs, played tensor positions."""
     moves, colors = item
     board, _, gamestate, _ = _katago()
-    state = gamestate.GameState(19, gamestate.GameState.RULES_JAPANESE)
+    rules = dict(gamestate.GameState.RULES_JAPANESE)
+    if _KOMI is not None:
+        rules["whiteKomi"] = float(_KOMI)
+    state = gamestate.GameState(19, rules)
     bins, globals_, played = [], [], []
     for move, color in zip(moves, colors):
         pla = board.Board.BLACK if color == 0 else board.Board.WHITE

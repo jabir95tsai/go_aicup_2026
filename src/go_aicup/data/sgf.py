@@ -1,7 +1,7 @@
 """SGF parsing — the single source of truth for turning `sgf_content` into moves.
 
-The competition format is `(;SZ[19];B[qd];W[dp];...)`: one linear game,
-on-board moves only, no setup stones or metadata. Invalid input is reported
+The competition format is `(;SZ[19]HD[0];B[qd];W[dp];...)`: one linear game,
+on-board moves only, optional v1.1 HD metadata, no setup stones. Invalid input is reported
 in Game.errors; properties remain available for source-data audits.
 
 Coordinates: SGF encodes a point as [column][row] with 'a'..'s' for 0..18.
@@ -24,7 +24,7 @@ BLACK, WHITE = 0, 1
 # Retain property names even in unsupported records for the audit report.
 _PROP_RE = re.compile(r"([A-Z]{1,2})((?:\[[^\]]*\])+)")
 _VAL_RE = re.compile(r"\[([^\]]*)\]")
-_GAME_RE = re.compile(r"\(;SZ\[19\](?:;[BW]\[[a-s]{2}\])+\)")
+_GAME_RE = re.compile(r"\(;SZ\[19\](?:HD\[[0-9]+\])?(?:;[BW]\[[a-s]{2}\])+\)")
 
 
 @dataclass
@@ -88,7 +88,7 @@ def parse(sgf: str) -> Game:
         if key not in ("B", "W"):
             game.props.setdefault(key, []).extend(_VAL_RE.findall(raw))
     if _GAME_RE.fullmatch(sgf) is None:
-        game.errors.append("expected (;SZ[19];B[point];W[point];...) with on-board moves only")
+        game.errors.append("expected (;SZ[19](HD[n]);B[point];W[point];...) with optional HD and on-board moves only")
         return game
     nodes = sgf[1:-1].split(";")[2:]
     game.moves = np.asarray([point_to_index(node[2:4]) for node in nodes], dtype=np.int16)
@@ -107,7 +107,7 @@ def parse_lenient(sgf: str) -> Game:
     dropped and counted in props["_passes"]; colours stay as written, so later
     code must not infer colour from parity. Setup stones or handicap are kept
     as errors (the replayed board would be wrong) but moves are still returned.
-    The training files never need this path (strict `parse`, RESULTS A-001).
+    Official v1.0/v1.1 training files use strict `parse` instead.
     """
     game = Game()
     if not isinstance(sgf, str) or not sgf.strip():
