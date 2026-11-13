@@ -254,10 +254,13 @@ def load_finetuned(model, path: Path, device):
 
 
 def extract(table: pd.DataFrame, vectors_path: Path | None, out: Path, cache: Path, workers: int,
-            batch_positions: int = 409, komi: float | None = None, finetuned: Path | None = None) -> dict:
+            batch_positions: int = 409, komi: float | None = None, finetuned: Path | None = None,
+            per_move: bool = False) -> dict:
     """Positions of consecutive games are pooled into fixed batches (batch_positions x RANKS
     evaluations) for torch.compile: 10.5k vs 4.5k evaluations/s eager on an H200 (A-055).
-    finetuned: a humansl_finetune checkpoint (network weights and vectors) instead of vectors_path."""
+    finetuned: a humansl_finetune checkpoint (network weights and vectors) instead of vectors_path.
+    per_move: also save every position's log p (move_logp.npy float16 [N, RANKS], move_slot.npy
+    = 2 * game row + (0 own / 1 opponent), move_ply.npy), in game then ply order."""
     import torch
     out.mkdir(parents=True, exist_ok=True)
     table.reset_index(drop=True).to_parquet(out / "games.parquet")
@@ -272,9 +275,10 @@ def extract(table: pd.DataFrame, vectors_path: Path | None, out: Path, cache: Pa
     sums = torch.zeros((len(table) * 2, RANKS), device=device)
     counts = np.zeros(len(table) * 2, dtype=np.int64)
     pending: list[tuple] = []
+    moves: list[tuple] = []
 
     def flush(final: bool) -> list[tuple]:
-        bins, globals_, played, own, slot = (np.concatenate(a) for a in zip(*pending))
+        bins, globals_, played, own, slot, ply = (np.concatenate(a) for a in zip(*pending))
         while len(played) >= batch_positions or (final and len(played)):
             n = min(batch_positions, len(played))
             chunk = [a[:n] for a in (bins, globals_, played, own)]
@@ -283,8 +287,10 @@ def extract(table: pd.DataFrame, vectors_path: Path | None, out: Path, cache: Pa
             logp = game_logp(forward, vectors, *chunk, batch=batch_positions * RANKS)[:n]
             sums.index_add_(0, torch.as_tensor(slot[:n], device=device), logp)
             np.add.at(counts, slot[:n], 1)
-            bins, globals_, played, own, slot = (a[n:] for a in (bins, globals_, played, own, slot))
-        return [(bins, globals_, played, own, slot)] if len(played) else []
+            if per_move:
+                moves.append((slot[:n].astype(np.int32), ply[:n], logp.cpu().numpy().astype(np.float16)))
+            bins, globals_, played, own, slot, ply = (a[n:] for a in (bins, globals_, played, own, slot, ply))
+        return [(bins, globals_, played, own, slot, ply)] if len(played) else []
 
     started = last = time.monotonic()
     positions = waiting = 0
@@ -294,7 +300,8 @@ def extract(table: pd.DataFrame, vectors_path: Path | None, out: Path, cache: Pa
             if encoded is None or not own.any() or own.all():
                 continue
             bins, globals_, played = encoded
-            pending.append((bins, globals_, played, own, 2 * g + (~own).astype(np.int64)))
+            pending.append((bins, globals_, played, own, 2 * g + (~own).astype(np.int64),
+                            np.arange(len(played), dtype=np.int16)))
             positions += len(played)
             waiting += len(played)
             if waiting >= batch_positions:
@@ -314,11 +321,14 @@ def extract(table: pd.DataFrame, vectors_path: Path | None, out: Path, cache: Pa
     feature = np.where(done[:, None], mean, 0).astype(np.float32)
     np.save(out / "feature.npy", feature)
     np.save(out / "done.npy", done)
+    if per_move:
+        for name, part in zip(("move_slot", "move_ply", "move_logp"), zip(*moves)):
+            np.save(out / f"{name}.npy", np.concatenate(part))
     meta = {"columns": [f"own_r{r}" for r in range(RANKS)] + [f"opp_r{r}" for r in range(RANKS)],
             "games": len(table), "games_complete": int(done.sum()), "positions": positions,
             "seconds": round(seconds, 1), "positions_per_second": round(positions / seconds, 1),
             "vectors": str(vectors_path), "finetuned": None if finetuned is None else str(finetuned),
-            "precision": "tf32, torch.compile",
+            "precision": "tf32, torch.compile", "per_move": per_move,
             "komi": 6.5 if komi is None else komi}
     (out / "meta.json").write_text(json.dumps(meta, indent=1))
     return meta
@@ -355,6 +365,7 @@ def main(argv=None) -> int:
     parser.add_argument("--monitor-positions", type=int, default=50_000)
     parser.add_argument("--every", type=int, default=500)
     parser.add_argument("--komi", type=float, help="pack / extract: white komi of the input features (default rules: 6.5)")
+    parser.add_argument("--per-move", action="store_true", help="extract: also save per-position log p")
     parser.add_argument("--finetuned", type=Path, help="extract: humansl_finetune checkpoint (weights + vectors)")
     args = parser.parse_args(argv)
     if args.command == "train":
@@ -367,7 +378,7 @@ def main(argv=None) -> int:
         meta = pack(table, args.out, args.cache, args.workers, komi=args.komi)
     else:
         meta = extract(table, args.vectors, args.out, args.cache, args.workers, komi=args.komi,
-                       finetuned=args.finetuned)
+                       finetuned=args.finetuned, per_move=args.per_move)
     print(json.dumps(meta), flush=True)
     return 0
 

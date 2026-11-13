@@ -1,8 +1,10 @@
 """Bench for the added competition-1 test set (600 candidates x 10 games of both colours,
 questions of 1/2/3/5 games; cv.make_pid2_bank / cv.draw_pid2).
 
-    python -m scripts.identity.pid2_bench embed      # 1 GPU: GE2E vectors of the bank games
-    python -m scripts.identity.pid2_bench eval       # CPU: variants, pool 0 selects, pool 1 reports
+    python -m scripts.identity.pid2_bench embed [--run-dir RUN]   # 1 GPU: GE2E vectors of the bank games
+    python -m scripts.identity.pid2_bench eval  [--run-dir RUN]   # CPU: variants, pool 0 selects, pool 1 reports
+
+Outputs go to outputs/pid/pid2_bench/<run name>/.
 
 Variants (plain top-5, no assignment; official score per k):
   floor        the 11/12 floor: black games only, opening + 8 x GE2E; a question without a
@@ -50,28 +52,39 @@ def load_bank(meta: pd.DataFrame):
     return bank, handicap
 
 
-def embed(_) -> None:
+def embed(args) -> None:
+    """Vectors of every bank game with the encoder of --run-dir (its config's sampling decides
+    the first ply; white moves colour-swapped, plus the raw variant for the original encoder)."""
     import torch
     from go_aicup.data.board_cache import BoardCache
-    from go_aicup.tasks.identity.insurance import load_run
+    from go_aicup.tasks.identity.ge2e import MIN_PLY, IdentityEncoder
 
     meta = data.load_meta()
     bank, _ = load_bank(meta)
     games = np.sort(bank["game"].to_numpy())
     colors = meta["player_color"].to_numpy()[games].astype(np.int8)
     lengths = meta["length"].to_numpy()[games]
-    model, config, _, _ = load_run()
+    config = json.loads((args.run_dir / "config.json").read_text())
+    payload = torch.load(args.run_dir / "model.pt", map_location="cpu", weights_only=False)
+    model = IdentityEncoder(**config["model"])
+    model.load_state_dict(payload["model"])
+    sampling = config.get("sampling", {})
+    min_ply = sampling.get("min_ply", MIN_PLY)
     device = torch.device("cuda")
     model.to(device)
     cache = BoardCache(data.CACHE_DIR)
-    swap = twocolor.embed_games(model, config, cache, games, colors, lengths, device, swap=True)
-    white = colors == 1
-    raw = swap.copy()
-    raw[white] = twocolor.embed_games(model, config, cache, games[white], colors[white], lengths[white], device,
-                                      swap=False)
-    OUT.mkdir(parents=True, exist_ok=True)
-    np.savez(OUT / "embeddings.npz", game_index=games, swap=swap, raw=raw)
-    print(f"embedded {len(games)} games ({int(white.sum())} white)")
+    swap = twocolor.embed_games(model, config, cache, games, colors, lengths, device, swap=True, min_ply=min_ply)
+    out = {"game_index": games, "swap": swap, "w": float(payload["model"]["w"])}
+    if not sampling:
+        white = colors == 1
+        raw = swap.copy()
+        raw[white] = twocolor.embed_games(model, config, cache, games[white], colors[white], lengths[white],
+                                          device, swap=False)
+        out["raw"] = raw
+    target = OUT / args.run_dir.name
+    target.mkdir(parents=True, exist_ok=True)
+    np.savez(target / "embeddings.npz", **out)
+    print(f"embedded {len(games)} games with {args.run_dir.name} (min_ply {min_ply})")
 
 
 def score_table(scores, candidates, q) -> pd.Series:
@@ -83,15 +96,16 @@ def score_table(scores, candidates, q) -> pd.Series:
     return pd.Series({**{str(k): float(points[ks == k].mean()) for k in cv.PID2_K}, "all": float(points.mean())})
 
 
-def evaluate(_) -> None:
+def evaluate(args) -> None:
+    out_dir = OUT / args.run_dir.name
     meta, prefix = train_prefix("d4")
     bank, handicap = load_bank(meta)
     color = meta["player_color"].to_numpy().astype(np.int64)
     pid = meta["player_id"].astype(str).to_numpy()
-    saved = np.load(OUT / "embeddings.npz")
+    saved = np.load(out_dir / "embeddings.npz")
     position = np.full(len(meta), -1)
     position[saved["game_index"]] = np.arange(len(saved["game_index"]))
-    w = float(json.loads((ROOT / "outputs/pid/ge2e/pid_ge2e_v1_short/eval_summary.json").read_text())["w"])
+    w = float(saved["w"])
     base = load_params("d4")
     hashes = opening.prefix_hashes(prefix)
     codes = np.minimum(handicap, 1) + 2 * color
@@ -111,7 +125,7 @@ def evaluate(_) -> None:
         if pool == 0:
             item["grid"] = [twocolor.opening_scores(prefix, hashes, gallery, query, color, populations, p)
                             for p in grid]
-        vec = {name: saved[name] for name in ("swap", "raw")}
+        vec = {name: saved[name] if name in saved else saved["swap"] for name in ("swap", "raw")}
         gal_pos, qry_pos = [position[g] for g in gallery], [position[g] for g in query]
         item["style-swap"] = w * twocolor.style_scores(vec["swap"], gal_pos, qry_pos)
         item["style-raw"] = w * twocolor.style_scores(vec["raw"], gal_pos, qry_pos)
@@ -205,10 +219,9 @@ def evaluate(_) -> None:
         per_draw = [float(score_table(variants[name](parts[1, d]), parts[1, d]["candidates"], parts[1, d]["q"])["all"])
                     for d in range(DRAWS)]
         print(name, "pool 1 per draw:", np.round(per_draw, 4).tolist())
-    OUT.mkdir(parents=True, exist_ok=True)
-    table.to_csv(OUT / "eval.csv", index=False)
-    (OUT / "summary.json").write_text(json.dumps({
-        "opening": chosen, "style": style, "lambda": lam, "mu": mu, "w": w,
+    table.to_csv(out_dir / "eval.csv", index=False)
+    (out_dir / "summary.json").write_text(json.dumps({
+        "run_dir": str(args.run_dir), "opening": chosen, "style": style, "lambda": lam, "mu": mu, "w": w,
         "lambda_per_k": {str(k): v for k, v in per_k.items()},
         "curve_pool0": {f"{a}/{b}": v for (a, b), v in curve.items()}}, indent=1))
 
@@ -216,8 +229,10 @@ def evaluate(_) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("embed").set_defaults(func=embed)
-    sub.add_parser("eval").set_defaults(func=evaluate)
+    for name, fn in (("embed", embed), ("eval", evaluate)):
+        p = sub.add_parser(name)
+        p.add_argument("--run-dir", type=Path, default=ROOT / "outputs/pid/ge2e/pid_ge2e_v1_short")
+        p.set_defaults(func=fn)
     args = parser.parse_args()
     args.func(args)
 

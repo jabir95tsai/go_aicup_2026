@@ -22,16 +22,17 @@ from go_aicup.paths import ROOT
 from go_aicup.tasks.identity import assign, opening, twocolor
 from go_aicup.tasks.identity.predict import PLIES, store_prefix, train_prefix
 
-BENCH = ROOT / "outputs" / "pid" / "pid2_bench" / "summary.json"
+BENCH = ROOT / "outputs" / "pid" / "pid2_bench" / "pid_ge2e_v1_short" / "summary.json"
 
 
-def store_vectors(store_dir: Path, name: str, work: Path, swap: bool) -> np.ndarray:
-    """[games of the store, D] GE2E vectors of the player's own moves, cached."""
+def store_vectors(store_dir: Path, name: str, work: Path, swap: bool, run_dir: Path) -> np.ndarray:
+    """[games of the store, D] GE2E vectors of the player's own moves with the encoder of
+    run_dir (first ply from its config's sampling), cached."""
     import torch
     from go_aicup.data.board_cache import BoardCache, write_store_cache
-    from go_aicup.tasks.identity.insurance import load_run
+    from go_aicup.tasks.identity.ge2e import MIN_PLY, IdentityEncoder
 
-    path = work / f"{name}_{'swap' if swap else 'raw'}.npy"
+    path = work / f"{name}_{run_dir.name}_{'swap' if swap else 'raw'}.npy"
     if path.exists():
         return np.load(path)
     moves, colors, meta = load_store(name, store_dir, mmap=False)
@@ -43,14 +44,17 @@ def store_vectors(store_dir: Path, name: str, work: Path, swap: bool) -> np.ndar
         raise ValueError(f"{name}: {len(meta) - len(games)} games were dropped by the board cache")
     rows = games["store_row"].to_numpy()
     player = (meta["color"].astype(str).to_numpy()[rows] == "W").astype(np.int8)
-    model, config, _, _ = load_run()
+    config = json.loads((run_dir / "config.json").read_text())
+    model = IdentityEncoder(**config["model"])
+    model.load_state_dict(torch.load(run_dir / "model.pt", map_location="cpu", weights_only=False)["model"])
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type == "cpu":
         config = {**config, "precision": "fp32"}
     model.to(device)
     vectors = np.empty((len(meta), config["model"]["embedding"]), np.float32)
     vectors[rows] = twocolor.embed_games(model, config, BoardCache(cache_dir), games["game_index"].to_numpy(),
-                                         player, games["length"].to_numpy(), device, swap=swap)
+                                         player, games["length"].to_numpy(), device, swap=swap,
+                                         min_ply=config.get("sampling", {}).get("min_ply", MIN_PLY))
     np.save(path, vectors)
     return vectors
 
@@ -85,8 +89,10 @@ def predict(store_dir: Path, pool_name: str, question_name: str, work: Path, sum
     ks = q_meta.groupby("question_id", sort=False)["num_games"].first().loc[question_ids].to_numpy()
 
     swap = summary["style"] == "style-swap"
-    vectors = np.concatenate([store_vectors(store_dir, pool_name, work, swap),
-                              store_vectors(store_dir, question_name, work, swap)])
+    run_dir = Path(summary["run_dir"])
+    run_dir = run_dir if run_dir.is_absolute() else ROOT / run_dir
+    vectors = np.concatenate([store_vectors(store_dir, pool_name, work, swap, run_dir),
+                              store_vectors(store_dir, question_name, work, swap, run_dir)])
     shift = lambda games: [g - n_train for g in games]
     parts = {"opening": twocolor.opening_scores(prefix, hashes, gallery, query, color, populations, params),
              "style": summary["w"] * twocolor.style_scores(vectors, shift(gallery), shift(query)),

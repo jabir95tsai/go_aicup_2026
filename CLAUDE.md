@@ -83,10 +83,12 @@
 
 **排程器：Slurm Workload Manager。** 以下只列本專案使用的 H200 佇列；查核時官方政策如下。[官方 Slurm 佇列表](https://man.twcc.ai/@nano4-manual/SJM_FuxDWe)
 
-| 佇列 | 單一 account 可用 GPU 總數 | 每 job 最少 GPU | 每 job 最長時間 | 每 user 同時 running jobs | 每 user pending jobs |
+| 佇列 | 單一 account 可用 GPU 總數 | 每 job 最少 GPU | 每 job 最長時間 | 每 user 同時 running jobs | 每 user 同時提交作業（含 running／pending） |
 |---|---:|---:|---:|---:|---:|
-| `dev` | 32 | 1 | 4 小時 | 10 | 10 |
-| `8gpus` | 32 | 1 | 48 小時 | 8 | 10 |
+| `dev` | 32 | 1 | 4 小時 | **2** | **7** |
+| `8gpus` | 32 | 1 | 48 小時 | 8 | **13** |
+
+**2026-11-12 現場查核：** `scontrol show partition` 與 `sacctmgr show qos` 顯示 `dev` 套用 `p_dev`（`MaxJobsPU=2`、`MaxSubmitJobsPU=7`），`8gpus` 套用 `p_8gpus`（8／13）。上表作業數已依現況修正；`QOSMaxJobsPerUserLimit` 表示該佇列同時執行的作業數已滿，與是否還有空 GPU 是不同限制。`8gpus` 可只申請 1 張 GPU。
 
 H200 佇列限制**每張 GPU 最多 12 CPU 核心、200GB 主記憶體**；200GB 是主機 RAM 配額，與 141GB GPU 顯存不同。佇列名稱不等於每 job 的最少 GPU 數；提交前以 `sinfo`／`scontrol show partition` 查當下政策與實際 job 上限。
 

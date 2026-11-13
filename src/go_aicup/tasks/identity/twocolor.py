@@ -54,12 +54,12 @@ def opening_scores(prefix, hashes, gallery_games, query_games, game_color, popul
 
 @torch.no_grad()
 def embed_games(model, config, cache: BoardCache, games: np.ndarray, colors: np.ndarray, lengths: np.ndarray,
-                device, swap: bool, batch: int = 8192) -> np.ndarray:
-    """float32 [len(games), D]: mean embedding of the player's moves at ply >= MIN_PLY.
+                device, swap: bool, batch: int = 8192, min_ply: int = MIN_PLY) -> np.ndarray:
+    """float32 [len(games), D]: mean embedding of the player's moves at ply >= min_ply.
 
     colors[i] is the player's colour in games[i]. swap=True exchanges the stone
     planes of white moves and marks them as black to move."""
-    first = MIN_PLY + (colors.astype(np.int64) - MIN_PLY) % 2          # first own ply >= MIN_PLY
+    first = min_ply + (colors.astype(np.int64) - min_ply) % 2          # first own ply >= min_ply
     plies = [np.arange(f, n, 2) for f, n in zip(first, lengths)]
     owner = np.concatenate([np.full(len(p), i) for i, p in enumerate(plies)])
     sample_game, sample_ply = games[owner], np.concatenate(plies)
@@ -101,3 +101,38 @@ def category_scores(codes: np.ndarray, gallery_games, query_games, n_codes: int,
     counts = np.stack([np.bincount(codes[g], minlength=n_codes) for g in gallery_games])
     logp = np.log((counts + smoothing * prior) / (counts.sum(axis=1, keepdims=True) + smoothing))
     return np.stack([logp[:, codes[q]].sum(axis=1) for q in query_games])
+
+
+def plda_scores(vectors: np.ndarray, gallery_games, query_games, extra_groups=(), shrink: float = 0.2) -> np.ndarray:
+    """Two-covariance PLDA log-likelihood ratio in place of the cosine (2026-11-13).
+
+    A game vector (unit length, centred) = player mean y ~ N(0, B) + game noise ~ N(0, W).
+    W and B come from the labelled groups at hand: the candidates' own gallery games plus
+    `extra_groups` (e.g. the other part's gallery); W is shrunk toward a scaled identity.
+    The score is log p(question mean | candidate's gallery) - log p(question mean), exact for
+    a question of n_q games against a gallery of n_g games, so one-game questions and
+    five-game questions are weighted by what they can know."""
+    unit = normalise(vectors.astype(np.float64))
+    groups = list(gallery_games) + list(extra_groups)
+    rows = np.concatenate(groups)
+    x = unit - unit[rows].mean(axis=0)
+    resid = np.concatenate([x[g] - x[g].mean(axis=0) for g in groups])
+    within = resid.T @ resid / (len(resid) - len(groups))
+    total = np.cov(x[rows].T)
+    within = (1 - shrink) * within + shrink * np.trace(within) / len(within) * np.eye(len(within))
+    ew, uw = np.linalg.eigh(within)
+    whiten = uw / np.sqrt(ew)
+    eb, ub = np.linalg.eigh(whiten.T @ (total - within) @ whiten)
+    psi = np.maximum(eb, 1e-6)                      # between-player variance per direction, W = I
+    z = x @ (whiten @ ub)
+    gallery = np.stack([z[g].mean(axis=0) for g in gallery_games])
+    n_g = np.array([len(g) for g in gallery_games])[:, None]
+    post_mean = gallery * (n_g * psi / (n_g * psi + 1))
+    post_var = psi / (n_g * psi + 1)
+    scores = np.empty((len(query_games), len(gallery_games)))
+    for i, games in enumerate(query_games):
+        q, noise = z[games].mean(axis=0), 1.0 / len(games)
+        var, null = post_var + noise, psi + noise
+        scores[i] = (-0.5 * ((q - post_mean) ** 2 / var + np.log(var)).sum(axis=1)
+                     + 0.5 * (q ** 2 / null + np.log(null)).sum())
+    return scores
