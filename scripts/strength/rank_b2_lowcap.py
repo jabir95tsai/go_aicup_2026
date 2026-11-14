@@ -19,6 +19,7 @@ that gain is >= +0.003; G1 promote = five-seed mean Equal-k >= +0.005 on E1 or E
 >= 0, every E2 k >= -0.005; both >= 0 -> LB probe; else stop.
 
     python -m scripts.strength.rank_b2_lowcap auto [--jobs 12]
+    python -m scripts.strength.rank_b2_lowcap inout          # diagnostic, see inout()
 """
 from __future__ import annotations
 
@@ -217,9 +218,86 @@ def evaluate(arm: str, jobs: int) -> None:
     (OUT / f"result_{arm}.json").write_text(json.dumps(result, indent=1))
 
 
+# ------------------------------------------------------------------ in-pool vs Valid-U diagnostic
+INOUT_ARMS = ("base", "ord", "smooth", "rr2", "l2_003")
+FEATURES = {"HC": None, "H": slice(30, 50)}      # column block removed from [H 30 | C 20 | HD1 flags 2]
+
+
+def _view(x: np.ndarray, drop) -> np.ndarray:
+    return x if drop is None else np.delete(x, np.arange(x.shape[1])[drop], axis=1)
+
+
+def _inout_task(seed, side, arm, fit, x, half, q_pool, prior, eval_games, x_eval, sets):
+    """One model scored on Valid-U and, when fitted on one half of the pool, on the other half too."""
+    import scripts.strength.humansl_hd_filter as hf
+    hs.SEED = seed
+    out = {}
+    if side is None:
+        model = LowCap(prior, arm).fit(fit, pd.DataFrame(), x)
+    else:
+        train = half == side
+        model = LowCap(more.player_prior(fit[train]), arm).fit(fit[train].reset_index(drop=True), pd.DataFrame(), x[train])
+        out["P"] = official_scores(score_rank(model.probabilities(x, fit["game_index"].to_numpy(), q_pool[side])),
+                                   q_pool[side]["rank_id"].to_numpy())
+    for name, q in sets.items():
+        out[name] = hf.predict(model, eval_games, x_eval, q)
+    return out
+
+
+def inout(jobs: int) -> None:
+    """Diagnostic only (no selection, no promotion): why did the in-pool choice reverse on Valid-U?
+    half -> P   models fitted on one pool half, scored on the other half   (= select)
+    half -> U   the SAME models scored on Valid-U E1 / E2                  (players change, nothing else)
+    full -> U   models fitted on the whole pool                            (= evaluate; fit size changes)
+    each for HC (52 columns) and H only (C removed: no column was learned on pool players)."""
+    from joblib import Parallel, delayed
+    import scripts.strength.humansl_hd_filter as hf
+    import scripts.strength.rank_permove as rp
+    games, fit, eval_games, (x_fit, x_eval), hd01 = _fit_pool()
+    sets = {k: v for k, v in hf.question_sets(games, rebuild=False).items() if k in ("E1", "E2")}
+    prior = more.player_prior(fit[hd01 & (fit["role"] == "S").to_numpy()])
+    fit, x_fit = fit[hd01].reset_index(drop=True), x_fit[hd01]
+    half = rp._halves(fit)
+    q_pool = {side: rp._questions(fit[half != side], 2027 + int(side)) for side in (True, False)}
+    pool_q = pd.concat([q_pool[True], q_pool[False]], ignore_index=True)
+    role = fit.groupby(fit["player_id"].astype(str))["role"].first().loc[pool_q["player_id"].astype(str)].to_numpy()
+    tasks = [(f, seed, side, arm) for f in FEATURES for arm in INOUT_ARMS
+             for seed, side in [(s, sd) for s in SELECT_SEEDS for sd in (True, False)] + [(s, None) for s in hf.SEEDS]]
+    got = dict(zip(tasks, Parallel(n_jobs=jobs)(
+        delayed(_inout_task)(seed, side, arm, fit, _view(x_fit, FEATURES[f]), half, q_pool, prior, eval_games,
+                             _view(x_eval, FEATURES[f]), sets) for f, seed, side, arm in tasks)))
+
+    def scores(f, arm):
+        pool = np.mean([np.concatenate([got[f, s, True, arm]["P"], got[f, s, False, arm]["P"]]) for s in SELECT_SEEDS], axis=0)
+        out = {"half_P": (pool, pool_q)}
+        for name, q in sets.items():
+            out[f"half_{name}"] = (np.mean([got[f, s, sd, arm][name] for s in SELECT_SEEDS for sd in (True, False)], axis=0), q)
+            out[f"full_{name}"] = (np.mean([got[f, s, None, arm][name] for s in hf.SEEDS], axis=0), q)
+        return out
+
+    result = {"fit_games": int(len(fit)), "players": int(fit["player_id"].nunique()),
+              "pool_question_roles": {str(r): int((role == r).sum()) for r in np.unique(role)}, "features": {}}
+    for f in FEATURES:
+        base = scores(f, "base")
+        result["features"][f] = {"base": {cell: hf.by_k(s, q["k"].to_numpy()) for cell, (s, q) in base.items()}}
+        for arm in INOUT_ARMS[1:]:
+            entry = {}
+            for cell, (s, q) in scores(f, arm).items():
+                k, a = q["k"].to_numpy(), base[cell][0]
+                entry[cell] = {"diff_equal_k": round(hf.equal_k(s, k) - hf.equal_k(a, k), 4),
+                               "diff_by_k": {str(b): round(float(s[k == b].mean() - a[k == b].mean()), 4) for b in K_BUCKETS},
+                               "bootstrap_95": hf.bootstrap(a, s, q)}
+                if cell == "half_P":
+                    entry[cell]["diff_by_role"] = {str(r): round(float((s - a)[role == r].mean()), 4) for r in np.unique(role)}
+            result["features"][f][arm] = entry
+            print(f, arm, json.dumps({c: (e["diff_equal_k"], e["bootstrap_95"]) for c, e in entry.items()}), flush=True)
+    OUT.mkdir(parents=True, exist_ok=True)
+    (OUT / "inout.json").write_text(json.dumps(result, indent=1))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["select", "evaluate", "auto"])
+    parser.add_argument("command", choices=["select", "evaluate", "auto", "inout"])
     parser.add_argument("--arm")
     parser.add_argument("--jobs", type=int, default=12)
     args = parser.parse_args()
@@ -227,6 +305,8 @@ def main() -> None:
         os.environ.setdefault(var, "1")
     if args.command in ("select", "auto"):
         select(args.jobs)
+    if args.command == "inout":
+        inout(args.jobs)
     if args.command == "evaluate":
         evaluate(args.arm, args.jobs)
     if args.command == "auto":      # Valid-U is read only when the pre-registered selection rule says so

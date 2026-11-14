@@ -111,6 +111,7 @@ def load_shards(paths, device, players: pd.Series | None = None) -> dict:
             owners.append(players.loc[games["game_index"].to_numpy()].to_numpy())
     out = {name: torch.as_tensor(np.concatenate(value), device=device) for name, value in parts.items()}
     out["games"] = offset
+    out["game_index"] = np.concatenate([pd.read_parquet(path / "games.parquet")["game_index"].to_numpy() for path in paths])
     if players is not None:
         codes, _ = pd.factorize(np.concatenate(owners), sort=True)
         out["game_player"] = codes
@@ -206,6 +207,23 @@ def monitor(model: RankPolicy, forward, data: dict, probe: torch.Tensor, rank: i
         x = rv.unpack(data["bits"][index])
         logits = forward(x, data["globals"][index], data["rank"][index], data["side"][index])
         nll += torch.stack([-legal_logp(logits, x, data["target"][index]).sum(), torch.tensor(len(index), device=device)])
+    sides, moves, truth = game_sums(forward, data, rank, world)
+    nll = all_sum(nll)
+    totals = sides.sum(1)
+    prob = np.exp(totals - totals.max(1, keepdims=True))
+    decoded = score_rank(prob / prob.sum(1, keepdims=True))
+    official = (decoded == truth) + (np.abs(decoded - truth) == 1) / np.e
+    extra = player_metrics(sides, moves, truth, data["game_player"]) if "game_player" in data else {}
+    return {"monitor_nll": round(float(nll[0] / nll[1]), 5), "monitor_official": round(float(official.mean()), 4),
+            "monitor_accuracy": round(float((totals.argmax(1) == truth).mean()), 4),
+            **mid_dprime(sides, moves, truth), **extra}
+
+
+@torch.no_grad()
+def game_sums(forward, data: dict, rank: int, world: int):
+    """Per game and side, the sum of log p(played move) under each rank hypothesis and the move count:
+    sides [games, 2 (own, opp), RANKS], moves [games, 2], truth [games] (numpy, all processes' share)."""
+    device = data["bits"].device
     totals = torch.zeros((data["games"] * 2, rv.RANKS), device=device)    # slot = game * 2 + side
     moves = torch.zeros(data["games"] * 2, device=device)
     mine = torch.nonzero(data["game"] % world == rank)[:, 0]
@@ -222,19 +240,10 @@ def monitor(model: RankPolicy, forward, data: dict, probe: torch.Tensor, rank: i
         slot = data["game"][index[:n]] * 2 + data["side"][index[:n]]
         totals.index_add_(0, slot, logp)
         moves.index_add_(0, slot, torch.ones(n, device=device))
-    nll, totals, moves = all_sum(nll), all_sum(totals), all_sum(moves)
+    totals, moves = all_sum(totals), all_sum(moves)
     truth = torch.zeros(data["games"], dtype=torch.long, device=device)
     truth.index_put_((data["game"],), data["rank"])
-    sides = totals.reshape(-1, 2, rv.RANKS).cpu().numpy()
-    moves, truth = moves.reshape(-1, 2).cpu().numpy(), truth.cpu().numpy()
-    totals = sides.sum(1)
-    prob = np.exp(totals - totals.max(1, keepdims=True))
-    decoded = score_rank(prob / prob.sum(1, keepdims=True))
-    official = (decoded == truth) + (np.abs(decoded - truth) == 1) / np.e
-    extra = player_metrics(sides, moves, truth, data["game_player"]) if "game_player" in data else {}
-    return {"monitor_nll": round(float(nll[0] / nll[1]), 5), "monitor_official": round(float(official.mean()), 4),
-            "monitor_accuracy": round(float((totals.argmax(1) == truth).mean()), 4),
-            **mid_dprime(sides, moves, truth), **extra}
+    return totals.reshape(-1, 2, rv.RANKS).cpu().numpy(), moves.reshape(-1, 2).cpu().numpy(), truth.cpu().numpy()
 
 
 def main(argv=None) -> int:
@@ -271,6 +280,8 @@ def main(argv=None) -> int:
     parser.add_argument("--block-dropout", type=int, default=0,
                         help="each step only this many random trunk blocks are updated (0 = all)")
     parser.add_argument("--freeze-nonblock", action="store_true", help="train trunk blocks and vectors only")
+    parser.add_argument("--dev", type=Path, help="C4g: dir of dev pack_* shards; per-game sums saved to <out>/dev_final.npz")
+    parser.add_argument("--dev-step0", action="store_true", help="C4g: also save <out>/dev_step0.npz before training")
     args = parser.parse_args(argv)
     if args.player_ce and (args.players is None or not args.steps or args.mmi):
         parser.error("--player-ce needs --players and --steps, and excludes --mmi")
@@ -348,8 +359,21 @@ def main(argv=None) -> int:
          "monitor_shards": [str(p) for p in monitor_shards], "args": vars(args) | {
              "data": str(args.data), "out": str(args.out), "vectors": str(args.vectors),
              "monitor": str(args.monitor), "players": str(args.players)}})
+    dev = None
+    if args.dev is not None:
+        dev = load_shards(sorted(p for p in args.dev.glob("pack_*") if (p / "meta.json").exists()), device)
+
+    def dump_dev(name: str) -> None:
+        tic = time.monotonic()
+        sides, counts_, truth = game_sums(eval_forward, dev, rank, world)
+        if rank == 0:
+            np.savez(args.out / name, sides=sides, moves=counts_, truth=truth, game_index=dev["game_index"])
+        log({"event": name, "games": int(len(truth)), "seconds": round(time.monotonic() - tic, 1)})
+
     if step == 0:
         log({"step": 0, **monitor(model, eval_forward, mon, probe, rank, world)})
+        if dev is not None and args.dev_step0:
+            dump_dev("dev_step0.npz")
     started, window, window_disc, seen, monitor_seconds = time.monotonic(), [], [], 0, 0.0
     hypotheses = torch.arange(rv.RANKS, device=device).repeat(args.batch)
     ADJACENT = torch.tensor([-1, 0, 1], device=device)
@@ -468,6 +492,8 @@ def main(argv=None) -> int:
             if step % args.checkpoint_every == 0:
                 save("last.pt")
     save("last.pt")
+    if dev is not None:
+        dump_dev("dev_final.npz")
     log({"event": "done", "step": step, "seconds": round(time.monotonic() - started, 1)})
     if rank == 0:
         (args.out / "done.json").write_text(json.dumps({"step": step, "total_steps": total}))
