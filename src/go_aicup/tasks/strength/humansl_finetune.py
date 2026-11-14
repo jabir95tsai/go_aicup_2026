@@ -38,6 +38,11 @@ at single positions. --block-dropout K: each step only K randomly chosen trunk b
 on every process) receive their gradient; --freeze-nonblock keeps stem / trunk norm / policy head
 fixed. The monitor adds player-level figures (per-move means averaged over a player's games).
 
+C4o (opponent-side supervision, RESULTS 2026-11-13), --mmi-adjacent --ce-side opp: the rank CE is
+averaged over the opponent's moves only (the NLL still covers every move). A learning player owns up
+to 20 games, but each game's opponent is nearly always a different person of the same or a
+neighbouring rank, so the discriminative term has no repeated player to memorise.
+
     torchrun --standalone --nproc-per-node=8 -m go_aicup.tasks.strength.humansl_finetune \\
         --data outputs/humansl_finetune --out outputs/c4_s2 [--max-positions N] [--resume]
 """
@@ -256,6 +261,8 @@ def main(argv=None) -> int:
     parser.add_argument("--no-step-checkpoints", action="store_true", help="keep only last.pt")
     parser.add_argument("--mmi-adjacent", action="store_true",
                         help="with --mmi: the rank CE is over the true rank and its neighbours only (3 hypotheses)")
+    parser.add_argument("--ce-side", choices=["all", "opp"], default="all",
+                        help="with --mmi-adjacent: positions that enter the rank CE (opp = opponent moves only)")
     parser.add_argument("--player-ce", type=float, default=0.0, help="C4q: weight of the player-level rank CE")
     parser.add_argument("--players", type=Path, help="C4q: parquet game_index, player_id of learn and monitor games")
     parser.add_argument("--steps", type=int, help="C4q: optimiser steps")
@@ -405,7 +412,12 @@ def main(argv=None) -> int:
                 weight = rank_weight[truth]
                 nll = -(weight * logp[:, 1]).mean()
                 local = logp.masked_fill(~valid, float("-inf"))
-                discrimination = (weight * -torch.log_softmax(local, dim=1)[:, 1]).mean()
+                ce = weight * -torch.log_softmax(local, dim=1)[:, 1]
+                if args.ce_side == "opp":
+                    opp = data["side"][index].float()
+                    discrimination = (ce * opp).sum() / opp.sum().clamp(min=1)
+                else:
+                    discrimination = ce.mean()
                 loss = nll + args.mmi * discrimination
                 window_disc.append(discrimination.detach())
             elif args.mmi:

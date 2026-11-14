@@ -418,7 +418,7 @@ def export(arm: str, base: str, kind: str, job: str) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("command", choices=["tables", "g0", "evaluate", "export"])
-    parser.add_argument("--arm", choices=["gen", "mmi", "adj", "q3", "qall"])
+    parser.add_argument("--arm", choices=["gen", "mmi", "adj", "q3", "qall", "oadj", "oadj10"])
     parser.add_argument("--base", choices=["v1", "v2"], default="v1", help="C of the base (v2 = cvec2 vectors)")
     parser.add_argument("--kind", choices=["swap", "add"], default=PRIMARY, help="export: how C4 enters x")
     parser.add_argument("--job", default="local")

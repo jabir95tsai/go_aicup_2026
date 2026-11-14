@@ -21,8 +21,8 @@ from go_aicup.tasks.identity.predict import train_prefix
 from scripts.identity.pid2_paired import BANK, BENCH, HANDICAP, points
 
 OUT = ROOT / "outputs" / "pid" / "pid2_scoring"
-COS_LAMBDAS = (4.0, 8.0, 16.0)
-PLDA_LAMBDAS = (0.25, 0.5, 1.0, 2.0)
+COS_LAMBDAS = (8.0, 16.0, 32.0)
+PLDA_LAMBDAS = (1.0, 2.0, 4.0, 8.0)
 
 
 def main() -> None:
