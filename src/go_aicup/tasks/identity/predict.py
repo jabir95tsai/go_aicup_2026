@@ -204,7 +204,7 @@ def main(argv=None) -> int:
     parser.add_argument("--questions", required=True, help="e.g. pid_public")
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--orient", choices=("d4", "raw"), default="d4")
-    parser.add_argument("--assign", choices=("hungarian", "sinkhorn", "none"), default="hungarian")
+    parser.add_argument("--assign", choices=("hungarian", "sinkhorn", "none"), default="none")  # D-004
     parser.add_argument("--submission", type=Path, help="default <out-dir>/submission.csv")
     parser.add_argument("--insurance-dir", type=Path, help="identity/insurance.py work dir; fuse GE2E (A-053)")
     parser.add_argument("--hd2plus", choices=("keep", "drop"), default="keep",

@@ -328,7 +328,7 @@ python -m go_aicup.tasks.identity.predict --store-dir data/processed --pool pool
 sbatch slurm/strength_predict.slurm   # 預設 data/processed → outputs/rank_submit/<name>/submission.csv
 ```
 
-- 競賽一預設 D4 正規化＋pp+slot＋GE2E 保險（λ＝8，A-035、A-053）＋Sinkhorn／Hungarian（A-029）；不加 `--insurance-dir` 即為只用開局；`--orient raw`、`--assign sinkhorn|none` 留給 11/04 稽核後切換。每盤要有 ≥16 手且前 16 手黑白交替才用於開局分數；無可用盤的題目所有候選人同分（有計數）。
+- 競賽一預設 D4 正規化＋pp+slot＋GE2E 保險（λ＝8，A-035、A-053），預設不指派（`--assign none`，D-004；`hungarian`／`sinkhorn` 只作 LB 探針，A-029／A-059）；不加 `--insurance-dir` 即為只用開局；`--orient raw` 留給稽核後切換。每盤要有 ≥16 手且前 16 手黑白交替才用於開局分數；無可用盤的題目所有候選人同分（有計數）。
 - 競賽二使用 `outputs/v2_strength/model.pt`（A-024）與 `outputs/v2_agg_calibration/result.json` 的 T_k；`num_games` 不在 5／10／15／20 時用最近的 k；整題無可用盤時用其他題的平均機率（有計數）。
 - **彩排：** `python -m scripts.release.make_fake_release` 把 Valid-U 題目與合成候選庫 split 1／2 轉成官方寬格式（`outputs/rehearsal/raw/`），跑完上面 0–3 步（`--raw-dir outputs/rehearsal/raw --out-dir outputs/rehearsal/store` 等）後，`python -m scripts.release.rehearsal_check` 檢查 T1 gate。
 
