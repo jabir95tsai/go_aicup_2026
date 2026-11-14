@@ -141,6 +141,9 @@ def pack(table: pd.DataFrame, out: Path, cache: Path, workers: int, komi: float 
             own = games[g][1] == table["player_color"].iloc[g]
             parts["own"].append(own if keep is None else own[keep[g]])
             parts["game"].append(np.full(len(played), g, dtype=np.int32))
+            if (g + 1) % 2000 == 0:
+                print(json.dumps({"games_done": g + 1, "positions": int(sum(len(t) for t in parts["target"])),
+                                  "seconds": round(time.monotonic() - started, 1)}), flush=True)
     for name, value in parts.items():
         np.save(out / f"{name}.npy", np.concatenate(value))
     seconds = time.monotonic() - started

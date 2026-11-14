@@ -53,19 +53,40 @@ def read_config(path: Path) -> dict:
     return config
 
 
+def stratified_subset(players: np.ndarray, ranks: np.ndarray, counts: np.ndarray, fraction: float,
+                      seed: int) -> np.ndarray:
+    """bool mask: `fraction` of the players of every (rank, game-count tertile within the rank)
+    cell. One seed gives nested subsets: a smaller fraction is a subset of a larger one."""
+    keep = np.zeros(len(players), dtype=bool)
+    rng = np.random.default_rng([seed, 82])
+    for rank in sorted(set(ranks.tolist())):
+        members = np.flatnonzero(ranks == rank)
+        members = members[np.lexsort((players[members], counts[members]))]
+        for cell in np.array_split(members, 3):
+            order = rng.permutation(cell)
+            keep[order[:int(round(fraction * len(cell)))]] = True
+    return keep
+
+
 def training_players(config: dict):
-    """(game lists per player, lengths, held-out players, player colour per game or None).
+    """(game lists per player, lengths, held-out players, player colour per game or None, info).
 
     config["sampling"] = {"colors": "both", "min_ply": n} trains on the player's own moves in
-    games of either colour (white moves colour-swapped); absent = black games, ply >= MIN_PLY."""
+    games of either colour (white moves colour-swapped); absent = black games, ply >= MIN_PLY.
+    sampling["player_subset"] = {"fraction": f, "seed": s} keeps a stratified share of the
+    training players (player-count probe). sampling["gallery_players"] = {"pool": p,
+    "gallery_seed": s, "share": x} adds the candidates of bench pool p as training players with
+    only their fixed gallery games (cv.pid2_fixed_gallery); round(x * batch players) of every
+    group are such players. info = {"players", "gallery_players", "gallery_games"}."""
     meta = data.load_meta()
     gallery, _ = data.pid_splits(meta)
     held = set(gallery.loc[gallery["split"].isin(config["exclude_splits"]), "player_id"])
-    both = config.get("sampling", {}).get("colors", "black") == "both"
+    sampling = config.get("sampling", {})
+    both = sampling.get("colors", "black") == "both"
     keep = ~meta["player_id"].astype(str).isin(held)
     if not both:
         keep &= meta["color"].astype(str) == "B"
-    max_handicap = config.get("sampling", {}).get("max_handicap")
+    max_handicap = sampling.get("max_handicap")
     if max_handicap is not None:
         # HD >= 2 records carry the opponent's moves under the player's colour and lack the
         # handicap stones (CLAUDE.md section 1); the official competition-1 files have none.
@@ -76,9 +97,32 @@ def training_players(config: dict):
         keep &= handicap <= max_handicap
     games = meta[keep]
     groups = games.groupby(games["player_id"].astype(str), observed=True)["game_index"].apply(np.asarray)
-    player_games = [g for g in groups if len(g) >= config["batch"]["games"]]
+    groups = groups[groups.map(len) >= config["batch"]["games"]]
+    subset = sampling.get("player_subset")
+    if subset:
+        rank_of = games.groupby(games["player_id"].astype(str), observed=True)["rank"].first().astype(str)
+        mask = stratified_subset(groups.index.to_numpy().astype(str), rank_of[groups.index].to_numpy(),
+                                 groups.map(len).to_numpy(), subset["fraction"], subset["seed"])
+        groups = groups[mask]
+    player_games = list(groups)
+    info = {"players": [str(p) for p in groups.index], "gallery_players": [], "gallery_games": []}
+    extra = sampling.get("gallery_players")
+    if extra:
+        from go_aicup.data import cv
+        bank = pd.read_parquet(ROOT / "data" / "processed" / "identity" / "pid2_bank.parquet")
+        candidates, fixed, rest = cv.pid2_fixed_gallery(bank, extra["pool"], extra["gallery_seed"])
+        trained = set(np.concatenate(player_games).tolist())
+        shown = set(np.concatenate(fixed).tolist())
+        if shown & set(np.concatenate(rest).tolist()) or shown & trained:
+            raise ValueError("gallery games overlap the question games or the training games")
+        if set(candidates.astype(str)) & set(info["players"]):
+            raise ValueError("a gallery player is already a training player")
+        if min(len(g) for g in fixed) < config["batch"]["games"]:
+            raise ValueError("a gallery is smaller than batch.games")
+        info["gallery_players"] = [str(p) for p in candidates]
+        info["gallery_games"] = [g.tolist() for g in fixed]
     color = meta["player_color"].to_numpy().astype(np.int8) if both else None
-    return player_games, meta["length"].to_numpy(), len(held), color
+    return player_games, meta["length"].to_numpy(), len(held), color, info
 
 
 class EvalChunks(torch.utils.data.Dataset):
@@ -164,7 +208,13 @@ def main(argv=None) -> int:
         out.mkdir(parents=True, exist_ok=True)
         (out / "config.json").write_text(json.dumps(config, indent=2))
         (out / "environment.json").write_text(json.dumps(environment(device, world), indent=2))
-    player_games, lengths, held, player_color = training_players(config)
+    player_games, lengths, held, player_color, info = training_players(config)
+    extra_games = [np.asarray(g) for g in info["gallery_games"]]
+    extra_share = config.get("sampling", {}).get("gallery_players", {}).get("share", 0.0)
+    extra_per_group = int(round(extra_share * config["batch"]["players"])) if extra_games else 0
+    if rank == 0:       # reproducible list of what this run trains on
+        (out / "training_players.json").write_text(json.dumps(
+            {**info, "extra_per_group": extra_per_group}, separators=(",", ":")))
     batch, training = config["batch"], config["training"]
     if batch["players"] > len(player_games):
         raise ValueError("not enough training players for one GE2E group")
@@ -188,6 +238,7 @@ def main(argv=None) -> int:
         scheduler.load_state_dict(saved["scheduler"])
         start = saved["step"]
     log_event(out, rank, {"event": "start", "world": world, "training_players": len(player_games),
+                          "gallery_players": len(extra_games), "extra_per_group": extra_per_group,
                           "excluded_players": held, "start_step": start, "per_gpu_boards":
                           batch["players"] * batch["games"] * batch["moves"]})
 
@@ -211,7 +262,8 @@ def main(argv=None) -> int:
                           max_open_shards=config["loader"]["max_open_shards"], player_color=player_color,
                           min_ply=config.get("sampling", {}).get("min_ply", MIN_PLY),
                           player_d4=config.get("sampling", {}).get("player_d4", False),
-                          world=world if cross_gpu else 1)
+                          world=world if cross_gpu else 1, extra_games=extra_games,
+                          extra_per_group=extra_per_group)
     workers = config["loader"]["num_workers"]
     loader = torch.utils.data.DataLoader(dataset, batch_size=None, num_workers=workers, pin_memory=True,
                                          prefetch_factor=config["loader"]["prefetch_factor"] if workers else None,

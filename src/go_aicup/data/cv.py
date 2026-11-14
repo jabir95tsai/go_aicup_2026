@@ -536,3 +536,40 @@ def draw_pid2(bank: pd.DataFrame, pool: int, seed: int):
     frame = pd.DataFrame(questions)
     assert not set(np.concatenate(gallery).tolist()) & set(np.concatenate(frame["games"].to_list()).tolist())
     return candidates, gallery, frame
+
+
+def pid2_fixed_gallery(bank: pd.DataFrame, pool: int, gallery_seed: int):
+    """(candidates, gallery game lists, remaining game lists): one fixed choice of the
+    PID2_GALLERY gallery games per candidate, for encoders that train on the gallery
+    (candidate adaptation). The remaining games are the only source of questions."""
+    rng = np.random.default_rng([gallery_seed, pool, 11])
+    part = bank[bank["pool"] == pool]
+    candidates = np.array(sorted(part["player_id"].unique()))
+    games = {p: rng.permutation(np.sort(g["game"].to_numpy())) for p, g in part.groupby("player_id")}
+    gallery = [np.sort(games[p][:PID2_GALLERY]) for p in candidates]
+    rest = [np.sort(games[p][PID2_GALLERY:]) for p in candidates]
+    return candidates, gallery, rest
+
+
+def draw_pid2_fixed(bank: pd.DataFrame, pool: int, gallery_seed: int, seed: int):
+    """draw_pid2 with the gallery of pid2_fixed_gallery: every draw has the same gallery and
+    draws its questions from the candidates' other games only."""
+    candidates, gallery, rest = pid2_fixed_gallery(bank, pool, gallery_seed)
+    rng = np.random.default_rng([seed, pool, gallery_seed, 12])
+    games = [rng.permutation(g) for g in rest]
+    used = np.zeros(len(candidates), dtype=np.int64)
+    ks = rng.permutation(np.repeat(PID2_K, PID2_QUESTIONS // len(PID2_K)))
+    questions = []
+    for qid, k in enumerate(ks):
+        while True:
+            c = int(rng.integers(len(candidates)))
+            if used[c] + k <= len(games[c]):
+                break
+        questions.append({"question_id": qid, "player_id": candidates[c], "k": int(k),
+                          "games": np.sort(games[c][used[c]:used[c] + k])})
+        used[c] += int(k)
+    frame = pd.DataFrame(questions)
+    asked = np.concatenate(frame["games"].to_list())
+    assert len(asked) == len(set(asked.tolist())), "a game appears in two questions"
+    assert not set(np.concatenate(gallery).tolist()) & set(asked.tolist()), "question game in the gallery"
+    return candidates, gallery, frame

@@ -87,7 +87,8 @@ class GE2EBatches(torch.utils.data.Dataset):
     def __init__(self, cache_dir, player_games: list[np.ndarray], lengths: np.ndarray, *, players: int,
                  games: int, moves: int, steps: int, seed: int, rank: int, start_step: int = 0,
                  max_open_shards: int = 8, player_color: np.ndarray | None = None, min_ply: int = MIN_PLY,
-                 player_d4: bool = False, world: int = 1):
+                 player_d4: bool = False, world: int = 1, extra_games: list[np.ndarray] | None = None,
+                 extra_per_group: int = 0):
         # player_color[game] (0 black, 1 white): sample that colour's moves, white ones colour-swapped
         # (added test set, 2026-11-12). None = the original black-only sampling.
         # player_d4: every board of one sampled player gets the same random D4 transform, so a
@@ -97,6 +98,12 @@ class GE2EBatches(torch.utils.data.Dataset):
         # world > 1: the ranks' groups are pooled into one GE2E group (train_ge2e cross_gpu), so the
         # players of a step are drawn once for all ranks and never repeat across ranks.
         self.world = world
+        # extra_games: a second list of players (candidate galleries, 2026-11-14); every group
+        # holds exactly extra_per_group of them and players - extra_per_group ordinary players.
+        self.extra_games, self.extra_per_group = extra_games or [], int(extra_per_group)
+        if self.extra_per_group and (world > 1 or not 0 < self.extra_per_group < players
+                                     or self.extra_per_group > len(self.extra_games)):
+            raise ValueError("extra_per_group needs world == 1 and 0 < extra_per_group < players <= extra players")
         self.cache_dir, self.player_games, self.lengths = cache_dir, player_games, lengths
         self.shape = (players, games, moves)
         self.steps, self.seed, self.rank, self.start = steps, seed, rank, start_step
@@ -113,11 +120,18 @@ class GE2EBatches(torch.utils.data.Dataset):
             shared = np.random.default_rng([self.seed, step, 7])
             chosen = shared.choice(len(self.player_games), size=n * self.world,
                                    replace=False)[self.rank * n:(self.rank + 1) * n]
+        elif self.extra_per_group:
+            e = self.extra_per_group
+            chosen = rng.choice(len(self.player_games), size=n - e, replace=False)
+            extra = rng.choice(len(self.extra_games), size=e, replace=False)
         else:
             chosen = rng.choice(len(self.player_games), size=n, replace=False)
+        groups = [self.player_games[p] for p in chosen]
+        if self.extra_per_group:
+            groups += [self.extra_games[p] for p in extra]
         game_index, plies = [], []
-        for player in chosen:
-            for game in rng.choice(self.player_games[player], size=m, replace=False):
+        for games in groups:
+            for game in rng.choice(games, size=m, replace=False):
                 color = 0 if self.player_color is None else int(self.player_color[game])
                 candidates = own_plies(int(self.lengths[game]), color, self.min_ply)
                 game_index.append(np.full(s, game))

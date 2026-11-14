@@ -358,7 +358,7 @@ def main(argv=None) -> int:
          "rank_positions": counts.long().tolist(), "rank_weight": [round(float(w), 4) for w in rank_weight],
          "monitor_shards": [str(p) for p in monitor_shards], "args": vars(args) | {
              "data": str(args.data), "out": str(args.out), "vectors": str(args.vectors),
-             "monitor": str(args.monitor), "players": str(args.players)}})
+             "monitor": str(args.monitor), "players": str(args.players), "dev": str(args.dev)}})
     dev = None
     if args.dev is not None:
         dev = load_shards(sorted(p for p in args.dev.glob("pack_*") if (p / "meta.json").exists()), device)

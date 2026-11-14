@@ -39,6 +39,8 @@ def main() -> None:
     parser.add_argument("--draws", type=int, default=30)
     parser.add_argument("--first", type=int, default=100)
     parser.add_argument("--runs", nargs=2, required=True)
+    parser.add_argument("--fixed-gallery", type=int, default=None, metavar="SEED",
+                        help="score on cv.draw_pid2_fixed draws (the gallery an encoder was adapted to)")
     args = parser.parse_args()
 
     meta, prefix = train_prefix("d4")
@@ -64,7 +66,10 @@ def main() -> None:
 
     rows = []
     for draw in range(args.first, args.first + args.draws):
-        candidates, gallery, q = cv.draw_pid2(bank, args.pool, draw)
+        if args.fixed_gallery is None:
+            candidates, gallery, q = cv.draw_pid2(bank, args.pool, draw)
+        else:
+            candidates, gallery, q = cv.draw_pid2_fixed(bank, args.pool, args.fixed_gallery, draw)
         query = list(q["games"])
         op = twocolor.opening_scores(prefix, hashes, gallery, query, color, populations, runs[0][0]["opening"])
         cat = twocolor.category_scores(codes, gallery, query, 4)
@@ -78,7 +83,8 @@ def main() -> None:
         print(f"draw {draw}: {rows[-2]['all']:.4f} -> {rows[-1]['all']:.4f}", flush=True)
     frame = pd.DataFrame(rows)
     OUT.mkdir(parents=True, exist_ok=True)
-    frame.to_csv(OUT / f"{args.runs[0]}__{args.runs[1]}_pool{args.pool}.csv", index=False)
+    tag = "" if args.fixed_gallery is None else f"_gallery{args.fixed_gallery}"
+    frame.to_csv(OUT / f"{args.runs[0]}__{args.runs[1]}_pool{args.pool}{tag}.csv", index=False)
     cols = [str(k) for k in cv.PID2_K] + ["all"]
     a = frame[frame["run"] == 0].set_index("draw")[cols]
     b = frame[frame["run"] == 1].set_index("draw")[cols]
