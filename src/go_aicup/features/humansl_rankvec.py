@@ -121,6 +121,14 @@ def pack(table: pd.DataFrame, out: Path, cache: Path, workers: int, komi: float 
     import torch
     config = load_model(str(CKPT), use_swa=False, device=torch.device("cpu"))[0].config
     games = cache_games(table["game_index"], cache)
+    keep = None
+    if "plies" in table:     # C4g: only the listed plies of each game are encoded
+        keep = []
+        for (moves, _), plies in zip(games, table["plies"]):
+            mask = np.zeros(len(moves), dtype=bool)
+            mask[np.asarray(plies, dtype=np.int64)] = True
+            keep.append(mask)
+        games = [(moves, colors, mask) for (moves, colors), mask in zip(games, keep)]
     parts = {"bits": [], "globals": [], "target": [], "own": [], "game": []}
     started = time.monotonic()
     with mp.get_context("spawn").Pool(workers, initializer=_init_worker, initargs=(config, komi)) as pool:
@@ -130,7 +138,8 @@ def pack(table: pd.DataFrame, out: Path, cache: Path, workers: int, komi: float 
             parts["bits"].append(np.packbits(bins.reshape(len(bins), -1), axis=1))
             parts["globals"].append(globals_)
             parts["target"].append(played.astype(np.int16))
-            parts["own"].append(games[g][1] == table["player_color"].iloc[g])
+            own = games[g][1] == table["player_color"].iloc[g]
+            parts["own"].append(own if keep is None else own[keep[g]])
             parts["game"].append(np.full(len(played), g, dtype=np.int32))
     for name, value in parts.items():
         np.save(out / f"{name}.npy", np.concatenate(value))

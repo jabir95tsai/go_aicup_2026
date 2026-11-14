@@ -87,13 +87,16 @@ class GE2EBatches(torch.utils.data.Dataset):
     def __init__(self, cache_dir, player_games: list[np.ndarray], lengths: np.ndarray, *, players: int,
                  games: int, moves: int, steps: int, seed: int, rank: int, start_step: int = 0,
                  max_open_shards: int = 8, player_color: np.ndarray | None = None, min_ply: int = MIN_PLY,
-                 player_d4: bool = False):
+                 player_d4: bool = False, world: int = 1):
         # player_color[game] (0 black, 1 white): sample that colour's moves, white ones colour-swapped
         # (added test set, 2026-11-12). None = the original black-only sampling.
         # player_d4: every board of one sampled player gets the same random D4 transform, so a
         # player seen under 8 orientations acts as 8 training players while the within-player
         # orientation habits stay consistent (2026-11-13).
         self.player_color, self.min_ply, self.player_d4 = player_color, min_ply, player_d4
+        # world > 1: the ranks' groups are pooled into one GE2E group (train_ge2e cross_gpu), so the
+        # players of a step are drawn once for all ranks and never repeat across ranks.
+        self.world = world
         self.cache_dir, self.player_games, self.lengths = cache_dir, player_games, lengths
         self.shape = (players, games, moves)
         self.steps, self.seed, self.rank, self.start = steps, seed, rank, start_step
@@ -106,7 +109,12 @@ class GE2EBatches(torch.utils.data.Dataset):
     def sample(self, step: int):
         n, m, s = self.shape
         rng = np.random.default_rng([self.seed, self.rank, step])
-        chosen = rng.choice(len(self.player_games), size=n, replace=False)
+        if self.world > 1:
+            shared = np.random.default_rng([self.seed, step, 7])
+            chosen = shared.choice(len(self.player_games), size=n * self.world,
+                                   replace=False)[self.rank * n:(self.rank + 1) * n]
+        else:
+            chosen = rng.choice(len(self.player_games), size=n, replace=False)
         game_index, plies = [], []
         for player in chosen:
             for game in rng.choice(self.player_games[player], size=m, replace=False):

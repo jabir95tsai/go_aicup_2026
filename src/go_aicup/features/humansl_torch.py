@@ -76,23 +76,27 @@ def _init_worker(config: dict, komi: float | None = None) -> None:
 
 
 def encode_game(item):
-    """CPU worker: binary planes (uint8), global inputs, played tensor positions."""
-    moves, colors = item
+    """CPU worker: binary planes (uint8), global inputs, played tensor positions.
+    item = (moves, colors) or (moves, colors, keep): with a boolean keep, the whole game is replayed
+    but only the kept plies are encoded and returned."""
+    moves, colors, *rest = item
+    keep = rest[0] if rest else None
     board, _, gamestate, _ = _katago()
     rules = dict(gamestate.GameState.RULES_JAPANESE)
     if _KOMI is not None:
         rules["whiteKomi"] = float(_KOMI)
     state = gamestate.GameState(19, rules)
     bins, globals_, played = [], [], []
-    for move, color in zip(moves, colors):
+    for ply, (move, color) in enumerate(zip(moves, colors)):
         pla = board.Board.BLACK if color == 0 else board.Board.WHITE
         if state.board.pla != pla:
             raise ValueError("move colour does not match the side to move")
-        b, g = state.get_input_features(_FEATURES)
-        bins.append(b[0].astype(np.uint8)), globals_.append(g[0])
         row, col = divmod(int(move), 19)
         loc = state.board.loc(col, row)
-        played.append(_FEATURES.loc_to_tensor_pos(loc, state.board))
+        if keep is None or keep[ply]:
+            b, g = state.get_input_features(_FEATURES)
+            bins.append(b[0].astype(np.uint8)), globals_.append(g[0])
+            played.append(_FEATURES.loc_to_tensor_pos(loc, state.board))
         state.play(pla, loc)
     return np.stack(bins), np.stack(globals_).astype(np.float32), np.asarray(played, dtype=np.int64)
 

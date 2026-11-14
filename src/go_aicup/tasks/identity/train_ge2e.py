@@ -25,6 +25,7 @@ import signal
 import time
 
 import numpy as np
+import pandas as pd
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
@@ -64,6 +65,15 @@ def training_players(config: dict):
     keep = ~meta["player_id"].astype(str).isin(held)
     if not both:
         keep &= meta["color"].astype(str) == "B"
+    max_handicap = config.get("sampling", {}).get("max_handicap")
+    if max_handicap is not None:
+        # HD >= 2 records carry the opponent's moves under the player's colour and lack the
+        # handicap stones (CLAUDE.md section 1); the official competition-1 files have none.
+        table = pd.read_csv(ROOT / "data" / "raw" / "training" / "handicap.csv",
+                            usecols=["rank", "source_row", "handicap"])
+        handicap = meta[["rank", "source_row"]].merge(table, on=["rank", "source_row"], how="left",
+                                                      validate="1:1")["handicap"].to_numpy()
+        keep &= handicap <= max_handicap
     games = meta[keep]
     groups = games.groupby(games["player_id"].astype(str), observed=True)["game_index"].apply(np.asarray)
     player_games = [g for g in groups if len(g) >= config["batch"]["games"]]
@@ -194,12 +204,14 @@ def main(argv=None) -> int:
         if distributed():
             dist.barrier()
 
+    cross_gpu = bool(batch.get("cross_gpu", False)) and world > 1
     dataset = GE2EBatches(config["paths"]["cache_dir"], player_games, lengths, players=batch["players"],
                           games=batch["games"], moves=batch["moves"], steps=training["steps"],
                           seed=config["seed"], rank=rank, start_step=start,
                           max_open_shards=config["loader"]["max_open_shards"], player_color=player_color,
                           min_ply=config.get("sampling", {}).get("min_ply", MIN_PLY),
-                          player_d4=config.get("sampling", {}).get("player_d4", False))
+                          player_d4=config.get("sampling", {}).get("player_d4", False),
+                          world=world if cross_gpu else 1)
     workers = config["loader"]["num_workers"]
     loader = torch.utils.data.DataLoader(dataset, batch_size=None, num_workers=workers, pin_memory=True,
                                          prefetch_factor=config["loader"]["prefetch_factor"] if workers else None,
@@ -213,7 +225,17 @@ def main(argv=None) -> int:
         with autocast_context(config, device):
             moves = model(x)
         games = moves.float().reshape(n, m, s, -1).mean(dim=2)
-        loss, accuracy = ge2e_loss(games, raw.w, raw.b)
+        if cross_gpu:
+            # one GE2E group of world * n players: the other ranks' game vectors enter as constants,
+            # this rank's keep their graph. Every rank evaluates the same loss, so the DDP average of
+            # the per-rank gradients is 1/world of the full gradient; the factor restores it.
+            pooled = [torch.zeros_like(games) for _ in range(world)]
+            dist.all_gather(pooled, games.detach())
+            pooled[rank] = games
+            loss, accuracy = ge2e_loss(torch.cat(pooled), raw.w, raw.b)
+            loss = loss * world
+        else:
+            loss, accuracy = ge2e_loss(games, raw.w, raw.b)
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), training["gradient_clip_norm"])
@@ -224,7 +246,7 @@ def main(argv=None) -> int:
         window.append(now - clock)
         clock = now
         if step % training["log_every"] == 0 or step == training["steps"]:
-            stats = torch.stack([loss.detach(), accuracy.detach()])
+            stats = torch.stack([loss.detach() / (world if cross_gpu else 1), accuracy.detach()])
             if distributed():
                 dist.all_reduce(stats)
                 stats /= world
