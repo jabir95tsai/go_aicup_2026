@@ -41,6 +41,8 @@ def main() -> None:
     parser.add_argument("--runs", nargs=2, required=True)
     parser.add_argument("--fixed-gallery", type=int, default=None, metavar="SEED",
                         help="score on cv.draw_pid2_fixed draws (the gallery an encoder was adapted to)")
+    parser.add_argument("--weights", type=float, nargs=2, default=None, metavar=("LAMBDA", "MU"),
+                        help="score both runs with these fusion weights instead of each run's own")
     args = parser.parse_args()
 
     meta, prefix = train_prefix("d4")
@@ -61,6 +63,9 @@ def main() -> None:
         position = np.full(len(meta), -1)
         position[saved["game_index"]] = np.arange(len(saved["game_index"]))
         runs.append((summary, saved["swap"], position))
+    if args.weights is not None:
+        for summary, _, _ in runs:
+            summary["lambda"], summary["mu"] = args.weights
     if runs[0][0]["opening"] != runs[1][0]["opening"]:
         raise ValueError("runs chose different opening parameters; score them separately")
 
@@ -84,6 +89,8 @@ def main() -> None:
     frame = pd.DataFrame(rows)
     OUT.mkdir(parents=True, exist_ok=True)
     tag = "" if args.fixed_gallery is None else f"_gallery{args.fixed_gallery}"
+    if args.weights is not None:
+        tag += f"_l{args.weights[0]:g}_m{args.weights[1]:g}"
     frame.to_csv(OUT / f"{args.runs[0]}__{args.runs[1]}_pool{args.pool}{tag}.csv", index=False)
     cols = [str(k) for k in cv.PID2_K] + ["all"]
     a = frame[frame["run"] == 0].set_index("draw")[cols]

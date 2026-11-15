@@ -266,10 +266,74 @@ def evaluate(variant: str) -> None:
     (OUT / f"result_{variant}.json").write_text(json.dumps(result, indent=1))
 
 
+def export(variant: str, job: str) -> None:
+    """LB probe (11/14, user: submit near-miss arms): the cvec2 export (Valid-S + train20 + Valid-U
+    HD<=1, prior-matched B2, seed 2027) with the C block replaced by `variant`. The unchanged arm
+    must reproduce 751959-cvec2.csv exactly; only the C columns differ between the two fits."""
+    import go_aicup.tasks.strength.humansl as hs
+    import pickle
+    from go_aicup.data.board_cache import RANKS
+    from go_aicup.tasks.strength import humansl_predict as hp
+    from go_aicup.tasks.strength.submission_files import write_rank_csv
+    import scripts.strength.humansl_hd_filter as hf
+    import scripts.strength.humansl_p3_komi as p3
+    import scripts.strength.rank_cvec_v2 as cv2
+    import scripts.strength.rank_more_players as more
+    games, fit, eval_games, xs = cv2.data()
+    x_fit, x_eval = xs["v2"]
+    rows, arrays = variants("train")
+    arms = {"cvec2": (x_fit, x_eval),
+            variant: (with_variant(x_fit, fit["game_index"].to_numpy(), rows, arrays[variant]),
+                      with_variant(x_eval, eval_games["game_index"].to_numpy(), rows, arrays[variant]))}
+    hd01 = (fit["handicap"] <= 1).to_numpy()
+    valid_s = hd01 & (fit["role"] == "S").to_numpy()
+    u = (eval_games["handicap"] <= 1).to_numpy()
+    for name, (xf, xe) in arms.items():
+        if not (np.isfinite(xf[hd01]).all() and np.isfinite(xe[u]).all()):
+            raise ValueError(f"{name}: fitting games without features")
+    stacked = pd.concat([fit[hd01], eval_games[u]], ignore_index=True)
+    prior = more.player_prior(pd.concat([fit[valid_s], eval_games[u]], ignore_index=True))
+    hs.SEED = hf.SEED
+    models = {a: more.PriorMatched(prior).fit(stacked, pd.DataFrame(), np.vstack([xf[hd01], xe[u]]))
+              for a, (xf, xe) in arms.items()}
+    with hf.PRODUCTION.open("rb") as handle:
+        columns = pickle.load(handle)["info"]["columns"] + hp.HD1_COLUMNS
+    template = pd.read_csv(ROOT / "data" / "raw" / "tests" / "sample_submission_rank.csv", dtype=str)
+    out = {a: [] for a in arms}
+    for part in ("public", "private"):
+        _, x2, index = cv2.test_x(part, columns)
+        t_rows, t_arrays = variants(f"test_{part}")
+        xt = {"cvec2": x2, variant: with_variant(x2, index, t_rows, t_arrays[variant])}
+        if not np.isfinite(xt[variant]).all():
+            raise ValueError(f"{part}: test games without per-move data")
+        questions = hp.question_table(p3.WORK / f"rank_{part}")
+        for a, x in xt.items():
+            p = models[a].probabilities(x, index, questions)
+            out[a].append(pd.DataFrame({"question_id": questions["question_id"],
+                                        "pred_rank": [RANKS[r] for r in score_rank(p)]}))
+    result = {a: pd.concat(f, ignore_index=True).set_index("question_id").loc[template.question_id]["pred_rank"]
+              for a, f in out.items()}
+    base = pd.read_csv(ROOT / "submissions" / "rank" / "751959-cvec2.csv", dtype=str).set_index(
+        "question_id")["pred_rank"].loc[template.question_id]
+    if (result["cvec2"] != base).any():
+        raise ValueError(f"cvec2 refit does not reproduce 751959-cvec2.csv ({int((result['cvec2'] != base).sum())})")
+    changed = result[variant] != base
+    order = {r: i for i, r in enumerate(RANKS)}
+    step = result[variant][changed].map(order) - base[changed].map(order)
+    report = {"variant": variant, "public": int(changed[changed.index.str.startswith("pub")].sum()),
+              "private": int(changed[changed.index.str.startswith("priv")].sum()),
+              "step_counts": {str(int(s)): int(n) for s, n in step.value_counts().sort_index().items()},
+              "distribution": result[variant].value_counts().reindex(RANKS).fillna(0).astype(int).tolist(),
+              "file": write_rank_csv(result[variant].reset_index(), variant[:8], job).name}
+    print(json.dumps(report))
+    (OUT / f"export_{variant}_{job}.json").write_text(json.dumps(report, indent=1))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["features", "select", "evaluate", "auto"])
+    parser.add_argument("command", choices=["features", "select", "evaluate", "auto", "export"])
     parser.add_argument("--variant")
+    parser.add_argument("--job", default="local")
     parser.add_argument("--jobs", type=int, default=12)
     args = parser.parse_args()
     for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
@@ -280,6 +344,8 @@ def main() -> None:
         select(args.jobs)
     if args.command == "evaluate":
         evaluate(args.variant)
+    if args.command == "export":
+        export(args.variant, args.job)
     if args.command == "auto":      # Valid-U is read only when the pre-registered selection rule says so
         chosen = json.loads((OUT / "select.json").read_text())
         if chosen["proceed"]:

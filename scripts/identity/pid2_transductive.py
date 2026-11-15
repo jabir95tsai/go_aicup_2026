@@ -23,6 +23,8 @@ from __future__ import annotations
 import argparse
 import itertools
 import json
+import sys
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -256,7 +258,80 @@ def self_check() -> None:
     assert np.allclose(alpha0, cosine)
 
 
+def export(src: Path, out: Path, store_dir: Path, pool_name: str, question_name: str,
+           tau: float, alpha: float, iters: int) -> dict:
+    """Apply soft EM to an official predict2 output directory (CPU, cached vectors only):
+    rebuild the gallery / question game lists as predict2 does, check that the saved style
+    term and fused scores are reproduced, replace the style term by the expanded cosine and
+    write predictions.parquet for pid_submission merge."""
+    from go_aicup.data.preprocess import load_store
+    info = json.loads((src / "info.json").read_text())
+    summary = info["summary"]
+    if summary.get("use_per_k", False):
+        raise ValueError("per-k lambda is not supported here")
+    run = Path(summary["run_dir"]).name
+    swap = "swap" if summary["style"] == "style-swap" else "raw"
+    _, _, pool_meta = load_store(pool_name, store_dir, mmap=False)
+    _, _, q_meta = load_store(question_name, store_dir, mmap=False)
+    vectors = np.concatenate([np.load(src / f"{pool_name}_{run}_{swap}.npy"),
+                              np.load(src / f"{question_name}_{run}_{swap}.npy")])
+    unit = twocolor.normalise(vectors.astype(np.float64))
+    pool_players = pool_meta["player_id"].astype(str).to_numpy()
+    candidates = np.array(sorted(set(pool_players)))
+    assert np.array_equal(candidates, np.load(src / "candidates.npy", allow_pickle=True))
+    gallery = [np.flatnonzero(pool_players == c) for c in candidates]
+    question_ids = list(dict.fromkeys(q_meta["question_id"]))
+    rows_by_q = q_meta.groupby("question_id", sort=False).indices
+    query = [len(pool_meta) + np.sort(rows_by_q[q]) for q in question_ids]
+    ks = q_meta.groupby("question_id", sort=False)["num_games"].first().loc[question_ids].to_numpy()
+
+    parts = np.load(src / "parts.npz")
+    cosine = twocolor.style_scores(vectors, gallery, query)
+    assert np.allclose(summary["w"] * cosine, parts["style"]), "style term not reproduced"
+    other = parts["opening"] + summary["mu"] * parts["category"]
+    scale = summary["lambda"] * summary["w"]
+    base = other + scale * cosine
+    assert np.allclose(base, np.load(src / "scores.npy")), "fused scores not reproduced"
+    cos = expanded(unit, gallery, query, other, scale, cosine, tau, alpha, iters)
+    scores = other + scale * cos
+    ranked = np.argsort(-scores, axis=1)[:, :5]
+    old = pd.read_parquet(src / "predictions.parquet")
+    assert list(old["question_id"]) == question_ids
+    assert (old["top1"].to_numpy() == candidates[np.argmax(base, axis=1)]).all()
+    table = pd.DataFrame({"question_id": question_ids, "num_games": ks})
+    for j in range(5):
+        table[f"top{j + 1}"] = candidates[ranked[:, j]]
+    out.mkdir(parents=True, exist_ok=True)
+    table.to_parquet(out / "predictions.parquet", index=False)
+    np.save(out / "scores.npy", scores)
+    np.save(out / "candidates.npy", candidates)
+    changed = table["top1"].to_numpy() != old["top1"].to_numpy()
+    report = {"source": str(src), "tau": tau, "alpha": alpha, "iters": iters, "questions": len(question_ids),
+              "top1_changed": int(changed.sum()),
+              "top1_changed_by_k": {str(k): int(changed[ks == k].sum()) for k in sorted(set(ks))},
+              "summary": summary}
+    (out / "info.json").write_text(json.dumps(report, indent=2))
+    return report
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="command")
+    ex = sub.add_parser("export", help="apply a chosen arm to an official predict2 output directory")
+    ex.add_argument("--src", type=Path, required=True)
+    ex.add_argument("--out", type=Path, required=True)
+    ex.add_argument("--store-dir", type=Path, required=True)
+    ex.add_argument("--pool", required=True)
+    ex.add_argument("--questions", required=True)
+    ex.add_argument("--tau", type=float, required=True)
+    ex.add_argument("--alpha", type=float, required=True)
+    ex.add_argument("--iters", type=int, required=True)
+    if len(sys.argv) > 1 and sys.argv[1] == "export":
+        args = parser.parse_args()
+        self_check()
+        print(json.dumps({k: v for k, v in export(args.src, args.out, args.store_dir, args.pool, args.questions,
+                                                   args.tau, args.alpha, args.iters).items() if k != "summary"}))
+        return
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--run", required=True)
     parser.add_argument("--tune-draws", type=int, default=20)
