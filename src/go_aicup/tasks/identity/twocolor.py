@@ -19,7 +19,7 @@ import torch
 
 from go_aicup.data.board_cache import BoardCache, assemble_inputs
 from go_aicup.tasks.identity import opening
-from go_aicup.tasks.identity.ge2e import MIN_PLY
+from go_aicup.tasks.identity.ge2e import MIN_PLY, MovePoints, with_pick_plane
 from go_aicup.tasks.strength.shared.runtime import autocast_context
 
 
@@ -65,6 +65,7 @@ def embed_games(model, config, cache: BoardCache, games: np.ndarray, colors: np.
     sample_game, sample_ply = games[owner], np.concatenate(plies)
     sums = np.zeros((len(games), config["model"]["embedding"]), np.float64)
     model.eval()
+    points = None
     for start in range(0, len(owner), batch):
         span = slice(start, start + batch)
         histories, side = cache.history_batch(sample_game[span], sample_ply[span])
@@ -74,8 +75,13 @@ def embed_games(model, config, cache: BoardCache, games: np.ndarray, colors: np.
             white = side == 1
             histories[white] = histories[white][:, :, ::-1]
             side = np.zeros_like(side)
+        planes = assemble_inputs(histories, side)
+        if getattr(model, "pick", False):
+            if points is None:
+                points = MovePoints(cache)
+            planes = with_pick_plane(planes, points(sample_game[span], sample_ply[span]))
         with autocast_context(config, device):
-            vectors = model(torch.from_numpy(assemble_inputs(histories, side)).to(device, dtype=torch.float32))
+            vectors = model(torch.from_numpy(planes).to(device, dtype=torch.float32))
         np.add.at(sums, owner[span], vectors.float().cpu().numpy().astype(np.float64))
     return (sums / np.array([len(p) for p in plies])[:, None]).astype(np.float32)
 

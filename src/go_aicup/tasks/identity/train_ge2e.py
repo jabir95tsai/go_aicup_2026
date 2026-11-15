@@ -105,7 +105,9 @@ def training_players(config: dict):
                                  groups.map(len).to_numpy(), subset["fraction"], subset["seed"])
         groups = groups[mask]
     player_games = list(groups)
-    info = {"players": [str(p) for p in groups.index], "gallery_players": [], "gallery_games": []}
+    rank_ids = games.groupby(games["player_id"].astype(str), observed=True)["rank_id"].first()
+    info = {"players": [str(p) for p in groups.index], "gallery_players": [], "gallery_games": [],
+            "rank_ids": [int(r) for r in rank_ids[groups.index]]}
     extra = sampling.get("gallery_players")
     if extra:
         from go_aicup.data import cv
@@ -216,6 +218,8 @@ def main(argv=None) -> int:
         (out / "training_players.json").write_text(json.dumps(
             {**info, "extra_per_group": extra_per_group}, separators=(",", ":")))
     batch, training = config["batch"], config["training"]
+    if config["model"].get("pick") and config["eval_splits"]:
+        raise ValueError("eval_splits is not supported with a pick encoder; embed with pid2_bench")
     if batch["players"] > len(player_games):
         raise ValueError("not enough training players for one GE2E group")
 
@@ -263,7 +267,11 @@ def main(argv=None) -> int:
                           min_ply=config.get("sampling", {}).get("min_ply", MIN_PLY),
                           player_d4=config.get("sampling", {}).get("player_d4", False),
                           world=world if cross_gpu else 1, extra_games=extra_games,
-                          extra_per_group=extra_per_group)
+                          extra_per_group=extra_per_group, pick=config["model"].get("pick", False),
+                          player_rank=np.asarray(info["rank_ids"]),
+                          rank_focus=config.get("sampling", {}).get("rank_focus"))
+    if rank == 0 and dataset.rank_focus:
+        (out / "rank_exposure.json").write_text(json.dumps(dataset.rank_exposure(world)))
     workers = config["loader"]["num_workers"]
     loader = torch.utils.data.DataLoader(dataset, batch_size=None, num_workers=workers, pin_memory=True,
                                          prefetch_factor=config["loader"]["prefetch_factor"] if workers else None,
@@ -305,6 +313,8 @@ def main(argv=None) -> int:
             log_event(out, rank, {"event": "train", "step": step, "loss": float(stats[0]),
                                   "own_centroid_accuracy": float(stats[1]), "w": float(raw.w), "b": float(raw.b),
                                   "lr": optimizer.param_groups[0]["lr"],
+                                  "max_memory_gib": torch.cuda.max_memory_allocated(device) / 2 ** 30
+                                  if device.type == "cuda" else 0.0,
                                   "mean_step_seconds": float(np.mean(window[-training["log_every"]:]))})
         flag = torch.tensor(int(stop[0]), device=device)
         if distributed():
