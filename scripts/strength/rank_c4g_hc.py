@@ -82,13 +82,35 @@ def audit() -> dict:
     checks["c_arms_same_games"] = all(
         np.array_equal(np.load(OUT / a / "A" / f)["game_index"], z["game_index"])
         for a, f in (("few", "dev_final.npz"), ("many", "dev_final.npz")))
+    checks["no_duplicate_games"] = bool(games["game_index"].is_unique)
+    checks["h_all_finite"] = bool(np.isfinite(h).all())
+    sources, seen = {}, []
+    for value, komi in ((0, 6.5), (1, 0.5)):
+        for run in (more.OUT / f"h_hd{value}", OUT / f"h_dev_hd{value}"):
+            if not run.exists():
+                continue
+            logs = [json.loads(path.read_text().strip().splitlines()[-1]) for path in sorted(run.glob("shard_*.log"))]
+            index = more.hfeat.run_features(run)["game_index"]
+            seen.append(index[index.isin(games.loc[games["handicap"] == value, "game_index"])])
+            sources[str(run.relative_to(OUT.parent))] = {
+                "komi": sorted({log["komi"] for log in logs}), "model": sorted({log["model"] for log in logs}),
+                "games": int(sum(log["games_complete"] for log in logs)),
+                "complete": all(log["games"] == log["games_complete"] and log["katago_returncode"] == 0
+                                and log["rejected_queries"] == 0 for log in logs),
+                "profiles_same": all(log["profiles"] == logs[0]["profiles"] for log in logs),
+                "komi_ok": all(log["komi"] == komi for log in logs)}
+            sources[str(run.relative_to(OUT.parent))]["profiles"] = logs[0]["profiles"]
+    checks["h_single_source_per_game"] = bool(pd.concat(seen).is_unique)
+    checks["h_sources_complete_and_komi"] = all(v["complete"] and v["komi_ok"] and v["profiles_same"] for v in sources.values())
+    checks["h_one_model_and_profile_order"] = (len({tuple(v["model"]) for v in sources.values()}) == 1
+                                                and len({tuple(v["profiles"]) for v in sources.values()}) == 1)
     before, after = cell_players(games), cell_players(games[have])
     report = {"dev_games": int(len(games)), "with_h": int(have.sum()), "coverage": round(float(have.mean()), 4),
               "by_handicap": {str(hd): [int(have[games["handicap"] == hd].sum()), int((games["handicap"] == hd).sum())]
                               for hd in (0, 1)},
               "players": int(games["player_id"].nunique()),
               "players_with_any_h": int(games.loc[have, "player_id"].nunique()),
-              "checks": checks,
+              "checks": checks, "h_sources": sources,
               "players_rank_by_k_before": {str(k): before.loc[k].tolist() for k in K_BUCKETS},
               "players_rank_by_k_after": {str(k): after.loc[k].tolist() for k in K_BUCKETS}}
     (OUT / "hc_audit.json").write_text(json.dumps(report, indent=1))
