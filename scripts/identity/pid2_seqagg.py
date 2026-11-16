@@ -266,11 +266,13 @@ MAX_PLY = 512
 
 
 class Head(torch.nn.Module):
-    def __init__(self, attention: bool, dim: int = 256, hidden: int = 512, layers: int = 2, heads: int = 4):
+    def __init__(self, attention: bool, dim: int = 256, hidden: int = 512, layers: int = 2, heads: int = 4,
+                 position: bool = True):
         super().__init__()
         self.attention = attention
-        self.position = torch.nn.Embedding(MAX_PLY, dim)
-        torch.nn.init.normal_(self.position.weight, std=0.02)
+        self.position = torch.nn.Embedding(MAX_PLY, dim) if position else None
+        if position:
+            torch.nn.init.normal_(self.position.weight, std=0.02)
         if attention:
             self.blocks = torch.nn.ModuleList(torch.nn.TransformerEncoderLayer(
                 dim, heads, hidden, dropout=0.0, batch_first=True, norm_first=True) for _ in range(layers))
@@ -285,7 +287,7 @@ class Head(torch.nn.Module):
     def forward(self, x: torch.Tensor, ply: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
         """x [G, L, D] padded per-move vectors, ply [G, L], valid [G, L] bool -> game vectors [G, D]
         (mean over valid moves only)."""
-        h = x + self.position(ply)
+        h = x + self.position(ply) if self.position is not None else x
         for block in self.blocks:
             if self.attention:
                 h = block(h, src_key_padding_mask=~valid)
@@ -436,8 +438,8 @@ def train(args) -> None:
     print(f"loaded in {time.time() - started:.0f}s; {len(train_players)} training players, {int(held.sum())} held out "
           f"({eligible} with >= 20 games in the monitor)", flush=True)
 
-    torch.manual_seed(SEED)
-    head = Head(attention=args.arm == "C").to(device)
+    torch.manual_seed(args.seed)
+    head = Head(attention=args.arm == "C", position=not args.no_position).to(device)
     optimizer = torch.optim.AdamW(head.parameters(), lr=3e-4, weight_decay=1e-4)
     scheduler = scheduler_for(optimizer, args.steps, 0.05, 0.0)
     log = (out / "train.jsonl").open("w")
@@ -447,7 +449,7 @@ def train(args) -> None:
     best = {"score": -1.0, "step": -1, "monitor_A": monitor_a}
     t0, window = time.time(), []
     for step in range(1, args.steps + 1):
-        rng = np.random.default_rng([SEED, step])
+        rng = np.random.default_rng([args.seed, step])
         chosen = rng.choice(train_players, size=64, replace=False)
         rows = np.concatenate([rng.choice(rows_of[p], size=8, replace=False) for p in chosen])
         x, ply, valid = store.batch(rows, device)
@@ -480,8 +482,10 @@ def train(args) -> None:
             print(f"step {step}: loss {float(loss):.4f} monitor {score:.4f}", flush=True)
             if score > best["score"]:          # ties keep the earlier checkpoint
                 best.update(score=score, step=step)
-                torch.save({"model": head.state_dict(), "step": step, "arm": args.arm}, out / "best.pt")
-    torch.save({"model": head.state_dict(), "step": args.steps, "arm": args.arm}, out / "last.pt")
+                torch.save({"model": head.state_dict(), "step": step, "arm": args.arm, "position": not args.no_position,
+                            "seed": args.seed}, out / "best.pt")
+    torch.save({"model": head.state_dict(), "step": args.steps, "arm": args.arm, "position": not args.no_position,
+                "seed": args.seed}, out / "last.pt")
     (out / "result.json").write_text(json.dumps({"arm": args.arm, "best": best, "steps": args.steps,
                                                  "learned_w": float(head.w), "learned_b": float(head.b),
                                                  "hours": (time.time() - t0) / 3600}, indent=1))
@@ -620,6 +624,175 @@ def evaluate(args) -> None:
     print(json.dumps({k: v for k, v in report.items() if k not in ("pool0", "pool1")}, indent=1, default=float))
 
 
+def load_head(path: Path, device):
+    state = torch.load(path, map_location="cpu")
+    head = Head(attention=state["arm"] == "C", position=state.get("position", True)).to(device)
+    head.load_state_dict(state["model"])
+    return head, int(state["step"])
+
+
+def confirm(args) -> None:
+    """Sealed draws (first = 500): A and every named head, fused and style-only, paired against A.
+    Gate per head named B*: pool 1 delta >= +0.010, delta / se >= 2.5, every k >= -0.005, pool 0 delta > 0."""
+    from go_aicup.data import cv
+    from scripts.identity.pid2_diag_d123a import COLS, bucket_means, paired
+    from scripts.identity.pid2_paired import points
+    from scripts.identity.pid2_transductive import load
+    device = torch.device("cuda")
+    run = "pid_ge2e_v4_d4_hd_9600"
+    env = load(run)
+    saved = np.load(BENCH / run / "embeddings.npz")
+    meta = data.load_meta()
+    store = MoveStore(args.cache / "bench", meta["player_color"].to_numpy().astype(np.int8))
+    assert np.array_equal(store.games, saved["game_index"]) and store.finite
+    rows = np.arange(len(store.games))
+    vectors, steps = {"A": game_vectors(None, store, rows, device)}, {}
+    for item in args.heads:
+        name, directory = item.split("=")
+        head, steps[name] = load_head(Path(directory) / "best.pt", device)
+        vectors[name] = game_vectors(head, store, rows, device)
+    w = float(saved["w"])
+    out = []
+    for pool, n in ((0, 20), (1, 30)):
+        for draw in range(args.first, args.first + n):
+            candidates, gallery, q = cv.draw_pid2(env["bank"], pool, draw)
+            query = list(q["games"])
+            ks = q["k"].to_numpy()
+            rest = (twocolor.opening_scores(env["prefix"], env["hashes"], gallery, query, env["color"],
+                                            env["populations"], env["summary"]["opening"])
+                    + 1.0 * twocolor.category_scores(env["codes"], gallery, query, 4))
+            pos = env["position"]
+            g, qq = [pos[x] for x in gallery], [pos[x] for x in query]
+            for name, vec in vectors.items():
+                cosine = twocolor.style_scores(vec, g, qq)
+                for what, sc in (("fused", rest + 16.0 * w * cosine), ("style only", cosine)):
+                    out.append({"pool": pool, "draw": draw, "arm": name, "what": what,
+                                **bucket_means(points(sc, candidates, q), ks)})
+        print(f"pool {pool} done", flush=True)
+    frame = pd.DataFrame(out)
+    report = {"first_draw": args.first, "checkpoints": steps, "tables": {}, "gate": {}}
+    pd.set_option("display.width", 250, "display.max_columns", 40)
+    for pool in (0, 1):
+        for what in ("fused", "style only"):
+            part = frame[(frame["pool"] == pool) & (frame["what"] == what)]
+            t = paired(part, "A")
+            wide = part.pivot(index="draw", columns="arm", values=COLS)
+            for c in COLS[:-1]:
+                t[f"se_{c}"] = [float((wide[c][a] - wide[c]["A"]).std(ddof=1) / np.sqrt(len(wide))) for a in t["arm"]]
+            report["tables"][f"pool {pool} | {what}"] = t.to_dict(orient="records")
+            print(f"\n== sealed pool {pool}, {what}, difference to A ==\n{t.round(4).to_string(index=False)}")
+    f0 = pd.DataFrame(report["tables"]["pool 0 | fused"]).set_index("arm")
+    f1 = pd.DataFrame(report["tables"]["pool 1 | fused"]).set_index("arm")
+    for name in vectors:
+        if name == "A":
+            continue
+        z = f1.loc[name, "d_all"] / f1.loc[name, "se_all"]
+        buckets = {k: float(f1.loc[name, f"d_{k}"]) for k in ("1", "2", "3", "5")}
+        report["gate"][name] = {"pool0_delta": float(f0.loc[name, "d_all"]), "pool1_delta": float(f1.loc[name, "d_all"]),
+                                "pool1_se": float(f1.loc[name, "se_all"]), "pool1_z": float(z), "pool1_buckets": buckets,
+                                "pass": bool(f0.loc[name, "d_all"] > 0 and f1.loc[name, "d_all"] >= 0.010 and z >= 2.5
+                                             and min(buckets.values()) >= -0.005)}
+    gated = [n for n in report["gate"] if n.startswith("B_") and not n.startswith("B_nopos")]
+    report["confirmed"] = bool(gated) and all(report["gate"][n]["pass"] for n in gated)
+    b = [report["gate"][n]["pool1_delta"] for n in gated]
+    nopos = [report["gate"][n]["pool1_delta"] for n in report["gate"] if n.startswith("B_nopos")]
+    report["summary"] = {"B_seeds": gated, "B_mean": float(np.mean(b)), "B_range": [float(min(b)), float(max(b))],
+                         "nopos_mean": float(np.mean(nopos)) if nopos else None,
+                         "nopos_share_of_B": float(np.mean(nopos) / np.mean(b)) if nopos else None}
+    frame.to_csv(OUT / "confirm_per_draw.csv", index=False)
+    (OUT / "confirm.json").write_text(json.dumps(report, indent=1, default=float))
+    print(json.dumps({k: report[k] for k in ("checkpoints", "gate", "confirmed", "summary")}, indent=1, default=float))
+
+
+def export(args) -> None:
+    """Official added set: replace the style term of a predict2 output directory by head B.
+    A (plain mean of freshly extracted per-move vectors) must first reproduce the saved style
+    term and top-1 of that directory; then the style term is rebuilt from the head's game vectors
+    with the same w, lambda, mu, opening and category terms."""
+    from go_aicup.data.preprocess import load_store
+    from go_aicup.tasks.identity import assign
+    model, config, device = load_encoder(args.run)
+    info = json.loads((args.src / "info.json").read_text())
+    summary = info["summary"]
+    if summary.get("use_per_k", False) or summary["style"] != "style-swap":
+        raise ValueError("expects the fixed-lambda colour-swapped setting")
+    head, step = load_head(args.head / "best.pt", device)
+    parts = np.load(args.src / "parts.npz")
+    vec_a, vec_h = [], []
+    for name in (args.pool, args.questions):
+        _, _, meta_s = load_store(name, args.store_dir, mmap=False)
+        cache_dir = args.src / name / "cache"
+        games = pd.read_parquet(cache_dir / "games.parquet")
+        if len(games) != len(meta_s):
+            raise ValueError(f"{name}: board cache lost games")
+        rows = games["store_row"].to_numpy()
+        colour = (meta_s["color"].astype(str).to_numpy()[rows] == "W").astype(np.int8)
+        cache = BoardCache(cache_dir)
+        index = games["game_index"].to_numpy()
+        min_ply = config.get("sampling", {}).get("min_ply", 20)
+        if min_ply != 0:
+            raise ValueError("ply positions assume min_ply 0")
+        vec, off = move_vectors(model, config, cache, index, colour, games["length"].to_numpy(), device, min_ply)
+        # per-move rows for the head, in store order
+        part = MoveStore.__new__(MoveStore)
+        part.vectors = vec.astype(np.float16)
+        part.offsets = off
+        part.games = index
+        part.first_ply = colour.astype(np.int64)
+        a = np.empty((len(meta_s), 256), np.float32)
+        h = np.empty((len(meta_s), 256), np.float32)
+        a[rows] = game_vectors(None, part, np.arange(len(index)), device)
+        h[rows] = game_vectors(head, part, np.arange(len(index)), device)
+        old = np.load(args.src / f"{name}_{args.run}_swap.npy")
+        cos = (a * old).sum(1) / np.linalg.norm(a, axis=1) / np.linalg.norm(old, axis=1)
+        print(f"{name}: {len(meta_s)} games, A vs saved min cosine {cos.min():.6f}", flush=True)
+        if cos.min() < 0.9999:
+            raise ValueError(f"{name}: per-move vectors do not reproduce the saved game vectors")
+        vec_a.append(a)
+        vec_h.append(h)
+    _, _, pool_meta = load_store(args.pool, args.store_dir, mmap=False)
+    _, _, q_meta = load_store(args.questions, args.store_dir, mmap=False)
+    pool_players = pool_meta["player_id"].astype(str).to_numpy()
+    candidates = np.array(sorted(set(pool_players)))
+    assert np.array_equal(candidates, np.load(args.src / "candidates.npy", allow_pickle=True))
+    gallery = [np.flatnonzero(pool_players == c) for c in candidates]
+    question_ids = list(dict.fromkeys(q_meta["question_id"]))
+    rows_by_q = q_meta.groupby("question_id", sort=False).indices
+    query = [len(pool_meta) + np.sort(rows_by_q[q]) for q in question_ids]
+    ks = q_meta.groupby("question_id", sort=False)["num_games"].first().loc[question_ids].to_numpy()
+    w = summary["w"]
+    style_a = w * twocolor.style_scores(np.concatenate(vec_a), gallery, query)
+    rest = parts["opening"] + summary["mu"] * parts["category"]
+    base = np.load(args.src / "scores.npy")
+    old = pd.read_parquet(args.src / "predictions.parquet")
+    assert list(old["question_id"]) == question_ids
+    a_scores = rest + summary["lambda"] * style_a
+    agree = float((np.argmax(a_scores, 1) == np.argmax(base, 1)).mean())
+    report = {"source": str(args.src), "head": str(args.head), "checkpoint": step,
+              "A_style_max_abs_diff": float(np.abs(style_a - parts["style"]).max()),
+              "A_top1_agreement": agree}
+    print(json.dumps(report), flush=True)
+    if agree < 0.995:
+        raise ValueError("A does not reproduce the saved top-1")
+    style_h = w * twocolor.style_scores(np.concatenate(vec_h), gallery, query)
+    scores = rest + summary["lambda"] * style_h
+    ranked = assign.top5(scores)
+    table = pd.DataFrame({"question_id": question_ids, "num_games": ks})
+    for j in range(5):
+        table[f"top{j + 1}"] = candidates[ranked[:, j]]
+    args.out.mkdir(parents=True, exist_ok=True)
+    table.to_parquet(args.out / "predictions.parquet", index=False)
+    np.save(args.out / "scores.npy", scores)
+    np.save(args.out / "candidates.npy", candidates)
+    np.savez(args.out / "parts.npz", opening=parts["opening"], style=style_h, category=parts["category"])
+    changed = table["top1"].to_numpy() != old["top1"].to_numpy()
+    report.update(questions=len(question_ids), top1_changed=int(changed.sum()),
+                  top1_changed_by_k={str(k): int(changed[ks == k].sum()) for k in sorted(set(ks))},
+                  distinct_top1=int(table["top1"].nunique()), summary=summary)
+    (args.out / "info.json").write_text(json.dumps(report, indent=2))
+    print(json.dumps({k: v for k, v in report.items() if k != "summary"}))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -642,11 +815,27 @@ def main() -> None:
     t.add_argument("--timing-steps", type=int, default=200)
     t.add_argument("--budget-hours", type=float, default=1.9)
     t.add_argument("--monitor-seconds-guess", type=float, default=30.0)
-    t.add_argument("--tag", default="", help="suffix of the output directory (smoke runs)")
+    t.add_argument("--tag", default="", help="suffix of the output directory")
+    t.add_argument("--seed", type=int, default=SEED, help="initialisation and batch draws (holdout / monitor stay fixed)")
+    t.add_argument("--no-position", action="store_true")
     t.set_defaults(func=train)
     v = sub.add_parser("eval")
     v.add_argument("--cache", type=Path, required=True)
     v.set_defaults(func=evaluate)
+    c = sub.add_parser("confirm")
+    c.add_argument("--cache", type=Path, required=True)
+    c.add_argument("--heads", nargs="+", required=True, help="name=output directory with best.pt")
+    c.add_argument("--first", type=int, default=500)
+    c.set_defaults(func=confirm)
+    x = sub.add_parser("export")
+    x.add_argument("--run", default="pid_ge2e_v4_d4_hd_9600")
+    x.add_argument("--head", type=Path, required=True)
+    x.add_argument("--src", type=Path, required=True)
+    x.add_argument("--out", type=Path, required=True)
+    x.add_argument("--store-dir", type=Path, required=True)
+    x.add_argument("--pool", required=True)
+    x.add_argument("--questions", required=True)
+    x.set_defaults(func=export)
     args = parser.parse_args()
     args.func(args)
 
