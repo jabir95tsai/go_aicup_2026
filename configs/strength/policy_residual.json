@@ -1,0 +1,20 @@
+{
+  "out": "outputs/rank/humansl/policy_residual/seed2027_t1000_m200",
+  "seed": 2027,
+  "train_per_half_rank": 50,
+  "monitor_per_half_rank": 10,
+  "train_questions": 8000,
+  "monitor_questions": 4000,
+  "dev_questions": 8000,
+  "updates": 200,
+  "min_updates": 100,
+  "every": 50,
+  "patience": 3,
+  "questions_per_k": 2,
+  "position_chunk": 512,
+  "inference_positions": 409,
+  "encoder_workers": 10,
+  "compile_teacher": true,
+  "lr": 0.001,
+  "weight_decay": 0.0001
+}

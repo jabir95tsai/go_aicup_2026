@@ -54,3 +54,63 @@ These are new HD0 diagnostic sets, not the old E1/E2. Paired player bootstrap
 is reported for the first B2 seed; no production promotion or export follows.
 The first-stage network remains trained exclusively on train players, selected
 on hold CE, and fixed before B2 evaluation reads U labels.
+
+## Joint question-level GD (four independent jobs)
+
+`joint.py` reuses the original HD0 split, frozen C v2 likelihoods, board loader
+and attention architecture. Four linear 20→10 B2 heads (one per k) now receive
+the question's equal-game mean C. All four arms start at the same zero-score
+attention and TRAIN-only sklearn C=1 B2 solution; those four question-level
+StandardScalers remain fixed. No fixed temperature or direct side CE is used.
+
+Arms: `mean_gd` (uniform pooling, only B2 updates), `joint` (attention+B2),
+`joint_kl001` (joint + .01 KL), `joint_kl01` (joint + .1 KL).
+KL is `sum(w*log(w*n))` within each game/side, averaged over sides, then games
+within each question, then questions. A batch contains two questions in each
+(k, rank) cell: 80 questions / 1,000 game occurrences, all moves. Duplicate
+games within a batch are evaluated once, with gradients summed through reuse.
+
+`make_rank_questions` is the sole question generator: fixed 80,000 TRAIN
+questions (20,000 per k), 4,000 hold questions, same player/colour within a
+question, distinct games, balanced ranks and k. Sampling draws two distinct
+questions per cell per update; players may recur between questions. All arms
+use identical question seeds, initial weights and sample RNG. TRAIN excludes
+hold and U players. Unlike the historical B2 comparison, hold is not added to
+B2 fitting. These controlled rank-balanced draws differ from the historical
+PriorMatched training prior, so the old 0.725 score is not a direct baseline.
+
+AdamW .001; attention decay .0001. B2 uses explicit `||W||²/(2*N_k)` L2,
+matching the mean-CE form of sklearn C=1, with no bias penalty. At most 2,000
+updates, official hold Equal-k monitored every 200, strict improvement,
+patience 5 after at least 500 updates. Step 0 is eligible. The currently trained
+B2 heads are used directly for monitoring: no B2 refit at each checkpoint.
+Best is selected separately per arm, never by U. One training seed, 2027.
+
+```bash
+for arm in mean_gd joint joint_kl001 joint_kl01; do
+  sbatch --export=ALL,ARM="$arm" src/go_aicup/tasks/strength/board_attention/joint.slurm
+done
+```
+
+Config: `configs/strength/board_attention_joint.json`. Each job requests one
+H200 / 12 CPUs / 100GB / 2h. No GPU short test, as explicitly requested.
+Historical throughput suggests roughly 10–20 minutes per arm, unmeasured for
+joint GD; total allocation cap 8 GPU-h. Jobs are independent and not polled.
+Each loads/audits data and fits its identical warm start independently to avoid
+shared preparation races. No new full board cache is created.
+
+Output: `outputs/rank/humansl/board_attention_joint/seed2027_hd0/<arm>/`.
+`last.pt` resumes optimizer, question RNG, step and patience; `model.pt` is best
+hold score, `learning_curve.json` records CE/score and weight concentration.
+`initial.pt` preserves the sklearn baseline, scalers and attention start;
+`features.npz` stores all best-model C features, aligned with `games.parquet`.
+After freezing the best checkpoint, each job automatically scores both U HD0
+question draws (2027/2028), writes probabilities/predictions and paired player
+bootstrap versus its TRAIN-only sklearn mean baseline in `result.json`, then
+publishes `complete.json`. U never changes checkpoints, budgets or hyperparameters.
+Across-arm analysis is left to the user; U has been reused historically.
+
+Tests: `tests/test_board_attention_joint.py` covers KL, question/game weighting,
+same-colour split isolation, sklearn→Torch equivalence, joint/backbone gradients,
+fixed-mean control, exact CPU resume and final U publication/retry. No new
+submission files, production model replacement, or leaderboard upload occurs.

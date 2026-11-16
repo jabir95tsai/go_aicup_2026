@@ -236,6 +236,52 @@ def game_folds(meta: pd.DataFrame, players: pd.DataFrame) -> np.ndarray:
     return meta["player_id"].astype(str).map(mapping).to_numpy(np.int8)
 
 
+def make_policy_residual_games(meta: pd.DataFrame, halves: pd.DataFrame, dev: pd.DataFrame,
+                               seed: int = 2027, train_per_half_rank: int = 50,
+                               monitor_per_half_rank: int = 10) -> pd.DataFrame:
+    """A/B player sources, 20 same-colour HD<=1 games; preserve existing dev identities."""
+    if not meta.game_index.is_unique or not halves.player_id.is_unique or not dev.game_index.is_unique:
+        raise ValueError('duplicate game/player identities')
+    if min(train_per_half_rank, monitor_per_half_rank) < 1:
+        raise ValueError('each rank/half needs training and monitoring players')
+    if set(halves.player_id) & set(dev.player_id):
+        raise ValueError('A/B and dev players overlap')
+    pool = meta[meta.handicap.le(1)].merge(halves[['player_id', 'half']], on='player_id',
+                                         validate='many_to_one')
+    counts = pool.groupby(['rank_id', 'half', 'player_id', 'player_color']).size().rename('n').reset_index()
+    counts = counts.sort_values(['n', 'player_color'], ascending=[False, True]).drop_duplicates('player_id')
+    counts = counts[counts.n.ge(20)]
+    rng, selected = np.random.default_rng(seed), []
+    need = train_per_half_rank + monitor_per_half_rank
+    for rank in range(10):
+        for half in ('A', 'B'):
+            group = counts[counts.rank_id.eq(rank) & counts.half.eq(half)].sort_values('player_id')
+            if len(group) < need:
+                raise ValueError(f'not enough eligible players: rank={rank}, half={half}')
+            group = group.iloc[rng.permutation(len(group))[:need]].copy()
+            group['role'] = ['train'] * train_per_half_rank + ['monitor'] * monitor_per_half_rank
+            selected.append(group)
+    owners = pd.concat(selected, ignore_index=True)
+    games = pool.merge(owners[['player_id', 'player_color', 'role']],
+                       on=['player_id', 'player_color'], validate='many_to_one')
+    games = games.sort_values('game_index').iloc[rng.permutation(len(games))]
+    games = games.groupby('player_id', sort=False).head(20)
+    fields = ['game_index', 'rank_id', 'player_id', 'player_color', 'handicap', 'length']
+    held = meta.set_index('game_index').loc[dev.game_index, fields[1:]].reset_index()
+    if not np.array_equal(held.player_id.to_numpy(), dev.player_id.to_numpy()):
+        raise ValueError('dev source player identities changed')
+    held = held.assign(role='dev', half='dev')
+    result = pd.concat([games[fields + ['role', 'half']], held], ignore_index=True)
+    result = result.sort_values(['role', 'game_index']).reset_index(drop=True)
+    if (not result.game_index.is_unique or result.handicap.gt(1).any()
+            or result.groupby('player_id').role.nunique().gt(1).any()):
+        raise ValueError('overlap or invalid handicap in residual roles')
+    learn = result[result.role.ne('dev')]
+    if not learn.groupby('player_id').size().eq(20).all() or learn.groupby('player_id').player_color.nunique().gt(1).any():
+        raise ValueError('learning players require twenty same-colour games')
+    return result
+
+
 def make_rank_questions(meta: pd.DataFrame, player_ids, n_questions: int,
                         seed: int = SEED, balance_rank: bool = True) -> pd.DataFrame:
     """Test-shaped questions: one player, one colour, k games, k in K_BUCKETS.

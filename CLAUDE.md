@@ -350,6 +350,8 @@ H200 佇列限制**每張 GPU 最多 12 CPU 核心、200GB 主記憶體**；200G
 
 ## 10. 專案結構
 
+**共用資料放置（2026-11-16）：** 跨實驗重用的盤面／落子快取、固定切分與題組、HumanSL／引擎特徵、embedding 放 `data/processed/`；本機從 `outputs/` 搬移 3,357 個實體檔案（32.882659 GiB）至 `strength_features/`、`identity/artifacts/`、`release/`，保留舊路徑相對連結。權重、訓練狀態、log 與結果報表仍在 `outputs/`；執行中 job 787069 的 epoch run 專屬資料未搬。既有 `strength_train_hc/` 等資料保留原位；新共用資料直接寫入對應 `data/processed/` 版本目錄，不覆蓋其他來源。細節及完整路徑對照見 [SHARED_DATA_LAYOUT.md](SHARED_DATA_LAYOUT.md)。
+
 ```
 project/
 ├── CLAUDE.md                  # 本檔案（唯一事實來源；AGENTS.md 只指向這裡）
@@ -362,7 +364,7 @@ project/
 ├── data/                      # 不進 git
 │   ├── raw/training/          # 官方 v1.1 train_*.csv 與擷取的 handicap.csv
 │   ├── raw/tests/             # 官方候選庫／測試題（依實際下載檔案）
-│   └── processed/             # SGF → int16 memmap + metadata parquet；cv/ 切分表；eda/
+│   └── processed/             # SGF／盤面快取、cv/；strength_features/、identity/artifacts/、release/ 共用資料
 ├── src/go_aicup/              # 可重用程式（import 用），兩人分工以子目錄為界
 │   ├── paths.py               # repo 路徑只在這裡算一次
 │   ├── metrics.py             # 兩賽官方指標，一律分 k 桶回報（兩賽共用，不拆）

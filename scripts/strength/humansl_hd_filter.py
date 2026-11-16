@@ -74,6 +74,9 @@ def load_games() -> tuple[pd.DataFrame, np.ndarray]:
                       validate="one_to_one")
     index = np.load(STANDARD / "game_index.npy")
     hc = np.load(STANDARD / "features.npy")
+    if hc.shape != (len(index), 50):
+        raise ValueError("C v1 features were removed; this historical H+C comparison requires re-extraction. "
+                         "The standard array now contains H only; load C v2 explicitly for current experiments.")
     parts = []
     for role, name in (("U", "validation_unseen_category.npy"), ("S", "validation_seen_category.npy")):
         category = np.load(A024 / name)

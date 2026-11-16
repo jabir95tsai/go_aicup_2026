@@ -12,6 +12,10 @@
 | [EXTERNAL_RESOURCES.md](EXTERNAL_RESOURCES.md) | 外部資源申報清單（報告必備） |
 | [AGENTS.md](AGENTS.md) | 只指向 CLAUDE.md（給 Codex 等 agent） |
 
+## 共用實驗資料（2026-11-16）
+
+跨實驗的盤面／落子快取、固定題組、HumanSL／引擎特徵與 embedding 統一放 `data/processed/`；模型、訓練狀態與結果報表保留在 `outputs/`。本機已搬移 **3,357 個檔案、32.88 GiB**，舊路徑保留相容連結。分類位置、常用路徑、例外與驗證見 [共用資料說明](SHARED_DATA_LAYOUT.md)，逐項路徑見 [搬移對照](SHARED_DATA_MIGRATION_20261116.tsv)。
+
 ## 目前進度
 
 W1 完成：SGF 稽核、1M 盤轉檔、CV 切分與合成題組、兩賽官方指標、訊號 EDA（細節見 `RESULTS.md` A-001～A-006）。2026-10-12 已依 [第一版計畫](STRENGTH_V1_PLAN.md) 撰寫 Nano4 盤面 ResNet、資料索引／DataLoader、全域級別平均排序 loss、DDP 訓練／續跑與 training-only 切點評估。**依使用者要求，本次只寫程式，未執行任何新程式或測試；正確性、顯存、吞吐與分數尚未驗證。**
