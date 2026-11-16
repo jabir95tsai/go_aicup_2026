@@ -49,6 +49,35 @@ def own_plies(color: np.ndarray, length: np.ndarray, min_ply: int) -> list[np.nd
     return [np.arange(f, n, 2) for f, n in zip(first, length)]
 
 
+class _Planes(torch.utils.data.Dataset):
+    """Item i = assembled input planes of samples [i * batch, (i + 1) * batch), white colour-swapped."""
+
+    def __init__(self, cache_dir, games, plies, colors, batch):
+        self.cache_dir, self.games, self.plies, self.colors, self.batch = cache_dir, games, plies, colors, batch
+        self._cache = None
+
+    def __len__(self):
+        return (len(self.games) + self.batch - 1) // self.batch
+
+    def __getitem__(self, i):
+        if self._cache is None:
+            self._cache = BoardCache(self.cache_dir)
+        span = slice(i * self.batch, (i + 1) * self.batch)
+        histories, side = self._cache.history_batch(self.games[span], self.plies[span])
+        if not np.array_equal(side, self.colors[span]):
+            raise ValueError("sampled ply is not the player's move")
+        histories, side = as_black(histories, side)
+        return torch.from_numpy(assemble_inputs(histories, side)), i
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state["_cache"] = None
+        return state
+
+
+WORKERS = 10
+
+
 @torch.no_grad()
 def move_vectors(model, config, cache, games, colors, lengths, device, min_ply, batch=8192):
     """(float32 [moves, D] per-move vectors in game order then ply order, int64 [games + 1] offsets);
@@ -59,15 +88,13 @@ def move_vectors(model, config, cache, games, colors, lengths, device, min_ply, 
     sample_game, sample_ply = games[owner], np.concatenate(plies)
     out = np.empty((len(owner), config["model"]["embedding"]), np.float32)
     model.eval()
-    for start in range(0, len(owner), batch):
-        span = slice(start, start + batch)
-        histories, side = cache.history_batch(sample_game[span], sample_ply[span])
-        if not np.array_equal(side, colors[owner[span]]):
-            raise ValueError("sampled ply is not the player's move")
-        histories, side = as_black(histories, side)
+    dataset = _Planes(cache.directory, sample_game, sample_ply, colors[owner], batch)
+    loader = torch.utils.data.DataLoader(dataset, batch_size=None, num_workers=WORKERS, prefetch_factor=4,
+                                         multiprocessing_context="spawn", pin_memory=True)
+    for x, i in loader:
         with autocast_context(config, device):
-            vec = model(torch.from_numpy(assemble_inputs(histories, side)).to(device, dtype=torch.float32))
-        out[span] = vec.float().cpu().numpy()
+            vec = model(x.to(device, dtype=torch.float32, non_blocking=True))
+        out[i * batch:(i + 1) * batch] = vec.float().cpu().numpy()
     return out, np.concatenate([[0], np.cumsum(sizes)])
 
 
@@ -151,7 +178,7 @@ def load_encoder(run: str):
 
 
 def write_part(target: Path, model, config, device, cache, games, colors, lengths, min_ply,
-               chunk_moves: int, extra: dict) -> dict:
+               chunk_moves: int, extra: dict, max_chunks: int | None = None) -> dict:
     target.mkdir(parents=True, exist_ok=True)
     done = target / "chunks.json"
     if done.exists():
@@ -173,7 +200,11 @@ def write_part(target: Path, model, config, device, cache, games, colors, length
             done_before = np.load(path, mmap_mode="r").shape == (moves, config["model"]["embedding"])
         except (OSError, ValueError):            # missing or cut short by a time limit
             done_before = False
+        if not done_before and max_chunks is not None and max_chunks <= 0:
+            raise SystemExit(f"{target.name}: stopped after the requested number of new chunks")
         if not done_before:                      # chunk boundaries are deterministic, so a rerun resumes
+            if max_chunks is not None:
+                max_chunks -= 1
             vec, off = move_vectors(model, config, cache, part, colors[part], lengths[part], device, min_ply)
             np.save(path.with_suffix(".tmp.npy"), vec.astype(np.float16))
             path.with_suffix(".tmp.npy").replace(path)
@@ -203,12 +234,16 @@ def extract(args) -> None:
     bench = np.load(BENCH / args.run / "embeddings.npz")["game_index"]
     assert not np.isin(bench, games).any(), "a bench game is a training game"
     out = {"run": args.run}
-    out["bench"] = write_part(args.cache / "bench", model, config, device, cache, bench, colors, lengths,
-                              min_ply, args.chunk_moves, {})
-    out["train"] = write_part(args.cache / "train", model, config, device, cache, games, colors, lengths,
-                              min_ply, args.chunk_moves, {"players": players,
-                                                          "rank_ids": np.asarray(info["rank_ids"])})
-    (args.cache / "manifest.json").write_text(json.dumps(out, indent=1))
+    if "bench" in args.parts:
+        out["bench"] = write_part(args.cache / "bench", model, config, device, cache, bench, colors, lengths,
+                                  min_ply, args.chunk_moves, {}, args.max_chunks)
+    if "train" in args.parts:
+        out["train"] = write_part(args.cache / "train", model, config, device, cache, games, colors, lengths,
+                                  min_ply, args.chunk_moves, {"players": players,
+                                                              "rank_ids": np.asarray(info["rank_ids"])},
+                                  args.max_chunks)
+    if set(out) >= {"bench", "train"}:
+        (args.cache / "manifest.json").write_text(json.dumps(out, indent=1))
     print(json.dumps({k: (v if k == "run" else {"games": v["games"], "moves": v["moves"]}) for k, v in out.items()}))
 
 
@@ -384,7 +419,7 @@ def twocolor_style(gallery, questions, vec):
 def train(args) -> None:
     from go_aicup.tasks.identity.ge2e import ge2e_loss
     from go_aicup.tasks.strength.shared.training import scheduler_for
-    out = OUT / f"head_{args.arm}"
+    out = OUT / f"head_{args.arm}{args.tag}"
     out.mkdir(parents=True, exist_ok=True)
     device = torch.device("cuda")
     self_check(device)
@@ -597,6 +632,8 @@ def main() -> None:
     e.add_argument("--run", default="pid_ge2e_v4_d4_hd_9600")
     e.add_argument("--cache", type=Path, required=True)
     e.add_argument("--chunk-moves", type=int, default=2_000_000)
+    e.add_argument("--parts", nargs="+", default=["bench", "train"])
+    e.add_argument("--max-chunks", type=int, default=None, help="stop after this many new chunks (timing)")
     e.set_defaults(func=extract)
     t = sub.add_parser("train")
     t.add_argument("--arm", choices=("B", "C"), required=True)
@@ -605,6 +642,7 @@ def main() -> None:
     t.add_argument("--timing-steps", type=int, default=200)
     t.add_argument("--budget-hours", type=float, default=1.9)
     t.add_argument("--monitor-seconds-guess", type=float, default=30.0)
+    t.add_argument("--tag", default="", help="suffix of the output directory (smoke runs)")
     t.set_defaults(func=train)
     v = sub.add_parser("eval")
     v.add_argument("--cache", type=Path, required=True)
