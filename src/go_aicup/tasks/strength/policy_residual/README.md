@@ -166,3 +166,75 @@ H200s (4.2–5.4 allocated GPU-h); Slurm cap 90 minutes/7.5 GPU-h, 60 CPUs,
 500 GiB RAM. Shared policy cache about 56 GiB, persistent output budget 200 MB.
 32-question throughput and gradient-stat overhead are not yet GPU-measured.
 Per user request, submission is not followed by queue/execution monitoring.
+
+
+Four-arm branch experiment (2026-11-17, root `plan.md`):
+
+```bash
+sbatch src/go_aicup/tasks/strength/policy_residual/branches.slurm
+```
+
+Independent `branches.py` and `configs/strength/policy_branches.json` reuse the
+original immutable 785715 data and helpers. A0/R10/Z10/Z32 have 20/20/40/84
+question features; q uses the original scaler and z stays unscaled. All heads
+start with the same sklearn predictions, R10 output starts at zero, and Z
+outputs start random with zero head readout. Shared phi/scorer/hidden weights
+are identical. Every arm runs 3,000 AdamW updates at .0003, 32 balanced questions
+per update, 12 complete epochs. Full TRAIN/monitor evaluation occurs at step
+zero and every 125 updates. Strict monitor Equal-k alone selects the model;
+dev is evaluated only after the fixed budget. No automatic follow-up seeds.
+
+Five H200s extract into shared RAM, then four GPUs each train one arm. Allocation:
+60 CPUs, 500 GiB RAM, two hours, maximum ten allocated GPU-hours; expected
+90–120 minutes is extrapolated, not a measured guarantee. Deterministic CUDA
+aggregation is enabled for epoch replay. `last.pt` contains optimizer/RNG,
+coverage, history and the epoch-boundary best, so interrupted half-epoch best
+selection is rolled back before replay. Initial, selected and latest survive.
+
+Output: `outputs/rank/humansl/policy_branches/seed2027_b32_e12/<job_id>/`.
+Common games/questions/raw C use relative links. Persistent records include
+source/config/plan snapshots, environment, coverage per k, extraction precision,
+all evaluation metrics and deltas, q/added-logit RMS, compressed per-question
+predictions for all 25 TRAIN/monitor checkpoints, every-update gradient and
+update norms by group, selected features/predictions for all roles, player
+bootstrap comparisons (2,000 draws, unrounded gates), parameter counts, GPU
+memory, wall time and disk bytes. The 200 MiB disk budget excludes shared data
+links and the external Slurm stdout file. No full policy/gradient tensors are
+persisted. Missing root `complete.json` means the experiment is incomplete.
+
+Validation: `PYTHONPATH=src:. python -m pytest -q tests/test_policy_branches.py
+ tests/test_policy_residual.py tests/test_policy_residual_epoch.py` (one line).
+Submission is followed by no queue/execution polling; analysis waits for the user.
+
+
+### TRAIN/monitor persistent cache (2026-11-17)
+
+`python -m scripts.strength.select_cached_policy` freezes the A+B/original-monitor split in
+`data/processed/strength_features/humansl/policy_cnn/cached_AB_mondev_seed2027/` (refuses overwrite).
+`python -m go_aicup.tasks.strength.policy_residual.persistent_cache --validate-only` checks sources,
+packed headers, CPU ZIP/replay parity, C-vector player overlap, and free space without GPU work.
+Submit `src/go_aicup/tasks/strength/policy_residual/persistent_cache.slurm` for 5 GPUs, 60 CPUs,
+500 GiB RAM, and a 2-hour bound. It only extracts TRAIN/monitor; dev and model training are deferred.
+
+The optimized pipeline runs two independent producers per GPU: ZIP inputs have a four-shard buffer;
+replay workers continuously rebuild missing games into a bounded RAM buffer sized to that GPU's
+missing shards (about 2 GiB of packed replay inputs across the full job). Each process pool keeps two
+shards submitted. Inputs stay bit-packed through IPC and H2D, then reuse `humansl_rankvec.unpack`
+on the GPU. No supplementary input planes are persisted. Output `policy/unit_*/` shards contain `logp.npy` (FP16), `q.npy` (original FP32),
+`target.npy`, `side.npy`, `offsets.npy`, `game_index.npy`, and a checksum completion marker.
+The same command resumes verified shards; changed sources or corrupted shards fail explicitly.
+One background writer per GPU waits for the output-copy CUDA event, checks numerical precision,
+publishes and re-reads each shard to verify checksums. At most two outputs are in flight, so slow I/O
+applies bounded backpressure and failures propagate. No per-inference-batch `.cpu()` or scalar reads
+synchronize the GPU. Final publication checks the writer receipts rather than re-reading all new
+policy data. Resumed shards are still fully verified. Worker reports include input wait time, writer
+backpressure, and CUDA-event inference/copy times; these are not hardware utilization percentages.
+
+Consumers must verify `policy/complete.json` and the referenced shard markers before training.
+At the user's request, the cancelled job 792644's outputs (25 shards, about 1.3 GiB) are removed before
+restarting the optimized schema-2 extractor under the original `policy/` and `extract/<job_id>/` names.
+Unused `policy_stream_v2/` and `extract_stream_v2/` preflight artifacts are removed too. Shared selection,
+questions, ZIP inputs and teacher weights remain the same. Old and new extraction versions never mix.
+Cold-start source/CRC checks, compilation, and final draining still have fixed overhead. GPU throughput
+and asynchronous-copy behavior remain unmeasured. After submission, do not poll the new job.
+The original `Cache`/training runners still use RAM; this extraction does not launch them.

@@ -36,66 +36,15 @@ from go_aicup.data.board_cache import BoardCache, assemble_inputs
 from go_aicup.paths import ROOT
 from go_aicup.tasks.identity import data, twocolor
 from go_aicup.tasks.identity.ge2e import IdentityEncoder, as_black
+from go_aicup.tasks.identity.seqagg import (  # noqa: F401 (moved to src 2026-11-17)
+    HOLDOUT_SHARE, MAX_PLY, SEED, WORKERS, Head, MoveStore, game_vectors, holdout_players, load_head, monitor_score,
+    monitor_set, move_vectors, own_plies)
 from go_aicup.tasks.identity.train_ge2e import training_players
 from go_aicup.tasks.strength.shared.runtime import autocast_context
 
 OUT = ROOT / "outputs" / "pid" / "pid2_seqagg"
 BENCH = ROOT / "outputs" / "pid" / "pid2_bench"
 CAPS = (8, 16, 32, 64, None)
-
-
-def own_plies(color: np.ndarray, length: np.ndarray, min_ply: int) -> list[np.ndarray]:
-    first = min_ply + (color.astype(np.int64) - min_ply) % 2
-    return [np.arange(f, n, 2) for f, n in zip(first, length)]
-
-
-class _Planes(torch.utils.data.Dataset):
-    """Item i = assembled input planes of samples [i * batch, (i + 1) * batch), white colour-swapped."""
-
-    def __init__(self, cache_dir, games, plies, colors, batch):
-        self.cache_dir, self.games, self.plies, self.colors, self.batch = cache_dir, games, plies, colors, batch
-        self._cache = None
-
-    def __len__(self):
-        return (len(self.games) + self.batch - 1) // self.batch
-
-    def __getitem__(self, i):
-        if self._cache is None:
-            self._cache = BoardCache(self.cache_dir)
-        span = slice(i * self.batch, (i + 1) * self.batch)
-        histories, side = self._cache.history_batch(self.games[span], self.plies[span])
-        if not np.array_equal(side, self.colors[span]):
-            raise ValueError("sampled ply is not the player's move")
-        histories, side = as_black(histories, side)
-        return torch.from_numpy(assemble_inputs(histories, side)), i
-
-    def __getstate__(self):
-        state = self.__dict__.copy()
-        state["_cache"] = None
-        return state
-
-
-WORKERS = 10
-
-
-@torch.no_grad()
-def move_vectors(model, config, cache, games, colors, lengths, device, min_ply, batch=8192):
-    """(float32 [moves, D] per-move vectors in game order then ply order, int64 [games + 1] offsets);
-    white moves colour-swapped as in twocolor.embed_games(swap=True)."""
-    plies = own_plies(colors, lengths, min_ply)
-    sizes = np.array([len(p) for p in plies])
-    owner = np.repeat(np.arange(len(games)), sizes)
-    sample_game, sample_ply = games[owner], np.concatenate(plies)
-    out = np.empty((len(owner), config["model"]["embedding"]), np.float32)
-    model.eval()
-    dataset = _Planes(cache.directory, sample_game, sample_ply, colors[owner], batch)
-    loader = torch.utils.data.DataLoader(dataset, batch_size=None, num_workers=WORKERS, prefetch_factor=4,
-                                         multiprocessing_context="spawn", pin_memory=True)
-    for x, i in loader:
-        with autocast_context(config, device):
-            vec = model(x.to(device, dtype=torch.float32, non_blocking=True))
-        out[i * batch:(i + 1) * batch] = vec.float().cpu().numpy()
-    return out, np.concatenate([[0], np.cumsum(sizes)])
 
 
 def probe(args) -> None:
@@ -231,7 +180,7 @@ def extract(args) -> None:
     player_games, _, _, _, info = training_players(config)
     games = np.concatenate([np.sort(g) for g in player_games])
     players = np.repeat(np.arange(len(player_games)), [len(g) for g in player_games])
-    bench = np.load(BENCH / args.run / "embeddings.npz")["game_index"]
+    bench = np.load(BENCH / (args.bench_run or args.run) / "embeddings.npz")["game_index"]
     assert not np.isin(bench, games).any(), "a bench game is a training game"
     out = {"run": args.run}
     if "bench" in args.parts:
@@ -259,164 +208,6 @@ def extract(args) -> None:
 #    C - B isolates the cross-move interaction. Both add a learned embedding of the move's ply.
 # Training: GE2E (ge2e.ge2e_loss) on groups of 64 players x 8 games with every valid move of each
 # game; the player / game draws depend only on (seed, step), so both arms see the same sequence.
-
-SEED = 2026
-HOLDOUT_SHARE = 0.05
-MAX_PLY = 512
-
-
-class Head(torch.nn.Module):
-    def __init__(self, attention: bool, dim: int = 256, hidden: int = 512, layers: int = 2, heads: int = 4,
-                 position: bool = True):
-        super().__init__()
-        self.attention = attention
-        self.position = torch.nn.Embedding(MAX_PLY, dim) if position else None
-        if position:
-            torch.nn.init.normal_(self.position.weight, std=0.02)
-        if attention:
-            self.blocks = torch.nn.ModuleList(torch.nn.TransformerEncoderLayer(
-                dim, heads, hidden, dropout=0.0, batch_first=True, norm_first=True) for _ in range(layers))
-        else:
-            self.blocks = torch.nn.ModuleList(torch.nn.ModuleDict({
-                "norm": torch.nn.LayerNorm(dim),
-                "ff": torch.nn.Sequential(torch.nn.Linear(dim, hidden), torch.nn.ReLU(), torch.nn.Linear(hidden, dim))})
-                for _ in range(layers))
-        self.w = torch.nn.Parameter(torch.tensor(10.0))
-        self.b = torch.nn.Parameter(torch.tensor(-5.0))
-
-    def forward(self, x: torch.Tensor, ply: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
-        """x [G, L, D] padded per-move vectors, ply [G, L], valid [G, L] bool -> game vectors [G, D]
-        (mean over valid moves only)."""
-        h = x + self.position(ply) if self.position is not None else x
-        for block in self.blocks:
-            if self.attention:
-                h = block(h, src_key_padding_mask=~valid)
-            else:
-                h = h + block["ff"](block["norm"](h))
-        mask = valid[..., None].to(h.dtype)
-        return (h * mask).sum(1) / mask.sum(1)
-
-
-class MoveStore:
-    """All per-move vectors of one cache part in RAM, with per-game offsets and plies."""
-
-    def __init__(self, directory: Path, colors: np.ndarray):
-        record = json.loads((directory / "chunks.json").read_text())
-        self.games = np.load(directory / "games.npy")
-        self.offsets = np.load(directory / "offsets.npy")
-        if record["moves"] != self.offsets[-1] or record["games"] != len(self.games):
-            raise ValueError(f"{directory}: chunks.json does not match offsets")
-        self.vectors = np.empty((int(self.offsets[-1]), 256), np.float16)
-        for chunk in record["chunks"]:
-            start = self.offsets[chunk["first_game"]]
-            part = np.load(directory / chunk["file"])
-            if len(part) != chunk["moves"] or start + len(part) != self.offsets[chunk["first_game"] + chunk["games"]]:
-                raise ValueError(f"{chunk['file']}: size does not match its games")
-            self.vectors[start:start + len(part)] = part
-        self.finite = bool(np.isfinite(self.vectors).all())
-        self.first_ply = colors[self.games].astype(np.int64) + record["min_ply"]   # min_ply 0 -> colour
-        if record["min_ply"] != 0:
-            raise ValueError("ply positions assume min_ply 0")
-        self.extra = {p.stem: np.load(p) for p in directory.glob("*.npy")
-                      if p.stem in ("players", "rank_ids")}
-
-    def batch(self, rows: np.ndarray, device):
-        """rows = positions in self.games -> (x [G, L, D] float32, ply [G, L], valid [G, L])."""
-        sizes = self.offsets[rows + 1] - self.offsets[rows]
-        width = int(sizes.max())
-        index = np.concatenate([np.arange(a, b) for a, b in zip(self.offsets[rows], self.offsets[rows + 1])])
-        game = np.repeat(np.arange(len(rows)), sizes)
-        step = np.arange(len(index)) - np.repeat(np.cumsum(sizes) - sizes, sizes)
-        x = torch.zeros(len(rows), width, self.vectors.shape[1], device=device)
-        x[torch.from_numpy(game).to(device), torch.from_numpy(step).to(device)] = \
-            torch.from_numpy(self.vectors[index].astype(np.float32)).to(device)
-        ply = torch.zeros(len(rows), width, dtype=torch.long, device=device)
-        ply[torch.from_numpy(game).to(device), torch.from_numpy(step).to(device)] = \
-            torch.from_numpy(self.first_ply[rows][game] + 2 * step).to(device)
-        valid = torch.zeros(len(rows), width, dtype=torch.bool, device=device)
-        valid[torch.from_numpy(game).to(device), torch.from_numpy(step).to(device)] = True
-        return x, ply, valid
-
-
-def holdout_players(rank_ids: np.ndarray) -> np.ndarray:
-    """bool [players]: 5% of the players of every rank (rounded), fixed seed; shared by both arms."""
-    rng = np.random.default_rng([SEED, 5])
-    out = np.zeros(len(rank_ids), bool)
-    for r in np.unique(rank_ids):
-        members = np.flatnonzero(rank_ids == r)
-        out[rng.choice(members, size=int(round(HOLDOUT_SHARE * len(members))), replace=False)] = True
-    return out
-
-
-def monitor_set(store: MoveStore, held: np.ndarray, draws: int = 3):
-    """Fixed monitor questions on the held-out players: per draw every such player with >= 20 games
-    gets a 10-game gallery, and 400 questions (k = 1/2/3/5 x 100, player drawn with replacement)
-    take unused non-gallery games. -> list of (gallery rows per player, question rows, k, truth)."""
-    players = store.extra["players"]
-    by_player = {p: np.flatnonzero(players == p) for p in np.flatnonzero(held)}
-    eligible = [p for p, rows in by_player.items() if len(rows) >= 20]
-    out = []
-    for draw in range(draws):
-        rng = np.random.default_rng([SEED, 9, draw])
-        order = {p: rng.permutation(by_player[p]) for p in eligible}
-        used = {p: 10 for p in eligible}
-        gallery = [np.sort(order[p][:10]) for p in eligible]
-        questions, ks, truth = [], [], []
-        for k in rng.permutation(np.repeat([1, 2, 3, 5], 100)):
-            while True:
-                i = int(rng.integers(len(eligible)))
-                if used[eligible[i]] + k <= len(order[eligible[i]]):
-                    break
-            p = eligible[i]
-            questions.append(np.sort(order[p][used[p]:used[p] + k]))
-            used[p] += int(k)
-            ks.append(int(k))
-            truth.append(i)
-        rows = np.concatenate(gallery + questions)
-        assert len(np.unique(rows)) == len(rows), "a monitor game is used twice"
-        out.append((gallery, questions, np.array(ks), np.array(truth)))
-    return out, len(eligible)
-
-
-@torch.no_grad()
-def game_vectors(head, store: MoveStore, rows: np.ndarray, device, batch: int = 2048) -> np.ndarray:
-    out = np.empty((len(rows), 256), np.float32)
-    if head is not None:
-        head.eval()
-    for s in range(0, len(rows), batch):
-        part = rows[s:s + batch]
-        x, ply, valid = store.batch(part, device)
-        if head is None:
-            mask = valid[..., None].float()
-            v = (x * mask).sum(1) / mask.sum(1)
-        else:
-            v = head(x, ply, valid)
-        out[s:s + len(part)] = v.float().cpu().numpy()
-    if head is not None:
-        head.train()
-    return out
-
-
-def monitor_score(head, store, sets, device) -> float:
-    """Pure-style official score over the monitor draws (k buckets equally weighted)."""
-    from go_aicup.metrics import PID_WEIGHTS
-    from go_aicup.tasks.identity import assign
-    rows = np.unique(np.concatenate([np.concatenate(g + q) for g, q, _, _ in sets]))
-    vec = game_vectors(head, store, rows, device)
-    where = {r: i for i, r in enumerate(rows)}
-    totals = []
-    for gallery, questions, ks, truth in sets:
-        cos = twocolor_style([[where[r] for r in g] for g in gallery], [[where[r] for r in q] for q in questions], vec)
-        ranked = assign.top5(cos)
-        pts = ((ranked == truth[:, None]) * PID_WEIGHTS).sum(axis=1)
-        totals.append(np.mean([pts[ks == k].mean() for k in (1, 2, 3, 5)]))
-    return float(np.mean(totals))
-
-
-def twocolor_style(gallery, questions, vec):
-    from go_aicup.tasks.identity import twocolor
-    return twocolor.style_scores(vec, [np.asarray(g) for g in gallery], [np.asarray(q) for q in questions])
-
 
 def train(args) -> None:
     from go_aicup.tasks.identity.ge2e import ge2e_loss
@@ -624,13 +415,6 @@ def evaluate(args) -> None:
     print(json.dumps({k: v for k, v in report.items() if k not in ("pool0", "pool1")}, indent=1, default=float))
 
 
-def load_head(path: Path, device):
-    state = torch.load(path, map_location="cpu")
-    head = Head(attention=state["arm"] == "C", position=state.get("position", True)).to(device)
-    head.load_state_dict(state["model"])
-    return head, int(state["step"])
-
-
 def confirm(args) -> None:
     """Sealed draws (first = 500): A and every named head, fused and style-only, paired against A.
     Gate per head named B*: pool 1 delta >= +0.010, delta / se >= 2.5, every k >= -0.005, pool 0 delta > 0."""
@@ -702,6 +486,83 @@ def confirm(args) -> None:
     frame.to_csv(OUT / "confirm_per_draw.csv", index=False)
     (OUT / "confirm.json").write_text(json.dumps(report, indent=1, default=float))
     print(json.dumps({k: report[k] for k in ("checkpoints", "gate", "confirmed", "summary")}, indent=1, default=float))
+
+
+def compare(args) -> None:
+    """Bench comparison of encoder (+ head) arms, each from its own per-move bench cache, paired
+    against --base. Arm spec: name=cache_dir (plain mean) or name=cache_dir:head_file. Fusion as in
+    confirm: opening + 16 * w * cosine + category with the saved full-precision w of the 9,600-step run
+    for every arm. Pools / draws from --pools and --first; with --gate the confirm gate is applied to
+    every --gated arm (pool 1 delta >= --minimum-gain, z >= 2.5, k buckets >= -0.005, pool 0 delta > 0)."""
+    from go_aicup.data import cv
+    from scripts.identity.pid2_diag_d123a import COLS, bucket_means, paired
+    from scripts.identity.pid2_paired import points
+    from scripts.identity.pid2_transductive import load
+    device = torch.device("cuda")
+    run = "pid_ge2e_v4_d4_hd_9600"
+    env = load(run)
+    saved = np.load(BENCH / run / "embeddings.npz")
+    colors = data.load_meta()["player_color"].to_numpy().astype(np.int8)
+    vectors, info = {}, {}
+    for spec in args.arms:
+        name, rest = spec.split("=", 1)
+        cache_dir, _, head_file = rest.partition(":")
+        store = MoveStore(Path(cache_dir) / "bench", colors)
+        if not (np.array_equal(store.games, saved["game_index"]) and store.finite):
+            raise ValueError(f"{name}: bench cache does not match the bench games or is not finite")
+        head = None
+        if head_file:
+            head, step = load_head(Path(head_file), device)
+            info[name] = {"head": head_file, "step": step, "learned_w": float(head.w)}
+        vectors[name] = game_vectors(head, store, np.arange(len(store.games)), device)
+        del store
+        print(f"{name}: vectors ready", flush=True)
+    w = float(saved["w"])
+    out = []
+    for pool in args.pools:
+        for draw in range(args.first, args.first + {0: 20, 1: 30}[pool]):
+            candidates, gallery, q = cv.draw_pid2(env["bank"], pool, draw)
+            query = list(q["games"])
+            ks = q["k"].to_numpy()
+            rest = (twocolor.opening_scores(env["prefix"], env["hashes"], gallery, query, env["color"],
+                                            env["populations"], env["summary"]["opening"])
+                    + 1.0 * twocolor.category_scores(env["codes"], gallery, query, 4))
+            pos = env["position"]
+            g, qq = [pos[x] for x in gallery], [pos[x] for x in query]
+            for name, vec in vectors.items():
+                cosine = twocolor.style_scores(vec, g, qq)
+                for what, sc in (("fused", rest + 16.0 * w * cosine), ("style only", cosine)):
+                    out.append({"pool": pool, "draw": draw, "arm": name, "what": what,
+                                **bucket_means(points(sc, candidates, q), ks)})
+        print(f"pool {pool} done", flush=True)
+    frame = pd.DataFrame(out)
+    report = {"first_draw": args.first, "base": args.base, "arms": info, "w": w, "tables": {}, "gate": {},
+              "minimum_gain": getattr(args, "minimum_gain", 0.010)}
+    pd.set_option("display.width", 250, "display.max_columns", 40)
+    for pool in args.pools:
+        for what in ("fused", "style only"):
+            part = frame[(frame["pool"] == pool) & (frame["what"] == what)]
+            t = paired(part, args.base)
+            wide = part.pivot(index="draw", columns="arm", values=COLS)
+            for c in COLS[:-1]:
+                t[f"se_{c}"] = [float((wide[c][a] - wide[c][args.base]).std(ddof=1) / np.sqrt(len(wide)))
+                                for a in t["arm"]]
+            report["tables"][f"pool {pool} | {what}"] = t.to_dict(orient="records")
+            print(f"\n== pool {pool}, {what}, difference to {args.base} ==\n{t.round(4).to_string(index=False)}")
+    if args.gate:
+        f0 = pd.DataFrame(report["tables"]["pool 0 | fused"]).set_index("arm")
+        f1 = pd.DataFrame(report["tables"]["pool 1 | fused"]).set_index("arm")
+        for name in args.gated:
+            z = f1.loc[name, "d_all"] / f1.loc[name, "se_all"]
+            buckets = {k: float(f1.loc[name, f"d_{k}"]) for k in ("1", "2", "3", "5")}
+            report["gate"][name] = {"pool0_delta": float(f0.loc[name, "d_all"]), "pool1_delta": float(f1.loc[name, "d_all"]),
+                                    "pool1_se": float(f1.loc[name, "se_all"]), "pool1_z": float(z), "pool1_buckets": buckets,
+                                    "pass": bool(f0.loc[name, "d_all"] > 0 and f1.loc[name, "d_all"] >= report["minimum_gain"] and z >= 2.5
+                                                 and min(buckets.values()) >= -0.005)}
+    args.out.mkdir(parents=True, exist_ok=True)
+    frame.to_csv(args.out / "per_draw.csv", index=False)
+    (args.out / "report.json").write_text(json.dumps(report, indent=1, default=float))
+    print(json.dumps({k: report[k] for k in ("arms", "gate")}, indent=1, default=float))
 
 
 def export(args) -> None:
@@ -807,6 +668,8 @@ def main() -> None:
     e.add_argument("--chunk-moves", type=int, default=2_000_000)
     e.add_argument("--parts", nargs="+", default=["bench", "train"])
     e.add_argument("--max-chunks", type=int, default=None, help="stop after this many new chunks (timing)")
+    e.add_argument("--bench-run", default=None,
+                   help="run whose bench embeddings.npz lists the bench games (default --run; for fine-tuned encoders)")
     e.set_defaults(func=extract)
     t = sub.add_parser("train")
     t.add_argument("--arm", choices=("B", "C"), required=True)
@@ -827,6 +690,16 @@ def main() -> None:
     c.add_argument("--heads", nargs="+", required=True, help="name=output directory with best.pt")
     c.add_argument("--first", type=int, default=500)
     c.set_defaults(func=confirm)
+    m = sub.add_parser("compare")
+    m.add_argument("--arms", nargs="+", required=True, help="name=cache_dir or name=cache_dir:head_file")
+    m.add_argument("--base", required=True)
+    m.add_argument("--pools", type=int, nargs="+", default=[0, 1])
+    m.add_argument("--first", type=int, required=True)
+    m.add_argument("--gate", action="store_true")
+    m.add_argument("--minimum-gain", type=float, default=0.010)
+    m.add_argument("--gated", nargs="*", default=[])
+    m.add_argument("--out", type=Path, required=True)
+    m.set_defaults(func=compare)
     x = sub.add_parser("export")
     x.add_argument("--run", default="pid_ge2e_v4_d4_hd_9600")
     x.add_argument("--head", type=Path, required=True)

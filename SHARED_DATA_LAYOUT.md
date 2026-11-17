@@ -55,3 +55,35 @@
 - 本機完整檔案清冊與驗證結果：`data/processed/migrations/outputs_to_data_20261116/{manifest.json,journal.jsonl,verification.json,reader_checks.json}`；manifest 包含各檔案的搬移前身分與新舊位置，journal 記錄完成的每次搬移。
 
 未執行模型訓練、GPU 推論或全量分數重算；本次無模型或解碼修改，k=5／10／15／20 成績不新增、不宣稱改善。未全量重算檔案 SHA-256；以上是搬移身分與路徑完整性驗證。
+
+
+## 2026-11-17：C4x 下載備份後移除 Nano4 副本
+
+使用者回報已下載 `data/processed/strength_features/humansl/c4x/`，並刪除 Nano4 上的副本；本次唯讀檢查確認該目錄已不存在。下載目的地與備份完整性尚未驗證；IDE 顯示的 `data/processed/strength_features/humansl/c4x.sha256` 在本次 Nano4 檢查時亦不存在，因此未執行 SHA-256 核對。
+
+刪除前最後一次盤點為 **25,782,120,448 bytes（約 24.01 GiB）**：`learn_A/` 11.61 GiB、`learn_B/` 11.73 GiB、`monitor/` 約 683.29 MiB，以及根目錄切分表與棋局清單約 3.20 MiB。這是刪除前容量，並非刪除後配額實測差值。上方 2026-11-16 搬移清冊與驗證數字保留為歷史紀錄，不代表該資料目前仍在 Nano4。
+
+**移除範圍是整個 `c4x/`，包含 `halves.parquet`、`learn_*_hd*.parquet` 與監控資料，不只是 `learn_A/`、`learn_B/` 的 pack。** 既有 `outputs/rank/humansl/c4x/` 相容路徑若連到已移除資料，讀取也會失敗。`policy_residual/data.py` 的 prepare 仍引用該處的 `halves.parquet`；重做資料準備或重跑依賴 C4x 的實驗前，須從下載備份還原所需檔案與相容路徑。既有已準備完成的作業不能據此推定全部後續流程皆不受影響。
+
+若重新生成盤面 pack，既有入口為 `python -m scripts.strength.rank_c4x tables` → `sbatch slurm/rank_c4x_pack.slurm`；先確認原始切分身分及路徑，再決定還原或重建。兩半 pack 歷史成本約 5.9 GPU-hours，非本次實測。本次僅記錄使用者已完成的下載／刪除，未再刪檔、還原、重建或提交作業。
+
+
+### 2026-11-17：raw 與 strength_train_hc 僅保留 ZIP
+
+依使用者要求，已將 `data/raw/` 與 `data/processed/strength_train_hc/` 分別封存為同層的 `data/raw.zip`（413,620,651 bytes）與 `data/processed/strength_train_hc.zip`（2,268,546,012 bytes），並刪除兩個原目錄。兩份封存均以逐檔 SHA-256 比對來源、核對完整項目清單及符號連結，確認來源未變後才刪除；合計一般檔案邏輯容量減少 1,437,097,326 bytes（約 1.34 GiB）。ZIP 內保留頂層目錄，還原分別執行 `unzip data/raw.zip -d data/` 與 `unzip data/processed/strength_train_hc.zip -d data/processed/`。讀取原始 CSV、重做前處理或讀取舊 H/C 特徵前須先還原；既有指向 strength_train_hc 的相容連結未移除，還原前無法讀取。未改動其他資料或模型。
+
+
+### 2026-11-17：e2e_adam 僅保留 ZIP
+
+依使用者要求，`data/processed/identity/e2e_adam/` 已完整打包為同層 `e2e_adam.zip`（4,224,570,410 bytes），再次逐檔 SHA-256 核對封存內容與來源一致、確認來源未變後刪除原目錄（原一般檔案共 5,376,719,380 bytes，約 5.01 GiB）。ZIP 包含 lr1e5／lr3e5 兩臂的完整快取；重做依賴它們的分析前，執行 `unzip data/processed/identity/e2e_adam.zip -d data/processed/identity/` 還原。其他實驗目錄與模型未刪除。
+
+
+## 2026-11-17：strength_train_hc 下載備份後移除 Nano4 副本
+
+使用者回報已下載備份並刪除 Nano4 上的 `data/processed/strength_train_hc.zip`；本次唯讀檢查確認該 ZIP 與原目錄 `data/processed/strength_train_hc/` 均不存在。上方「raw 與 strength_train_hc 僅保留 ZIP」為較早的封存紀錄，strength_train_hc 現況以本節為準；本次未變更 raw 或 e2e_adam 的封存狀態。
+
+移除前 ZIP 為 **2,268,546,012 bytes（約 2.11 GiB）**，內含原目錄的一般檔案共 2,543,436,906 bytes（約 2.37 GiB）；封存當時已逐檔 SHA-256 比對來源。這不代表下載後的備份已驗證：下載目的地、備份完整性與校驗結果仍未知，本次無法核對外部備份。
+
+原目錄包含 `legacy/`、`standard/`、`se3_hc_b2/` 及來源 manifest；既有指向該目錄的相容連結在還原前無法讀取。重做依賴這批舊 H/C 特徵的 prepare／實驗前，先從下載備份將 ZIP 傳回 `data/processed/strength_train_hc.zip`，再執行 `unzip data/processed/strength_train_hc.zip -d data/processed/`，還原原目錄與相對路徑。
+
+本次僅更新文件，未再刪除資料、還原、重建或提交作業。

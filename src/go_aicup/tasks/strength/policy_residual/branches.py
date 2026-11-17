@@ -127,14 +127,43 @@ def branch_rms(model, head, c, raw, rows):
             'added_logits_rms': float(added_logits.square().mean().sqrt())}
 
 
+def save_predictions(directory, role, step, frame):
+    path = directory / f'{role}_step_{step:04d}.npz'
+    with path.with_suffix('.tmp').open('wb') as f:
+        np.savez_compressed(f, probabilities=frame[[f'p{r}' for r in range(10)]].to_numpy(),
+                            score=frame.score.to_numpy(), pred_rank=frame.pred_rank.to_numpy())
+    path.with_suffix('.tmp').replace(path)
+
+
+def paired_difference(a, b, k, player, rng):
+    delta = a - b
+    ids, inverse = np.unique(player, return_inverse=True)
+    sums = np.zeros((len(ids), 4))
+    counts = np.zeros_like(sums)
+    for j, bucket in enumerate(K_BUCKETS):
+        rows = k == bucket
+        np.add.at(sums[:, j], inverse[rows], delta[rows])
+        np.add.at(counts[:, j], inverse[rows], 1)
+    draws = rng.integers(0, len(ids), (2000, len(ids)))
+    denominator = counts[draws].sum(1)
+    if (denominator == 0).any():
+        raise ValueError('bootstrap draw has an empty k bucket')
+    by_k = sums[draws].sum(1) / denominator
+    values = by_k.mean(1)
+    return {'bootstrap_95': np.quantile(values, [.025, .975]).tolist(),
+            'by_k_bootstrap_95': {str(k): np.quantile(by_k[:, j], [.025, .975]).tolist()
+                                  for j, k in enumerate(K_BUCKETS)},
+            'bootstrap_draws': 2000, 'prob_positive': float((values > 0).mean())}
+
+
 def gate(diff):
     return diff['equal_k'] >= .005 and diff['prob_positive'] >= .90 and min(diff['by_k'].values()) >= -.005
 
 
 @torch.no_grad()
-def evaluate_role(model, head, cache, questions, role, chunk, train_count, baseline=False):
+def evaluate_role(model, head, cache, questions, role, chunk, train_count):
     ids = np.flatnonzero(cache.games.role.eq(role))
-    c = cache.arrays['c'][ids].to(cache.device) if baseline else game_features(model, cache, ids, chunk)
+    c = game_features(model, cache, ids, chunk)
     if not torch.isfinite(c).all():
         raise ValueError('nonfinite game features')
     q = questions[role]
@@ -170,19 +199,21 @@ def run_arm(case, cache, questions, initial_head, config, identity, out):
     optimizer = torch.optim.AdamW([
         {'params': model.parameters(), 'weight_decay': config['weight_decay']},
         {'params': head.parameters(), 'weight_decay': 0.}], lr=lr)
-    history = [{'epoch': 0, 'step': 0, **{
-        role: evaluate_role(model, head, cache, questions, role, chunk, count)[0]
-        for role in ('train', 'monitor')}}]
     reference_head = OriginalHead().to(cache.device)
     reference_head.load_state_dict(initial_head)
+    history = [{'epoch': 0, 'step': 0}]
     for role in ('train', 'monitor'):
         ids = np.flatnonzero(cache.games.role.eq(role))
         local_rows = question_rows(cache.games.iloc[ids].reset_index(drop=True), questions[role])
         reference = predict(reference_head, cache.arrays['c'][ids].to(cache.device), questions[role], local_rows)
-        actual = evaluate_role(model, head, cache, questions, role, chunk, count)
-        np.testing.assert_allclose(actual[1][[f'p{r}' for r in range(10)]], reference[3], atol=2e-6, rtol=2e-5)
-        if abs(actual[0]['ce'] - reference[0]['ce']) > 2e-6 or actual[0]['equal_k'] != reference[0]['equal_k']:
+        report, frame, _, _ = evaluate_role(model, head, cache, questions, role, chunk, count)
+        np.testing.assert_allclose(frame[[f'p{r}' for r in range(10)]], reference[3], atol=2e-6, rtol=2e-5)
+        if abs(report['ce'] - reference[0]['ce']) > 2e-6 or report['equal_k'] != reference[0]['equal_k']:
             raise ValueError('step-zero baseline mismatch')
+        report['delta_from_initial'] = {key: 0. for key in ('ce', 'head_l2', 'objective', 'equal_k')}
+        report['by_k_delta_from_initial'] = {str(k): 0. for k in K_BUCKETS}
+        history[0][role] = report
+        save_predictions(directory, role, 0, frame)
     epoch, step, best = 0, 0, history[0]['monitor']['equal_k']
     seen = np.zeros(len(cache.games), dtype=bool)
     last_path = directory / 'last.pt'
@@ -242,11 +273,7 @@ def run_arm(case, cache, questions, initial_head, config, identity, out):
                         report['by_k_delta_from_initial'] = {
                             k: report['by_k'][k] - history[0][role]['by_k'][k] for k in report['by_k']}
                         entry[role] = report
-                        path = directory / f'{role}_step_{step:04d}.npz'
-                        with path.with_suffix('.tmp').open('wb') as f:
-                            np.savez_compressed(f, probabilities=frame[[f'p{r}' for r in range(10)]].to_numpy(),
-                                                score=frame.score.to_numpy(), pred_rank=frame.pred_rank.to_numpy())
-                        path.with_suffix('.tmp').replace(path)
+                        save_predictions(directory, role, step, frame)
                     if entry['monitor']['equal_k'] > best:
                         best = entry['monitor']['equal_k']
                         atomic_save(state(model, head, identity, step), directory / 'model.pt')
@@ -287,6 +314,8 @@ def run_arm(case, cache, questions, initial_head, config, identity, out):
                'seconds_this_session': time.monotonic() - started,
                'training_games_seen': int(seen.sum()),
                'training_players_seen': int(cache.games.loc[seen].player_id.nunique()),
+               'encoder_parameters': sum(p.numel() for p in model.parameters()),
+               'head_parameters': sum(p.numel() for p in head.parameters()),
                'parameters': sum(p.numel() for p in model.parameters()) + sum(p.numel() for p in head.parameters()),
                'peak_gpu_gib': (torch.cuda.max_memory_allocated(cache.device) / 2**30
                                 if cache.device.type == 'cuda' else None)})
@@ -295,13 +324,14 @@ def run_arm(case, cache, questions, initial_head, config, identity, out):
 
 def train_worker(rank, games, bounds, arrays, questions, initial, config, identity, out):
     torch.set_num_threads(1)
+    torch.use_deterministic_algorithms(True)
+    torch.backends.cuda.matmul.allow_tf32 = False
     torch.cuda.set_device(rank)
     cache = Cache(games, bounds, arrays, torch.device('cuda', rank))
     run_arm(CASES[rank], cache, questions, initial, config, identity, out)
 
 
 def summarize(out, identity, seed):
-    from scripts.strength.rank_hier_head import difference
     results, frames = {}, {}
     for name, _, _ in CASES:
         marker = json.loads((out / name / 'complete.json').read_text())
@@ -317,7 +347,7 @@ def summarize(out, identity, seed):
     pairs = [('Z10', 'R10'), ('Z32', 'Z10'), ('Z32', 'A0'), ('Z32', 'R10'), ('R10', 'A0'), ('Z10', 'A0')]
     differences = {}
     for a, b in pairs:
-        diff = difference(frames[a].score.to_numpy(), frames[b].score.to_numpy(),
+        diff = paired_difference(frames[a].score.to_numpy(), frames[b].score.to_numpy(),
                           ref.k.to_numpy(), ref.player_id.to_numpy(), np.random.default_rng(seed + 99))
         delta = frames[a].score.to_numpy() - frames[b].score.to_numpy()
         diff['by_k'] = {str(k): float(delta[ref.k.to_numpy() == k].mean()) for k in K_BUCKETS}
@@ -361,6 +391,9 @@ def main():
     record = {'config': config, 'source_identity': source_identity['identity'],
               'question_hashes': {role: file_hash(source / f'{role}_questions.parquet') for role in questions},
               'initial_head_sha256': file_hash(source / 'initial_head.pt'),
+              'raw_c_sha256': file_hash(source / 'raw_c.npz'),
+              'plan_sha256': file_hash(ROOT / 'plan.md'),
+              'requirements_sha256': file_hash(ROOT / 'requirements.txt'),
               'sources': {name: file_hash(Path(__file__).with_name(name)) for name in
                           ('branches.py', 'epoch.py', 'model.py', 'train.py', 'data.py', 'evaluate_train.py')}, 'cases': CASES, 'steps_per_epoch': steps}
     identity = object_hash(record)
@@ -368,9 +401,20 @@ def main():
         raise ValueError('existing run identity changed')
     write_json(out / 'identity.json', dict(record, identity=identity))
     write_json(out / 'config.json', config)
-    for name in ('games.parquet', 'train_questions.parquet', 'monitor_questions.parquet', 'dev_questions.parquet'):
+    for name in ('games.parquet', 'train_questions.parquet', 'monitor_questions.parquet', 'dev_questions.parquet',
+                 'raw_c.npz', 'initial_head.pt'):
         if not (out / name).exists():
-            shutil.copyfile(source / name, out / name)
+            (out / name).symlink_to(os.path.relpath((source / name).resolve(), out.resolve()))
+    if not (out / 'requirements.txt').exists():
+        shutil.copyfile(ROOT / 'requirements.txt', out / 'requirements.txt')
+    if not (out / 'plan.md').exists():
+        shutil.copyfile(ROOT / 'plan.md', out / 'plan.md')
+    snapshot = out / 'source'
+    snapshot.mkdir(exist_ok=True)
+    for name in record['sources']:
+        path = Path(__file__).with_name(name)
+        if not (snapshot / name).exists():
+            shutil.copyfile(path, snapshot / name)
     if args.prepare_only:
         print(json.dumps({'status': 'prepared', 'out': str(out), 'steps_per_epoch': steps, 'cases': CASES}))
         return
@@ -384,8 +428,11 @@ def main():
     torch.set_num_threads(4)
     started = time.monotonic()
     import platform
+    import importlib.metadata
     import subprocess
     write_json(out / 'environment.json', {'python': platform.python_version(), 'torch': torch.__version__,
+               'packages': {name: importlib.metadata.version(name) for name in
+                            ('numpy', 'pandas', 'scikit-learn', 'pyarrow')},
                'cuda': torch.version.cuda, 'cudnn': torch.backends.cudnn.version(),
                'devices': [torch.cuda.get_device_name(i) for i in range(5)],
                'slurm_job_id': os.environ.get('SLURM_JOB_ID'), 'host': platform.node(),
@@ -418,14 +465,15 @@ def main():
         arrays['c'].copy_(torch.from_numpy(raw['c']))
         write_json(out / 'extraction_complete.json', {'positions': int(bounds[-1]), 'seconds': time.monotonic() - started,
                    'cached_C_mean_max_abs_error': error, 'original_C_mean_max_abs_error': drift})
-        np.savez(out / 'raw_c.npz', game_index=games.game_index.to_numpy(), c=arrays['c'].numpy())
         initial = torch.load(source / 'initial_head.pt', map_location='cpu', weights_only=False)
         mp.spawn(train_worker, args=(games, bounds, arrays, questions, initial, config, identity, out), nprocs=4)
     result = summarize(out, identity, config['seed'])
     result['resources'] = {'wall_seconds': time.monotonic() - started,
                            'estimated_allocated_gpu_hours': 5 * (time.monotonic() - started) / 3600,
                            'allocated_gpus': 5, 'shared_cache_bytes': ram_bytes,
-                           'persistent_bytes_before_final_report': sum(p.stat().st_size for p in out.rglob('*') if p.is_file())}
+                           'persistent_budget_bytes': 200 * 2**20,
+                           'slurm_stdout': f"outputs/slurm-rank-policy-branches-{os.environ.get('SLURM_JOB_ID')}.out",
+                           'persistent_bytes_before_final_report': sum(p.stat().st_size for p in out.rglob('*') if p.is_file() and not p.is_symlink())}
     if result['resources']['persistent_bytes_before_final_report'] > 200 * 2**20:
         raise RuntimeError('persistent output exceeded the approved 200 MiB budget; artifacts retained')
     write_json(out / 'result.json', result)

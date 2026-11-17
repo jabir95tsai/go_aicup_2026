@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import numpy as np
 import torch
+import torch.utils.checkpoint
 from torch import nn
 import torch.nn.functional as F
 
@@ -29,8 +30,13 @@ MIN_PLY = 20
 
 class IdentityEncoder(nn.Module):
     def __init__(self, channels: int = 256, blocks: int = 20, embedding: int = 256,
-                 bn_eps: float = 1e-5, bn_momentum: float = 0.1, pick: bool = False):
+                 bn_eps: float = 1e-5, bn_momentum: float = 0.1, pick: bool = False,
+                 checkpoint_segments: int = 0):
         super().__init__()
+        # checkpoint_segments > 0 (2026-11-17, E2E-scratch): recompute the residual blocks in that
+        # many segments during backward (activation checkpointing) so 48-move groups fit in memory.
+        # Training only; the recompute updates BatchNorm running statistics a second time.
+        self.checkpoint_segments = int(checkpoint_segments)
         trunk = StrengthResNet(channels, blocks, bn_eps=bn_eps, bn_momentum=bn_momentum)
         self.stem, self.blocks = trunk.stem, trunk.blocks
         # pick (2026-11-15): the trunk feature at the point the player is about to play joins the
@@ -50,13 +56,19 @@ class IdentityEncoder(nn.Module):
         if any(k.startswith(("stem.", "blocks.")) for k in missing.missing_keys) or missing.unexpected_keys:
             raise ValueError("trunk state does not match the encoder")
 
+    def trunk(self, h: torch.Tensor) -> torch.Tensor:
+        if self.checkpoint_segments and self.training and torch.is_grad_enabled():
+            return torch.utils.checkpoint.checkpoint_sequential(self.blocks, self.checkpoint_segments, h,
+                                                                use_reentrant=False)
+        return self.blocks(h)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if not self.pick:
-            h = self.blocks(self.stem(x))
+            h = self.trunk(self.stem(x))
             return self.project(torch.cat([h.mean(dim=(2, 3)), h.amax(dim=(2, 3))], dim=1))
         if x.shape[1] != 19:
             raise ValueError("a pick encoder needs the move plane (with_pick_plane)")
-        h = self.blocks(self.stem(x[:, :18]))
+        h = self.trunk(self.stem(x[:, :18]))
         picked = (h * x[:, 18:19].to(h.dtype)).sum(dim=(2, 3))
         return self.project(torch.cat([h.mean(dim=(2, 3)), h.amax(dim=(2, 3)), picked], dim=1))
 

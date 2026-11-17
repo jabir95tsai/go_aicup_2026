@@ -1,0 +1,72 @@
+{
+  "seed": 2026,
+  "device": "cuda",
+  "precision": "bf16",
+  "paths": {
+    "cache_dir": "data/processed/boards/strength_v1",
+    "init_model": "outputs/pid/ge2e/pid_ge2e_v4_d4_hd_9600/model.pt",
+    "init_head": "outputs/pid/pid2_seqagg/head_B/best.pt",
+    "move_cache": "/home/jason1122/pid2_seqagg_cache/train",
+    "output_dir": "outputs/pid/ge2e/pid_e2e_adam_lr3e5",
+    "init_optimizer": "outputs/pid/ge2e/pid_ge2e_v4_d4_hd_9600/last.pt",
+    "bench_cache": "/home/jason1122/pid2_seqagg_cache"
+  },
+  "exclude_splits": [
+    0,
+    1,
+    2
+  ],
+  "eval_splits": [],
+  "model": {
+    "channels": 256,
+    "blocks": 20,
+    "embedding": 256,
+    "bn_eps": 1e-05,
+    "bn_momentum": 0.1
+  },
+  "batch": {
+    "players": 64,
+    "games": 8,
+    "moves": 16
+  },
+  "loader": {
+    "num_workers": 4,
+    "prefetch_factor": 2,
+    "max_open_shards": 16
+  },
+  "optimizer": {
+    "lr": 3e-05,
+    "weight_decay": 0.0001,
+    "betas": [
+      0.9,
+      0.999
+    ],
+    "eps": 1e-08
+  },
+  "training": {
+    "steps": 4800,
+    "warmup_fraction": 0.05,
+    "minimum_lr_ratio": 0.0,
+    "gradient_clip_norm": 1.0,
+    "log_every": 10,
+    "checkpoint_steps": 400,
+    "deterministic": false,
+    "cudnn_benchmark": false,
+    "allow_tf32": false
+  },
+  "evaluation": {
+    "batch": 8192
+  },
+  "sampling": {
+    "colors": "both",
+    "min_ply": 0,
+    "player_d4": true,
+    "max_handicap": 1
+  },
+  "e2e": {
+    "arm": "joint",
+    "monitor_every": 400,
+    "bench_monitor": true,
+    "freeze_bn": false
+  }
+}

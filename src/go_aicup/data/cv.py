@@ -619,3 +619,54 @@ def draw_pid2_fixed(bank: pd.DataFrame, pool: int, gallery_seed: int, seed: int)
     assert len(asked) == len(set(asked.tolist())), "a game appears in two questions"
     assert not set(np.concatenate(gallery).tolist()) & set(asked.tolist()), "question game in the gallery"
     return candidates, gallery, frame
+
+
+def make_cached_policy_games(meta: pd.DataFrame, cached: pd.DataFrame, dev_cached: pd.DataFrame,
+                             seed: int = 2027, train_per_rank: int = 100,
+                             monitor_per_rank: int = 20, dev_per_rank: int = 36) -> pd.DataFrame:
+    """A+B training/monitor players and independent original-monitor dev players."""
+    if not meta.game_index.is_unique or min(train_per_rank, monitor_per_rank, dev_per_rank) < 1:
+        raise ValueError('duplicate game identity or invalid player counts')
+    pools = []
+    for source in (cached, dev_cached):
+        if not source.game_index.is_unique:
+            raise ValueError('duplicate cached game identity')
+        known = meta.set_index('game_index').loc[source.game_index]
+        for field in ('rank_id', 'player_color', 'handicap'):
+            if not np.array_equal(known[field].to_numpy(), source[field].to_numpy()):
+                raise ValueError(f'cached {field} mismatch')
+        pool = meta[meta.player_id.isin(known.player_id) & meta.handicap.le(1)].copy()
+        pool['reuse_pack'] = pool.game_index.isin(source.game_index)
+        counts = pool.groupby(['rank_id', 'player_id', 'player_color']).agg(
+            n=('game_index', 'size'), cached=('reuse_pack', 'sum')).reset_index()
+        counts = counts[counts.n.ge(20)].sort_values(
+            ['cached', 'n', 'player_color'], ascending=[False, False, True]).drop_duplicates('player_id')
+        pools.append((pool, counts))
+    if set(pools[0][0].player_id) & set(pools[1][0].player_id):
+        raise ValueError('learning and dev source players overlap')
+    rng, selected = np.random.default_rng(seed), []
+    for source, (pool, counts) in enumerate(pools):
+        owners = []
+        for rank in range(10):
+            group = counts[counts.rank_id.eq(rank)].sort_values('player_id')
+            need = train_per_rank + monitor_per_rank if source == 0 else dev_per_rank
+            if len(group) < need:
+                raise ValueError(f'rank {rank}: insufficient source {source} players')
+            group = group.iloc[rng.permutation(len(group))[:need]].copy()
+            group['role'] = (['train'] * train_per_rank + ['monitor'] * monitor_per_rank
+                             if source == 0 else ['dev'] * dev_per_rank)
+            owners.append(group)
+        owners = pd.concat(owners, ignore_index=True)
+        games = pool.merge(owners[['player_id', 'player_color', 'role']],
+                           on=['player_id', 'player_color'], validate='many_to_one')
+        # One global shuffle preserves the plan's RNG consumption before selecting dev players.
+        games = games.sort_values('game_index').iloc[rng.permutation(len(games))]
+        games = games.sort_values('reuse_pack', ascending=False, kind='stable')
+        selected.append(games.groupby('player_id', sort=False).head(20))
+    games = pd.concat(selected, ignore_index=True).sort_values(['role', 'game_index']).reset_index(drop=True)
+    if (not games.game_index.is_unique or games.groupby('player_id').role.nunique().gt(1).any()
+            or not games.groupby('player_id').size().eq(20).all()
+            or games.groupby('player_id').player_color.nunique().gt(1).any()):
+        raise ValueError('invalid player-disjoint same-colour split')
+    games['color'] = games.player_color.map({0: 'B', 1: 'W'})
+    return games

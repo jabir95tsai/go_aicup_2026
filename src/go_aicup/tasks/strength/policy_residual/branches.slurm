@@ -15,5 +15,6 @@ set -euo pipefail
 export PYTHONPATH="$PWD/src:$PWD" PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1
 export TORCHINDUCTOR_COMPILE_THREADS=1
+export CUBLAS_WORKSPACE_CONFIG=:4096:8
 PYTHON_BIN="${HOME}/.conda/envs/go/bin/python"
 "$PYTHON_BIN" -m go_aicup.tasks.strength.policy_residual.branches

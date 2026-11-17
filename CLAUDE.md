@@ -350,7 +350,9 @@ H200 佇列限制**每張 GPU 最多 12 CPU 核心、200GB 主記憶體**；200G
 
 ## 10. 專案結構
 
-**共用資料放置（2026-11-16）：** 跨實驗重用的盤面／落子快取、固定切分與題組、HumanSL／引擎特徵、embedding 放 `data/processed/`；本機從 `outputs/` 搬移 3,357 個實體檔案（32.882659 GiB）至 `strength_features/`、`identity/artifacts/`、`release/`，保留舊路徑相對連結。權重、訓練狀態、log 與結果報表仍在 `outputs/`；執行中 job 787069 的 epoch run 專屬資料未搬。既有 `strength_train_hc/` 等資料保留原位；新共用資料直接寫入對應 `data/processed/` 版本目錄，不覆蓋其他來源。細節及完整路徑對照見 [SHARED_DATA_LAYOUT.md](SHARED_DATA_LAYOUT.md)。
+**2026-11-17：使用者已下載備份並移除 Nano4 的 `data/processed/strength_train_hc.zip`；本機確認 ZIP 與原目錄均不存在。下載備份的位置與完整性未驗證；重做依賴舊 H/C 特徵的流程前，須先將 ZIP 傳回並解壓還原。**
+
+**共用資料放置（2026-11-16）：** 跨實驗重用的盤面／落子快取、固定切分與題組、HumanSL／引擎特徵、embedding 放 `data/processed/`；本機從 `outputs/` 搬移 3,357 個實體檔案（32.882659 GiB）至 `strength_features/`、`identity/artifacts/`、`release/`，保留舊路徑相對連結。權重、訓練狀態、log 與結果報表仍在 `outputs/`；執行中 job 787069 的 epoch run 專屬資料未搬。既有 `strength_train_hc/` 等資料保留原位；新共用資料直接寫入對應 `data/processed/` 版本目錄，不覆蓋其他來源。細節及完整路徑對照見 [SHARED_DATA_LAYOUT.md](SHARED_DATA_LAYOUT.md)。 **2026-11-17：使用者已下載備份並移除 Nano4 的 `data/processed/strength_features/humansl/c4x/` 整個目錄（刪除前約 24.01 GiB，含 pack、切分表與監控資料）；本機確認目錄不存在，備份位置與校驗結果未驗證。重做依賴該資料的 prepare／實驗前須還原所需檔案與路徑，詳見共用資料文件本日紀錄。**
 
 ```
 project/
@@ -534,3 +536,13 @@ CPU／Gloo 整合 108 項（108.24 秒）與最新 B2 15 項（1.83 秒）通過
 ### 2026-11-10：HumanSL residual B2 修訂
 
 依使用者「全部依建議修改」：B2 主臂改 log 機率平均（保留 prob 對照）、新增 H＋C＋新特徵的 stack 臂、B2 擬合擴大到全部 D 玩家（`ext_v1/fit_all`，每人每色最多 20 盤）、兩階段改 3,000／6,000 步加 cosine 與較密監控、不訓練全 D 模型（M／U／測試用四折平均）、取消 release 重訓（release B2 加入 M＋U）、新增低成本探針 `probe.py` 作 go/no-go。teacher 身分與 base prepared 未變。62 項 CPU 測試通過；未提交任何作業，分 k 增益與成本未知。詳見套件 PLAN §14 與 RESULTS。
+
+
+### 2026-11-17：raw 與 strength_train_hc 僅保留 ZIP
+
+依使用者要求，已將 `data/raw/` 與 `data/processed/strength_train_hc/` 分別封存為同層的 `data/raw.zip`（413,620,651 bytes）與 `data/processed/strength_train_hc.zip`（2,268,546,012 bytes），並刪除兩個原目錄。兩份封存均以逐檔 SHA-256 比對來源、核對完整項目清單及符號連結，確認來源未變後才刪除；合計一般檔案邏輯容量減少 1,437,097,326 bytes（約 1.34 GiB）。ZIP 內保留頂層目錄，還原分別執行 `unzip data/raw.zip -d data/` 與 `unzip data/processed/strength_train_hc.zip -d data/processed/`。讀取原始 CSV、重做前處理或讀取舊 H/C 特徵前須先還原；既有指向 strength_train_hc 的相容連結未移除，還原前無法讀取。未改動其他資料或模型。
+
+
+### 2026-11-17：e2e_adam 僅保留 ZIP
+
+依使用者要求，`data/processed/identity/e2e_adam/` 已完整打包為同層 `e2e_adam.zip`（4,224,570,410 bytes），再次逐檔 SHA-256 核對封存內容與來源一致、確認來源未變後刪除原目錄（原一般檔案共 5,376,719,380 bytes，約 5.01 GiB）。ZIP 包含 lr1e5／lr3e5 兩臂的完整快取；重做依賴它們的分析前，執行 `unzip data/processed/identity/e2e_adam.zip -d data/processed/identity/` 還原。其他實驗目錄與模型未刪除。

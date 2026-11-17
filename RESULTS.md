@@ -3088,8 +3088,8 @@ Public 第一名 **0.9181331**（使用者 11/17 回報）；我們基底 `77274
 |---|---|---|---|---|
 | `hung-seqB-raw.csv`／`f22c317a` | 開局改 raw（`*_d4_9600_raw` 的開局項） | raw 對 D4 在 A 上 pool 1 +0.0051；B 上未測 | 27（7／8／5／7）／38（6／9／11／12） | |
 | `hung-seqB-arm1.csv`／`96dcb48c` | λ 改 8／8／16／16（D3-a Arm 1） | Arm 1 在 A 上 pool 1 +0.0034；B 的尺度不同，未重測 | 14（5／9／0／0）／19（6／13／0／0） | |
-| `hung-seqC.csv`／`df5b4914`（788842，3 分 57 秒；A 重現最大差 7e-8、top-1 一致 100%） | 風格頭換 C（7,000 步） | 開發 draws pool 1 對 A +0.0190、對 B −0.0062 | 87（34／22／17／14）／77（30／18／20／9） | |
-| `hung-seqB3.csv`／`80580017`（788843，7 分 29 秒；兩 seed 的 A 重現 top-1 一致 100%） | 風格項取 B seed 2026／2027／2028（18,500／9,000／11,500 步）三者平均 | 平均本身未測；三 seed 各自封存 pool 1 +0.0276／+0.0231／+0.0259 | 28（12／9／3／4）／43（16／13／9／5） | |
+| `hung-seqC.csv`／`df5b4914`（788842，3 分 57 秒；A 重現最大差 7e-8、top-1 一致 100%） | 風格頭換 C（7,000 步） | 開發 draws pool 1 對 A +0.0190、對 B −0.0062 | 87（34／22／17／14）／77（30／18／20／9） | **0.8044628**（11/17 01:40:00，jabir95tsai；35/98） |
+| `hung-seqB3.csv`／`80580017`（788843，7 分 29 秒；兩 seed 的 A 重現 top-1 一致 100%） | 風格項取 B seed 2026／2027／2028（18,500／9,000／11,500 步）三者平均 | 平均本身未測；三 seed 各自封存 pool 1 +0.0276／+0.0231／+0.0259 | 28（12／9／3／4）／43（16／13／9／5） | **0.8056013**（11/17 01:39:37，jabir95tsai；名次未提供） |
 
 建議上傳順序：seqB3（若 788614 三 seed 都過）→ seqB-raw → seqC → seqB-arm1。全部是探針，Public 升降都不直接升基底。
 
@@ -3148,3 +3148,247 @@ Public 第一名 **0.9181331**（使用者 11/17 回報）；我們基底 `77274
 - **機制診斷：** B−pos 平均 +0.0244，保留 B 增益的 **96%**（≥ 2/3）→ 增益主要來自**逐手非線性轉換／重新加權**，不是位置向量帶入的盤長／執色。
 - **依事前規則，競賽一基底改為 `hung-seqB.csv`**（seed 2026，已上傳 Public 0.8012）。`hung-seqB3.csv`（三 seed 平均）是下一個候選：平均本身沒有封存題組數字，Public 升降都不自動取代基底；要升須先在封存題組補評三 seed 平均。
 - 限制：兩個 pool 的玩家自 11/12 起反覆使用，封存的只是題目抽樣種子，不是新玩家；本地增益（新增集約 +0.026）換算 Public 約 +0.013，`hung-seqB` 實測 +0.0031，在 Public 雜訊內。
+
+### 2026-11-17：競賽一——編碼器＋B 聚合頭端到端微調（使用者「照這個計畫做，先跑短測」；事前登記，看結果前寫定）
+
+**假設：** 現行編碼器（`v4_d4_hd_9600`）的逐手向量是為「直接平均」而訓練，B 頭是事後凍結訓練的；兩者一起訓練，編碼器可以把 B 能用的身分訊號放進逐手向量。混淆：繼續訓練本身就會進步（4,800→9,600 步 +0.010），所以設對照臂。
+
+**臂（各 1 seed＝2026）：**
+- 基底：`9600`＋B s2026（18,500 步），不訓練。
+- E1（`pid_e2e_joint_4800`）：編碼器從 `9600`、B 從 s2026，一起訓練；每手先過 B（含 ply 位置向量），盤向量＝B 輸出平均，GE2E 用 B 的 w、b。
+- E0（`pid_e2e_encoder_4800`）：只訓練編碼器、盤向量直接平均（原訓練方式），其餘完全相同；之後用 E0 的向量照 11/16 流程重訓 B（20,000 步、seed 2026）＝「E0＋B」。
+
+**共同設定：** 64 人 × 8 盤 × 每盤 16 手，雙色、玩家層級 D4、HD ≤1、min_ply 0；AdamW 峰值 LR 1e-4（未驗證的取值）、前 5% 暖機、cosine 到 0、wd 1e-4、裁切 1.0、BF16；4,800 步；取最後一步。訓練玩家＝`9600` 的 6,426 人**扣掉 B 訓練時保留的 5%（各級）玩家**（計畫未寫明，實作時補上：讓監控玩家在微調中也沒見過；兩臂相同）。每 400 步在保留玩家上算監控分數（只用風格的官方分數，3 組固定題），只畫曲線、不選模。第 0 步必須重現凍結模型的監控分數（A 0.7092、B 0.7511，容差 0.003），等於驗證「LR=0 時 E1＝凍結 9600＋B」。
+
+**評估：** 全新封存 draws：pool 0 用 600–619、pool 1 用 600–629，三臂都評估完才看結果。融合：原始 w、λ=16、μ=1、D4 開局、類別項；風格項乘各臂自己學到的 w。
+
+**Gate（E1 對基底）：** 封存 pool 1 整體 Δ ≥ +0.010、Δ／SE ≥ 2.5、四個 k 桶各 ≥ −0.005，且封存 pool 0 Δ > 0。另報（無 gate）E0＋B 對基底、E1 對 E0＋B：E1 − (E0＋B) ≥ +0.005 且 z ≥ 2.5 → 增益來自聯合訓練；在雜訊內 → 主要是多訓練，改以 E0＋B 為候選。
+
+**通過後：** E1 最後一步只換新增集 `pub2_`／`priv2_` 的風格項，原測試集與 `hung-seqB.csv` 逐列相同；正式路徑先驗證 A 逐值重現再換。單 seed 通過即產生提交檔，有空再補 seed。
+
+**程式：** `src/go_aicup/tasks/identity/train_e2e.py`（新）；B 頭與逐手抽取／監控 helper 由 `scripts/identity/pid2_seqagg.py` 搬到 `src/go_aicup/tasks/identity/seqagg.py`（行為不變，腳本改 import）。設定 `configs/identity/pid_e2e_{joint,encoder}_4800.json`、短測 `pid_e2e_joint_smoke100.json`／`pid_e2e_encoder_smoke30.json`；CPU 測試 `tests/test_identity_e2e.py`。輸出 `outputs/pid/ge2e/<run>/`（`model.pt` 與既有 load_encoder 相容、E1 另有 `head.pt`）。
+
+**成本預估：** 約 6.5 GPU-h（E1 2.2、E0 2.1、E0 抽取＋B 重訓 1.5、評估 0.4、匯出 0.1），短測 0.1。短測若每步 > 2 秒，先回報不開跑。
+
+**短測：** Slurm 789183（1 卡；CPU 測試 → E1 100 步、每 50 步監控 → E0 30 步）。
+
+**LB（11/17 01:39–01:40，使用者回報）：** `hung-seqB3.csv` **0.8056013**，對新基底 `hung-seqB.csv`（0.8012002）+0.0044；`hung-seqC.csv` **0.8044628**（35/98），+0.0033。兩者都在 Public 雜訊內；seqB3 方向與「多 seed 平均較穩」一致，但要升基底仍須先在封存題組補評三 seed 平均。今天（11/17）已用 3 次（seqB、seqB3、seqC），保留 2 次給稍晚的作業。`hung-seqB-raw`／`hung-seqB-arm1` 暫不上傳（改動少、資訊量低）。
+
+**競賽一棋局是否以 D4／重新排版形式出現在訓練集（`scripts/identity/pid2_trainmatch.py`，Slurm 789220，53 秒；`outputs/pid/pid2_trainmatch/report.json`）→ 完全沒有，結案。** 方法：訓練集 1M 盤取前 40 手（原方位）建表，競賽一八個檔案 104,200 盤各取前 40 手的 8 種 D4 變換查表。訓練集內部前 40 手相同有 392 組（方法本身能找到重複）；競賽一八個檔案（新增集候選／題目、原候選庫／題目）**命中全部為 0**，經訓練玩家把題目連到候選人的題數 public／private 皆 0。與 Day-0 逐字比對一致：競賽一棋局與訓練集不相交。
+
+**短測結果（789183，25a-hgpn015，11 分 52 秒）：** CPU 測試 12 項通過。第 0 步兩臂都**逐值重現**凍結模型的監控分數（A 0.709192、B 0.751138）。每步 1.50 秒（兩臂相同），顯存峰值 123 GiB；訓練玩家 6,105（扣掉 321 位保留玩家，其中 250 位進監控）。**監控一開始訓練就下滑：** E1（B）0.7511 → 0.6827（50 步）→ 0.6953（100 步）；E0（平均）0.7092 → 0.6879（30 步）。原因未知，兩種可能：(1) 監控玩家在 `9600` 原訓練裡出現過，微調把他們拿掉後被「遺忘」，監控有偏；(2) Adam 狀態歸零＋LR 回到 1e-4，打亂已收斂的表示。先在編碼器沒見過的驗證台玩家（pool 0 開發用 draws 100–119，不是封存題組）上診斷：Slurm 789251，比較 `9600` A／B、短測 E1 100 步（A、B）、E0 30 步（A、凍結 B）。正式訓練未開，LR 待診斷後由使用者決定。
+
+**計畫更正（看封存結果前）：** 計畫寫「風格項乘各臂自己學到的 w，和 11/16 B 頭做法相同」有誤：11/17 B 確認實驗是所有臂都用 `9600` 的原始 w（11.668）。為保持單一變數，評估一律用原始 w。新增評估入口 `pid2_seqagg compare`（各臂各自的逐手快取＋可選頭），`extract` 加 `--bench-run`。
+
+**另兩個結構檢查（11/17 凌晨，登入節點 CPU 數十秒，scratch／inline，不留腳本）→ 都沒有可利用的結構：**
+- 題目編號順序 vs 現行 top-1 候選人編號：Spearman pub_ −0.166、priv_ +0.033、pub2_ −0.070、priv2_ −0.047（原測試集的 top-1 幾乎全對，仍看不到單調關係）→ 題號不帶候選人資訊。
+- 新增集候選人的黑棋前 3 手 vs 原候選庫每人 100 盤的開局分布（naive Bayes，log-likelihood 第 1–第 2 名差距）：新 public→原 public／原 private 中位數 1.46／1.57，>5 的比例 0.193／0.215；新 private→原 public／原 private 1.72／1.41，0.207／0.198。同 part 與交叉 part（必定無對應）分布相同 → **新增集候選人不是原候選庫的人**（與 11/15 風格向量檢查一致，這次用的是在原測試集近乎滿分的開局指紋）。
+
+
+### 2026-11-17：H1 低 LR 分階段訓練（使用者「訓練」授權，開跑前登記）
+
+先做 step 0／LR=0＋BN 更新 30 步／LR=0＋BN 凍結 30 步；開發 pool 0 draws 100–119，所有臂同一權重／抽樣／推論與固定融合 w=9600 原值、λ=16、μ=1。逐題分數及四桶皆保存。新抽取與既有快取的逐盤 cosine >0.9999、B 融合各桶及整體差 ≤0.002；凍結 BN 的零 LR 臂要求所有參數／buffers 完全不變、逐題候選分數 max abs ≤1e-6，否則停。正常 BN 若整體融合或風格 Δ<−0.002，或任一融合桶 Δ<−0.005，後續兩臂一律凍結 BN running stats（affine 仍訓練）；此規則在看本次診斷前固定。
+
+通過後 E1 兩臂 3e-5／1e-5，各 4,800 步、暖機 240 步、cosine 到 0、單 H200、64 人×8盤×16手；不是原先 64 手／8卡方案。從 9600 last.pt 接回編碼器 Adam 一／二階矩及 step，驗證來源權重／BN 與 model.pt 全相同；B 保留 seed2026 權重但 optimizer 為新狀態，排程重設。仍排除驗證台玩家與 B 的 5% holdout；每 400 步以未見玩家 pool 0 draw 100 畫曲線，不選模。每臂約2.3 GPU-h，診斷約0.3；新快取僅抽 bench 約2.5GiB／臂。開發20 draws選 LR，兩臂均不優於基底則停。有改善才接 E0＋重訓B，完整階段估約9.3 GPU-h。
+
+封存題組開封前門檻統一為 pool1 Δ≥+0.015、Δ/SE≥2.5、k=1/2/3/5各≥−0.005，pool0 Δ>0；pool0 draws600–619、pool1 draws600–629。此次不授權全玩家正式重訓、64手擴大或上傳。現行 hung-seqB 基底保留。程式 train_e2e.py／e2e_probe.py，設定 configs/identity/pid_e2e_adam_{probe,lr3e5,lr1e5}.json，診斷輸出 outputs/pid/ge2e/pid_e2e_adam_probe/，作業紀錄 outputs/pid/e2e_adam/。
+
+**執行進度：** 零更新診斷 Slurm **789373**，單卡 dev、上限30分鐘；作業內原16項CPU測試通過（3.66秒），新增開發LR選擇測試後17項全通過（6.33秒）。已準備兩個E1作業，各單卡上限3小時，含訓練／bench抽取／pool0開發20 draws；後續E0＋B／封存作業上限4.5小時，有正開發增益才訓練，否則直接停止。整串硬上限11配置GPU-h，預估約9.3；排隊時間另計。E0約24GiB訓練快取僅用節點/dev/shm且結束清理，不占/work長期配額；持久保存權重、兩個E1與E0的bench快取及報表。未安排H2或全玩家重訓。
+
+**依賴作業已送：** probe＝789373；lr3e5＝789387；lr1e5＝789388；conditional_e0_gate＝789389。E1 依賴 probe afterok，後續依賴兩臂 afterok；依賴失敗自動取消，不繼續花算力。
+
+**789373 step 0：** pool0 開發20 draws，B融合0.6491906787720089，四桶0.380249／0.617778／0.743283／0.855453，與既有快取平均分及四桶完全一致；A亦一致。逐盤向量最小cosine A0.99999577／B0.99999022；不同抽取batch邊界的BF16數值不逐值相同（B融合候選分數max abs0.2113），因此只宣稱得分重現，不宣稱候選logits逐值相同。後續LR=0凍結BN臂對同一新抽取step0仍要求逐題分數max abs≤1e-6。BN對照尚在執行，E1／E0依賴等待中。
+
+**H1 低 LR 結果（11/17 08:45 補登；作業 789373／789387／789388／789389）→ 兩個 LR 都低於現行，依事前規則停止，未開封存題組、未跑 E0。** 紀錄 `outputs/pid/e2e_adam/`（`selection.json`、`dev_lr{3e5,1e5}/report.json`、`train-*.out`）、`outputs/pid/ge2e/pid_e2e_adam_probe/report.json`。
+
+- **零 LR 對照（789373，13 分）通過：** step 0 與 LR=0＋BN 更新 30 步的融合／風格分數都與凍結模型一致（BN 更新臂整體差 <0.001），`freeze_bn=false`。→ 11/17 凌晨短測的下滑**不是** BN running stats 或讀檔／推論路徑造成的。
+- **E1 兩臂（各單卡 2 時 25 分，接回 `last.pt` 的編碼器 Adam 狀態，暖機 240 步，4,800 步）：** 開發 pool 0 draws 100–119，完整融合對現行 `9600`＋B（0.6492）：
+
+| 臂 | k=1／2／3／5 | 整體 | Δ（SE） |
+|---|---|---|---|
+| lr 3e-5 | 0.3627／0.6031／0.7280／0.8370 | 0.6327 | **−0.0165（0.0017）**，0% draw 為正 |
+| lr 1e-5 | 0.3675／0.6043／0.7267／0.8389 | 0.6343 | **−0.0149（0.0018）**，5% draw 為正 |
+
+- 監控（未見玩家 pool 0 draw 100，只用風格 B）：step 0 0.647 → 400 步約 0.60–0.61，之後只回到約 0.614，4,800 步都沒有回到起點；四桶都下滑。
+- **判讀：** 接回 Adam 動量、LR 降到 1e-5 仍然退步 → 「Adam 歸零造成衝擊」不是主因（或不是唯一原因）。繼續用原訓練玩家、原 GE2E 目標微調，本身就讓未見玩家變差；可能是對訓練玩家進一步記憶（未驗證）。**H1（以現行配方微調編碼器）結案，不加預算。** 新增集基底維持 `hung-seqB.csv`。成本約 5.2 GPU-h。
+
+
+### 2026-11-17：H1 接回 Adam＋低 LR 完整訓練結果（停止，未開封 gate）
+
+Slurm 789373／789387／789388／789389 全部 COMPLETED、exit 0；兩個 E1 均完整 4,800 步、optimizer_source_step=9600、暖機240步、BN正常更新、每盤16手。開發 pool0 draws100–119，固定融合 w=11.667971611、λ=16、μ=1；基底9600＋B=0.649190679。
+
+| 臂 | 融合分數 | Δ（draw間SE） | k=1／2／3／5 的Δ | 純風格Δ |
+|---|---|---|---|---|
+| lr3e5 | 0.632715 | -0.016475（0.001683） | -0.017516／-0.014666／-0.015311／-0.018408 | -0.024411 |
+| lr1e5 | 0.634335 | -0.014856（0.001843） | -0.012745／-0.013488／-0.016626／-0.016563 | -0.023915 |
+
+LR=0＋正常BN30步：融合0.649140866，Δ−0.000049813，純風格Δ+0.000421553；LR=0＋凍結BN30步：所有權重與buffers不變、候選分數逐值重現（max abs=0）。故管線零更新檢查通過，BN單獨更新在此對照中不足以解釋舊短測大跌；不排除BN與權重學習的交互作用。兩個E1接回Adam且降低LR後仍四桶全負，差約9.79／8.06個draw間SE，退化原因未識別，不能再單歸因於Adam歸零。固定draw100監控兩臂先跌後部分回升，最後仍低於起點，未依曲線挑checkpoint。
+
+依事前停止規則，789389讀兩臂開發報表後立即正常退出：selection.json status=stopped_no_gain、chosen=null。未跑E0／重訓B、未開封draws600+、未產出或上傳新提交檔；hung-seqB基底保留。本輪停止，不再擴充LR搜尋。這只否定本次16手聯合微調設定，不代表64手方案已試過。
+
+實際單卡配置時間：診斷13m19s、3e-5 2h24m48s、1e-5 2h24m11s，合計約5.04 GPU-h；後續停止作業sacct記0秒。報表：outputs/pid/ge2e/pid_e2e_adam_probe/report.json、outputs/pid/e2e_adam/dev_lr3e5/report.json、dev_lr1e5/report.json、selection.json。SE為同一玩家池的draw間差異，不是新玩家泛化的不確定度。H2未執行。
+
+### 2026-11-17：競賽一——seqB3 封存評估＋H2-A（B 向量上的候選人中心擴充）（使用者「好」；事前登記，看結果前寫定）
+
+**預期修正（看結果前）：** 11/14 寫的「題目合併上限 +0.099」是用真值告訴模型哪兩題同一人，這個資訊無法從資料推得；可實作的候選人中心擴充（A）真值上限只有 +0.012。故 H2 現實預期 ≤ +0.01。
+
+**腳本** `scripts/identity/pid2_b3em.py`（1 卡）：全新封存 draws pool 0 700–719、pool 1 700–729（600–629 留給 H1 未開封，仍保留）。融合同提交（開局＋16·w·cosine＋類別，w＝9600 原值）。
+- **seqB3：** B3＝三個 seed（s2026／s2027／s2028）cosine 平均，對 B（s2026）配對。**升基底規則：** pool 1 Δ(B3−B) > 0 且 z ≥ 2、pool 0 Δ > 0 → `hung-seqB3.csv` 成為基底（已上傳 Public 0.8056）；否則維持 `hung-seqB.csv`。
+- **H2-A：** 每個 seed 各自做中心擴充，後驗 p＝softmax(B3 融合分數／τ) 共用；τ∈{1,2,4,8}、α∈{0.25,0.5,1,2}、輪數 {1,2}，只在開發 pool 0 draws 100–119 選。封存 gate（對 B3）：pool 1 Δ ≥ +0.005、z ≥ 2.5、四桶各 ≥ −0.005、pool 0 Δ > 0 → 產生提交檔；未過不產生。
+
+**結果（790267，1 卡 4 分 58 秒；`outputs/pid/pid2_b3em/report.json`、`sealed_per_draw.csv`；log `outputs/pid/pid2_bench/logs/pid2-b3em-790267.out`。790266 因快取路徑型別錯誤即失敗，修正後重送）：** 開發選定 τ=4、α=0.5、2 輪（開發增益 +0.0045；前 8 名都是 α=0.5，τ 不敏感）。封存 draws 700–：
+
+| 比較 | pool 1 k=1／2／3／5 Δ | pool 1 整體 Δ（SE，正 draw 比例） | pool 0 整體 Δ | 判定 |
+|---|---|---|---|---|
+| B − A（參考） | +0.033／+0.031／+0.023／+0.025 | +0.0279（0.0022，97%） | +0.0246 | 與 11/17 確認一致 |
+| **B3 − B** | +0.002／+0.003／+0.003／+0.004 | **+0.0029（0.0015，z 1.93，70%）** | +0.0017 | **未過**（z < 2）→ 基底維持 `hung-seqB.csv` |
+| **B3＋EM − B3** | +0.004／+0.000／+0.007／+0.004 | **+0.0036（0.0010，z 3.6，77%）** | +0.0025 | **未過**（Δ < +0.005）→ 不產生提交檔 |
+
+絕對分數（封存 pool 1）：A 0.6139、B 0.6418、B3 0.6447、B3＋EM 0.6483。B3 與 EM 都是小而方向一致的正值（四桶全正），但都沒達事前門檻；兩者疊加對 B 約 +0.0065，換算 Public 約 +0.003，在雜訊內。與預期修正一致：中心擴充的上限本來就小。
+
+### 2026-11-17：競賽一——E2E-scratch（從頭訓練編碼器＋B 聚合頭、每盤 48 手）計畫稿（使用者「先寫完整計畫」；未實作、未送作業）
+
+完整計畫 [PID_E2E_SCRATCH_PLAN.md](PID_E2E_SCRATCH_PLAN.md)。要點：V2 主幹重新初始化＋B 頭在迴路、64 人×8 盤×48 手、6,426 人、9,600 步、8 卡 DDP；開發 draws 選 4,800／7,200／9,600 步 checkpoint，封存 draws 600–629（未開封）gate：pool 1 Δ ≥ +0.015、z ≥ 2.5、四桶 ≥ −0.005、pool 0 Δ > 0。第 1 階段估 40–85 GPU-h（以 8 卡 100 步短測為準，> 4.5 秒／步先回報）；第 2 階段全 8,007 人正式版另行授權。預期增益未知。
+
+**E2E-scratch 第 0 階段（使用者「做這個」，11/17；照計畫檔固定 9,600 步，不採依速度改步數的規則）：** 程式改動：`ge2e.IdentityEncoder` 加可選 `checkpoint_segments`（預設 0，既有模型與載入不變；>0 時訓練中重算殘差區塊省顯存，重算會讓 BN running stats 多更新一次）；`train_ge2e` 加可選 `head`（`EncoderHead`＝編碼器＋B 頭一個模組給 DDP；GE2E 用 B 的 w、b，初值抄編碼器，編碼器 w、b 凍結；`PlyBatches` 帶 ply；`keep_steps` 另存 `step{N}/model.pt`＋`best.pt`；結束寫 `model.pt`＋`head/best.pt`，與 `seqagg.load_head`／`pid2_seqagg export` 相容）。原因：現行每卡 8,192 位置已用約 123 GiB，48 手每卡 24,576 位置需 activation checkpointing（5 段）。設定 `configs/identity/pid_e2e_scratch_{smoke100,9600}.json`（loader workers 4→8）。CPU 測試 `tests/test_identity_e2e_scratch.py` 4 項（checkpoint 與否輸出／梯度一致、`EncoderHead`＝`joint_games`、48 手 ply 屬本人顏色且不重複、雙程序 Gloo DDP 梯度＝兩程序本地梯度平均）＋既有 identity 17 項，共 21 項通過（55 秒）。短測 Slurm **790374**（8 卡、100 步、上限 40 分）。
+
+**短測 790374 失敗（23 秒，未開始訓練）：** 初始化權重 `outputs/rank/v2/v2_strength/model.pt`（A-024 V2 棋力主幹）已在 11/16 清理中刪除；全機搜尋 >50 MB 的 `.pt` 只剩競賽一的 GE2E／B 頭產物，沒有 V2 副本。最接近 V2 的現存權重是 `pid_ge2e_v2_both_p0`（V2＋300 步身分訓練、雙色、同樣排除 split 0–2，驗證台玩家沒見過）。改初始化須使用者決定，未重送。
+**初始化改為 `pid_ge2e_v2_both_p0` 主幹（使用者選第 2 項，11/17）：** 兩份 config 的 `init_model` 改指向 `outputs/pid/ge2e/pid_ge2e_v2_both_p0/model.pt`（V2＋300 步身分訓練、排除 split 0–2）；只載入 stem／blocks（`load_trunk`，已在登入節點驗證逐值相同），投影層與 B 頭重新初始化。與原計畫差異＝起點多了 300 步身分訓練。計畫檔同步註記。短測重送 Slurm **790388**。
+
+**短測 790388 結果（25a-hgpn021，8 卡，11 分 12 秒，完成 100 步）：** 每步 **6.0 秒**（第 10 步含暖機 9.5 秒），每卡顯存峰值 112.9 GiB（activation checkpointing 5 段），loss 3.30 → 2.50、訓練命中率 0.17 → 0.35，全程有限；`model.pt`、`head/best.pt`、`last.pt` 都有寫出。**超過停損門檻 4.5 秒／步 → 依規則停止、不開第 1 階段，回報使用者。** 換算：每卡 24,576 位置／6.0 秒 ≈ 4,100 位置／秒，扣掉重算約 1/3 後與原 16 手訓練（8,192／1.52 秒 ≈ 5,400）相當 → **瓶頸是算力，不是資料讀取**（先前「8 卡與單卡一樣快、不是算力瓶頸」的推論有誤：原訓練每卡就是 8,192 位置）。原設定 9,600 步需約 16 小時、約 128 GPU-h。
+
+**改為 A＋WSD（使用者 11/17：「A，改用 WSD，先跑短測」）：** 32 手 × 9,600 步；排程改 warmup-stable-decay：前 5% 線性暖機、LR 3e-4 固定、最後 20%（第 7,680 步起）線性降到 0（`train_ge2e.wsd_scheduler`，`training.schedule="wsd"`、`decay_fraction=0.2`；原 cosine 為預設、不變）。降 LR 前一步另存完整續跑狀態 `stable_step7680.pt`；之後若要加長，以新 config（更長 steps）加 `paths.extend_from` 從該檔接回權重、B 頭、AdamW 動量與 step，LR 維持固定到新的降 LR 起點，不重做前段。注意：WSD 下 4,800／7,200 步 checkpoint 未經降 LR，開發選擇預期會選 9,600 步。與 9600 模型的差異因此是 B 在迴路＋32 手＋排程。CPU 測試新增 2 項（WSD 形狀；延長時固定段 LR 相同、scheduler 接續、降 LR 起點後移），identity 共 23 項通過（60 秒）。設定 `configs/identity/pid_e2e_scratch32_{smoke100,9600}.json`（48 手的 9,600 步設定已刪，48 手短測設定保留作紀錄）。32 手短測 Slurm **790438**。
+
+
+## 2026-11-17：policy branches 788616 原預算續跑
+
+使用者授權補完原訂 3,000 updates 與 dev／2,000 次玩家 bootstrap。原 job 788616 TIMEOUT（02:00:26）；A0 已完成，其餘三臂最後完整評估為 step 2875，從 epoch 11 末 checkpoint 重播最後一輪。原 config／程式／plan hash 一致，prepare-only 通過；不增加 epochs、不改 LR、不啟動其他 seed。重新抽取 RAM policy，預估 50–75 分鐘、4.2–6.3 配置 GPU-h，上限 5 GPU × 1.5 小時＝7.5 GPU-h。續跑 launcher：`outputs/rank/humansl/policy_branches/seed2027_b32_e12/788616/resume.slurm`；結果沿用原 run。提交後不輪詢。
+
+提交成功：Slurm **790468**（2026-11-17T10:30:49.360444+08:00）；僅確認 sbatch 接受，完成狀態與 dev／gate 待後續分析。
+
+**32 手短測 790438 結果（25a-hgpn014，8 卡，8 分 1 秒，100 步）：** 每步 **3.94 秒**（第 10 步含暖機 8.7 秒），每卡顯存峰值 75.4 GiB；loss 3.28 → 2.44、訓練命中率 0.17 → 0.35；LR 固定 3e-4 至第 80 步、第 90 步 1.5e-4、第 100 步 0（WSD 形狀正確）；`stable_step80.pt`、`model.pt`、`head/best.pt`、`last.pt` 皆寫出。**≤ 4.5 秒，過停損門檻。** 第 1 階段 9,600 步估約 10.5 小時、約 **84 GPU-h**（＋評估約 1 GPU-h）。未送第 1 階段，等使用者授權。
+
+**第 1 階段已送（使用者「好，送第 1 階段」，11/17）：** 訓練 Slurm **790690**（8 卡、上限 13 小時，`configs/identity/pid_e2e_scratch32_9600.json`，估約 10.5 小時／84 GPU-h）。評估 Slurm **790702**（afterok 790690，1 卡、上限 2 小時；`outputs/pid/e2e_scratch/eval.sh`）：抽 4,800／7,200／9,600 步的驗證台逐手向量（快取 `/home/jason1122/e2e_scratch32_cache/`，約 2.6 GiB／份）→ 開發 pool 0 draws 100–119 對 9600＋B s2026 選完整融合最高者（同分取較晚步數）→ 封存 draws 600–（pool 0 600–619、pool 1 600–629）只評一次，gate＝pool 1 Δ ≥ +0.015、z ≥ 2.5、四桶 ≥ −0.005、pool 0 Δ > 0。輸出 `outputs/pid/e2e_scratch/{dev,sealed}/report.json`、`dev_choice.json`。抽取路徑已用短測模型驗證（790691，1 chunk，2 分 31 秒）。
+
+**訓練 790690 完成（10 時 33 分，9,600 步，每步 3.95 秒，峰值 75.4 GiB；最後 loss 0.761、訓練 own-centroid 命中 0.795）；評估 790702 在 9 秒內失敗：`data/raw/` 已於 11/17 打包成 `data/raw.zip`，`train_ge2e.training_players` 讀不到 `data/raw/training/handicap.csv`。只從 ZIP 還原 `handicap.csv`／`handicap_manifest.json`（約 40 MB），以相同 `eval.sh` 重送 Slurm 793383（1 卡、上限 2 小時、排除 25a-hgpn006）。**
+
+### 2026-11-17：競賽一——開局多層退回比對（新增集）第 0 階段可行性診斷（使用者「從第 0 階段開始做」；事前登記，看結果前寫定）
+
+**動機（文獻整理，11/17 對話）：** 文獻 3（Lin、Chiu、Wu，TMLR 2024，arXiv 2408.06051）圍棋 200 人辨識，多層狀態比對在少樣本時勝過單層（M=5：15.5%→22%；M=10：29.5%→45.5%）。現行新增集開局項只有 L0（D4 全盤精確前綴，8 手）與逐手位置；查詢盤一旦離開候選人走過的路線，L0 對所有候選人相同而抵消。
+
+**新增兩層（`src/go_aicup/tasks/identity/multilevel.py`，每手本人落子，皆對整盤 8 個對稱不變）：**
+- L1 角內：這手所在 9×9 象限內的本人／對手棋子（提子後），翻到同一個標準角、再取與轉置較小者；落在天元線上無 L1。
+- L2 應手：對手上一手周圍 7×7 窗（本人／對手／空／盤外，8 對稱取最小）＋本手在窗內的相對位置，窗外記「脫先」。
+- 每層有 context 鍵（落子前）與 outcome 鍵（含本手，狀態對稱時本手一併折疊）；第 0 階段只用 outcome 鍵。
+
+**第 0 階段診斷（`scripts/identity/pid2_multilevel.py keys|diag`；不擬合、不算分）：** 開發 pool 0 draws 100–119，題目每盤本人前 15 手。對每一手：真實候選人在同色畫廊是否有相同 L0 前綴／L1／L2 outcome 鍵（命中），與其他 590 名候選人的平均命中率。分 k 桶、手數段（0–7、8–14）報告。
+- **Gate 0（看結果前寫定）：** 在真實候選人 L0 沒命中的手（本人前 15 手、全部 k），L1 或 L2 的「真實命中率 − 其他候選人命中率」≥ 0.05（20 draws 平均）→ 寫第 1 階段（融合實驗，封存 draws pool 1 800–829、pool 0 800–819）；否則停止。
+- 單元測試 `tests/test_pid2_multilevel.py` 4 項通過（8 對稱不變、鍵隨本手改變、異角同型態同鍵、提子）。
+
+**第 0 階段結果（Slurm 790711，dev 1 卡，28 秒；`outputs/pid/pid2_multilevel/{diag.csv,diag.json,keys.npz}`、log `diag-790711.out`）→ GATE 0 PASS。**
+- Gate 統計（本人前 15 手、L0 沒命中、全部 k，20 draws 平均）：**L1 +0.0764（SE 0.0009）、L2 +0.0552（SE 0.0008）**，兩層都 ≥ 0.05。
+- L0 覆蓋很低：本人前 8 手只有 18.8% 被真實候選人的精確前綴命中（其他候選人 7.7%）；第 8–14 手 0.09%。→ 前 8 手有 81% 的落子目前只靠逐手位置項。
+- 前 8 手、L0 沒命中：L1 真實 0.295 vs 其他 0.161（+0.134，約 1.8 倍）；L2 0.347 vs 0.257（+0.090，約 1.35 倍）。四個 k 桶幾乎一樣（L1 +0.130～+0.138）。
+- 第 8–14 手：L1 0.040 vs 0.017（+0.023）、L2 0.055 vs 0.032（+0.023）→ 增量主要在前 8 手，延伸到 15 手的價值小。
+- L1 無狀態（天元線）6.7%、L2 無狀態（黑第一手）3.5%。
+- 限制：命中率差不等於似然比資訊；L1 在角內無子時等於「下在角的哪一點」，與現行逐手位置項（前 4 手）部分重疊。實際增量要第 1 階段在融合裡量。第 1 階段尚未實作，等使用者確認。
+
+
+## 2026-11-17：CNN policy 快取優先重新選盤（僅清單／題組）
+
+使用者授權從 c4x learn A 已有盤面重新選 TRAIN／monitor／dev，並由原始棋局補足同色題目。以 raw.zip 內 handicap.csv 與 canonical metadata 篩 HD≤1；learn A 玩家中共有1,742人可出同色20盤。seed2027，各級隨機分100人 TRAIN／20人 monitor，其餘542人 dev；顏色優先可重用盤數最多者，再比可用總盤數，再取黑，隨機補足20盤。玩家互斥，不按既有分數選樣。
+
+| role | 玩家 | 棋局 | 重用 | 補建 | 題數 k=5/10/15/20 |
+|---|---:|---:|---:|---:|---|
+| TRAIN | 1,000 | 20,000 | 12,475 | 7,525 | 2,000 / 2,000 / 2,000 / 2,000 |
+| monitor | 200 | 4,000 | 2,513 | 1,487 | 1,000 / 1,000 / 1,000 / 1,000 |
+| dev | 542 | 10,840 | 6,799 | 4,041 | 2,000 / 2,000 / 2,000 / 2,000 |
+
+TRAIN＋monitor需補建9,012盤／1,999,069位置；三組合計補建13,053盤／2,900,273位置。輸出 `data/processed/strength_features/humansl/policy_cnn/cached_A_seed2027/`，含 games、reuse_games、supplement_games、三組 questions、report／identity／完成標記。重建入口 `PYTHONPATH=src:. python -m scripts.strength.select_cached_policy`（拒絕覆寫）；唯一切分邏輯新增於 data/cv.py。
+
+限制：dev最少級別rank_id=4只有7位玩家；反覆抽題不增加獨立樣本數，需玩家bootstrap。所有來源為learn A，C v2向量對這些玩家可能已有接觸，不能當全系統未見玩家驗證。新資料須重新跑A0及全部對照，不與785715／788616直接作配對比較。pack重用目前僅由manifest判定，備份檔完整性與planes一致性未驗證。僅建立清單／題組，未編碼planes、抽policy、訓練或提交GPU。
+
+驗證：新切分＋既有policy residual／epoch／branches回歸45項通過（11.37秒），本次修改diff檢查通過；真實題組已檢查每題同玩家／同色／同級別及盤內無重複。
+
+
+### 2026-11-17：TRAIN/monitor 完整逐手 policy 持久快取（提交前）
+
+使用者授權依根目錄 plan.md 先抽 TRAIN/monitor、可重建輸入與推理流水重疊、不額外保存 input planes；
+Slurm 提交成功後結束對話，不監看、不訓練、不抽 dev。
+
+- 新選盤已凍結於 `data/processed/strength_features/humansl/policy_cnn/cached_AB_mondev_seed2027/`。
+  TRAIN 1,000人／20,000盤／4,459,699位置／8,000題；monitor 200人／4,000盤／884,079位置／4,000題；
+  dev只保存360人／7,200盤／8,000題清單。玩家互斥、同色20盤、HD≤1、四k及十級均衡驗證通過。
+  三組可重用盤／需補盤／補盤位置逐項重現計畫；本輪重用14,987盤、補建9,013盤／2,007,593位置。
+- CPU來源預檢通過：A、B各HD0/1的真實ZIP與完整重播planes／globals／target逐值抽樣一致；
+  全部A/B pack manifest、npy shape/dtype與canonical位置數吻合；teacher及vectors可讀，來源已hash。
+  全ZIP CRC安排在作業內、GPU啟動前檢查；每pack再抽樣比對，失敗即停止。
+- C v2既有向量學習玩家重疊：TRAIN 973/1,000、monitor 196/200、dev 0/360。
+  因此monitor不是teacher未見玩家測試；本輪僅抽特徵，不產生新的k=5/10/15/20成績。
+- 逐手輸出5,343,778位置，38,918,735,174 bytes（36.246 GiB）另加少量npy／分片metadata；
+  預檢可用55,585,370,112 bytes，完成policy後約餘15.5 GiB，空間與其他作業共用。
+  保存logp FP16[位置,10,362]、原始q FP32[位置,10]、target int16、side uint8與整數offsets/game_index。
+  非法點logp=-inf；P可由FP32重新正規化重建，不另存P／one-hot／輸入planes。
+- 新入口 `src/go_aicup/tasks/strength/policy_residual/persistent_cache.py`，設定 `configs/strength/policy_cache.json`，
+  Slurm為同套件 `persistent_cache.slurm`。5×H200／60 CPU／500 GiB／2h上限，估20–40分鐘（未實測），
+  最多10配置GPU-h；每GPU預取一批，CPU重播／RAM解包與GPU推理重疊，每32盤原子發布可續跑分片。
+  完成須有 `policy/complete.json` 及全部通過checksum的分片；提交不代表抽取完成。
+- CPU合成3項通過（1.29s）：切分與題組、pass／ko遮罩／尾批／精確q／原子發布／身分與checksum損壞拒絕、
+  輸入手序／實際著手排除檢查；壓縮ZIP header／切片assert自我檢查通過，Slurm語法與git diff --check通過。
+  未做GPU短測；實際吞吐、CUDA編譯、完整抽取成功與所有分片完成狀態仍未知。
+- 預檢及來源快照：`outputs/rank/humansl/policy_cnn/cached_AB_mondev_seed2027/extract/preflight/`；
+  作業紀錄與提交收據：同層 `<job_id>/`。cache identity：
+  `3b36a6676797f9945aad626cd03972a360308e0ce0e830c193505ccf20a1902b`。
+
+正式提交收據：job **792644**（2026-11-17T17:54:01.043860+08:00），`8gpus`／5×H200／60 CPU／500 GiB／2h。
+紀錄：`outputs/rank/humansl/policy_cnn/cached_AB_mondev_seed2027/extract/792644/submission.json`；log：`outputs/slurm-rank-policy-cache-792644.out`。
+依使用者要求，提交成功後不查佇列、不持續監看；尚未宣稱開始執行或抽取完成。
+
+
+### 2026-11-17：取消792644後的逐手policy流水線優化（未重新提交）
+
+使用者先要求取消792644，Slurm已確認CANCELLED；本輪依「盡量讓GPU持續推理、CPU持續重建」修改實作。
+取消前已有25個完成分片、約1.3 GiB，原`policy/`與來源快照均保留，未刪除或改寫。
+
+- 改動範圍：`persistent_cache.py`、`configs/strength/policy_cache.json`、
+  `tests/test_persistent_policy_cache.py`、套件README及根目錄plan；選盤／teacher／輸出欄位不變。
+- 每GPU兩條producer獨立供料：ZIP快取4片；10個CPU重播worker在ProcessPool保留2片工作，
+  補盤佇列容量由全部補盤片數界定，避免GPU正在推理ZIP資料時CPU等待。補盤packed輸入2.016 GiB，
+  全24,000盤packed輸入5.365 GiB；僅RAM、不另存輸入planes。
+- worker先packbits再IPC，H2D保持bits，在GPU重用既有unpack；plane部分傳輸bytes約為原本1/8。
+  一片輸入一次傳入GPU，批次間移除CPU scalar讀回及逐批D2H，完整logP/q在GPU彙整。
+- 專用CUDA copy stream複製到pinned RAM；背景writer等copy event後才檢查精度、原子保存、
+  checksum及重新讀取驗證。最多2片輸出在途，I/O落後時施加有界backpressure，失敗向主流程傳遞。
+  最終以writer收據核對全部新分片marker，避免GPU結束後再同步重讀整份新policy。
+- 新版獨立目錄：`data/processed/strength_features/humansl/policy_cnn/cached_AB_mondev_seed2027/policy_stream_v2/`；
+  報表／快照：`outputs/rank/humansl/policy_cnn/cached_AB_mondev_seed2027/extract_stream_v2/<job_id>/`。
+  schema=2，identity=`15061ad5b218d3e6fb3c3225045e40309548a85553d0fdb668feaeb70c3dd6ab`。
+  不跨版本混用舊policy，舊25片留存但不拿來宣稱新版本已完成。
+- CPU合成10項通過（0.43秒），含選盤／題組、精確q、pass／ko／尾批、checksum損壞拒絕、
+  兩條producer獨立供料／容量界限／提前結束／錯誤傳遞、打包解包一致、非有限值拒絕，
+  及背景writer確實等待copy完成後才讀取、主執行緒仍可繼續工作。
+  真實來源預檢通過（含A/B各HD0/1 ZIP與重播逐值parity）；Slurm語法與git diff --check通過。
+- 未重新提交、不持續監看、不訓練、不抽dev。CPU預檢快照在新版`extract_stream_v2/preflight/`。
+  5×H200／60 CPU／500 GiB／2h上限未變；20–40分鐘仍是先前粗估。
+  實際GPU吞吐、CUDA跨stream、空檔比例尚未量測，不能宣稱GPU持續滿載；啟動來源／CRC／編譯、
+  末尾drain與來源驗證仍有固定成本。各k=5/10/15/20模型分數與本輪吞吐增益均未知。
+
+
+### 2026-11-17：依使用者指示清除取消作業產出、改回原檔名重新提交
+
+已確認792644為CANCELLED且沒有其他policy任務；取得policy.lock後清除25個舊分片、舊run與log，
+同步清除兩版失效preflight。選盤／題組、ZIP、棋步快取與teacher不變；優化schema 2回到原policy／extract路徑。
+- 已刪除 `data/processed/strength_features/humansl/policy_cnn/cached_AB_mondev_seed2027/policy`（1,294,232,748 bytes）。
+- 已刪除 `outputs/rank/humansl/policy_cnn/cached_AB_mondev_seed2027/extract/792644`（1,740,865 bytes）。
+- 已刪除 `outputs/rank/humansl/policy_cnn/cached_AB_mondev_seed2027/extract/preflight`（1,738,685 bytes）。
+- 已刪除 `data/processed/strength_features/humansl/policy_cnn/cached_AB_mondev_seed2027/policy_stream_v2`（471,340 bytes）。
+- 已刪除 `outputs/rank/humansl/policy_cnn/cached_AB_mondev_seed2027/extract_stream_v2`（1,766,716 bytes）。
+- 已刪除 `outputs/slurm-rank-policy-cache-792644.out`（2,017 bytes）。
+重新提交前10項CPU測試通過（0.38s），Slurm語法及test-only通過；先做真實來源預檢再送出5×H200／60 CPU／500 GiB／2h任務。
+
+原路徑真實來源預檢通過；schema 2 identity=`cc1ca4f6da211644301c16ed9c04aaae038baf5f6b64f41fd56fdf71cde94f72`，5,343,778位置，預期36.246 GiB，
+提交前可用55,584,415,744 bytes。CPU/GPU獨立供料與背景writer優化不變，尚未GPU效能短測。
+
+已重新提交 **792691**（2026-11-17T18:18:52.111990+08:00），5×H200／60 CPU／500 GiB／2h；
+收據：`outputs/rank/humansl/policy_cnn/cached_AB_mondev_seed2027/extract/792691/submission.json`；log：`outputs/slurm-rank-policy-cache-792691.out`。
+舊792644產出已刪除，以原policy／extract檔名從零重新抽取；提交後不查佇列、不監看，不宣稱完成。

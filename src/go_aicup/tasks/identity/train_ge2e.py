@@ -39,6 +39,49 @@ from go_aicup.tasks.strength.shared.training import (configure_torch, environmen
                                                      scheduler_for, seed_process)
 
 
+class EncoderHead(torch.nn.Module):
+    """Encoder + B aggregation head in one module (2026-11-17, E2E-scratch), so DDP syncs both.
+    forward(x, plies) -> game vectors [N, M, D]: encoder per move (autocast), then the B head
+    (per-move residual blocks with the ply embedding, FP32) and the mean over the game's moves."""
+
+    def __init__(self, encoder, head, config, device, shape):
+        super().__init__()
+        self.encoder, self.head = encoder, head
+        self._config, self._device, self._shape = config, device, shape
+
+    def forward(self, x: torch.Tensor, plies: torch.Tensor) -> torch.Tensor:
+        from go_aicup.tasks.identity.train_e2e import joint_games
+        with autocast_context(self._config, self._device):
+            moves = self.encoder(x)
+        return joint_games(self.head, moves, plies, self._shape)
+
+
+def wsd_scheduler(optimizer, total_steps: int, warmup_fraction: float, decay_fraction: float):
+    """Warmup-stable-decay (2026-11-17): linear warmup, constant LR, then linear decay to 0 over the
+    last decay_fraction of the steps. Returns (scheduler, decay_start). The LR before decay_start
+    does not depend on total_steps, so a run can be extended from its pre-decay checkpoint."""
+    if not 0 <= warmup_fraction < 1 or not 0 < decay_fraction < 1:
+        raise ValueError("invalid warmup or decay fraction")
+    warmup = max(1, math.ceil(total_steps * warmup_fraction)) if warmup_fraction else 0
+    decay_start = total_steps - int(round(total_steps * decay_fraction))
+    if decay_start <= warmup:
+        raise ValueError("decay starts before warmup ends")
+
+    def multiplier(step):
+        if step < warmup:
+            return (step + 1) / warmup
+        if step < decay_start:
+            return 1.0
+        return max(0.0, (total_steps - step) / (total_steps - decay_start))
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, multiplier), decay_start
+
+
+def head_payload(head, step: int, seed: int) -> dict:
+    """seqagg.load_head format."""
+    return {"model": head.state_dict(), "step": step, "arm": "B", "position": True, "seed": seed}
+
+
 def read_config(path: Path) -> dict:
     config = json.loads(Path(path).read_text(encoding="utf-8"))
     for key, value in config["paths"].items():
@@ -227,17 +270,57 @@ def main(argv=None) -> int:
     source = torch.load(config["paths"]["init_model"], map_location="cpu", weights_only=False)
     raw.load_trunk(source["model"])
     raw.to(device)
-    model = DistributedDataParallel(raw, device_ids=[device.index]) if world > 1 else raw
-    optimizer = torch.optim.AdamW(model.parameters(), **config["optimizer"])
-    scheduler = scheduler_for(optimizer, training["steps"], training["warmup_fraction"],
-                              training["minimum_lr_ratio"])
+    head_config = config.get("head")
+    head = None
+    if head_config:
+        # B head in the loop (2026-11-17): same seed on every rank -> identical initial weights;
+        # GE2E uses the head's w, b (initialised to the encoder's), so the encoder's are frozen.
+        from go_aicup.tasks.identity.seqagg import Head
+        if head_config.get("arm", "B") != "B" or raw.pick or batch.get("cross_gpu"):
+            raise ValueError("head: only arm B, without pick or cross_gpu")
+        torch.manual_seed(int(head_config.get("seed", config["seed"])))
+        head = Head(attention=False).to(device)
+        with torch.no_grad():
+            head.w.copy_(raw.w)
+            head.b.copy_(raw.b)
+        raw.w.requires_grad_(False)
+        raw.b.requires_grad_(False)
+        net = EncoderHead(raw, head, config, device, (batch["players"], batch["games"], batch["moves"]))
+    else:
+        net = raw
+    model = DistributedDataParallel(net, device_ids=[device.index]) if world > 1 else net
+    optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], **config["optimizer"])
+    keep_steps = set(int(k) for k in training.get("keep_steps", []))
+    if training.get("schedule", "cosine") == "wsd":
+        scheduler, decay_start = wsd_scheduler(optimizer, training["steps"], training["warmup_fraction"],
+                                               training["decay_fraction"])
+    else:
+        scheduler = scheduler_for(optimizer, training["steps"], training["warmup_fraction"],
+                                  training["minimum_lr_ratio"])
+        decay_start = None
     start = 0
     last = out / "last.pt"
-    if last.exists():
+    extend = config["paths"].get("extend_from")
+    if extend and not last.exists():
+        # extension of a WSD run (2026-11-17): continue from its pre-decay checkpoint with a longer
+        # total; weights, head, AdamW moments and the step counter carry over, the LR stays constant
+        # until this config's decay_start.
+        saved = torch.load(extend, map_location="cpu", weights_only=False)
+        if saved["world"] != world or decay_start is None or saved["step"] >= decay_start:
+            raise ValueError("extend_from needs the same world size, a WSD schedule and a later decay start")
+        raw.load_state_dict(saved["model"])
+        if head is not None:
+            head.load_state_dict(saved["head"])
+        optimizer.load_state_dict(saved["optimizer"])
+        scheduler.load_state_dict(saved["scheduler"])
+        start = saved["step"]
+    elif last.exists():
         saved = torch.load(last, map_location="cpu", weights_only=False)
         if saved["world"] != world or saved["config"] != config:
             raise ValueError("resume requires the same config and world size")
         raw.load_state_dict(saved["model"])
+        if head is not None:
+            head.load_state_dict(saved["head"])
         optimizer.load_state_dict(saved["optimizer"])
         scheduler.load_state_dict(saved["scheduler"])
         start = saved["step"]
@@ -254,13 +337,29 @@ def main(argv=None) -> int:
         if rank == 0:
             payload = {"model": raw.state_dict(), "optimizer": optimizer.state_dict(),
                        "scheduler": scheduler.state_dict(), "step": step, "world": world, "config": config}
+            if head is not None:
+                payload["head"] = head.state_dict()
             torch.save(payload, out / "last.pt.tmp")
             os.replace(out / "last.pt.tmp", last)
+            if step == decay_start:         # pre-decay state: a later run can extend from here
+                torch.save(payload, out / f"stable_step{step}.pt.tmp")
+                os.replace(out / f"stable_step{step}.pt.tmp", out / f"stable_step{step}.pt")
+            if step in keep_steps:          # candidates for the development checkpoint choice
+                kept = out / f"step{step}"
+                kept.mkdir(exist_ok=True)
+                torch.save({"model": raw.state_dict(), "config": config, "steps": step}, kept / "model.pt")
+                if head is not None:
+                    torch.save(head_payload(head, step, config["seed"]), kept / "best.pt")
         if distributed():
             dist.barrier()
 
     cross_gpu = bool(batch.get("cross_gpu", False)) and world > 1
-    dataset = GE2EBatches(config["paths"]["cache_dir"], player_games, lengths, players=batch["players"],
+    if head is not None:
+        from go_aicup.tasks.identity.train_e2e import PlyBatches
+        batches = PlyBatches
+    else:
+        batches = GE2EBatches
+    dataset = batches(config["paths"]["cache_dir"], player_games, lengths, players=batch["players"],
                           games=batch["games"], moves=batch["moves"], steps=training["steps"],
                           seed=config["seed"], rank=rank, start_step=start,
                           max_open_shards=config["loader"]["max_open_shards"], player_color=player_color,
@@ -280,11 +379,16 @@ def main(argv=None) -> int:
     model.train()
     step, clock, window = start, time.monotonic(), []
     n, m, s = batch["players"], batch["games"], batch["moves"]
-    for x in loader:
-        x = x.to(device, dtype=torch.float32, non_blocking=True)
-        with autocast_context(config, device):
-            moves = model(x)
-        games = moves.float().reshape(n, m, s, -1).mean(dim=2)
+    w_b = (head.w, head.b) if head is not None else (raw.w, raw.b)
+    for item in loader:
+        if head is not None:
+            x, plies = item
+            games = model(x.to(device, dtype=torch.float32, non_blocking=True), plies.to(device, non_blocking=True))
+        else:
+            x = item.to(device, dtype=torch.float32, non_blocking=True)
+            with autocast_context(config, device):
+                moves = model(x)
+            games = moves.float().reshape(n, m, s, -1).mean(dim=2)
         if cross_gpu:
             # one GE2E group of world * n players: the other ranks' game vectors enter as constants,
             # this rank's keep their graph. Every rank evaluates the same loss, so the DDP average of
@@ -292,13 +396,14 @@ def main(argv=None) -> int:
             pooled = [torch.zeros_like(games) for _ in range(world)]
             dist.all_gather(pooled, games.detach())
             pooled[rank] = games
-            loss, accuracy = ge2e_loss(torch.cat(pooled), raw.w, raw.b)
+            loss, accuracy = ge2e_loss(torch.cat(pooled), *w_b)
             loss = loss * world
         else:
-            loss, accuracy = ge2e_loss(games, raw.w, raw.b)
+            loss, accuracy = ge2e_loss(games, *w_b)
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), training["gradient_clip_norm"])
+        torch.nn.utils.clip_grad_norm_([p for p in model.parameters() if p.requires_grad],
+                                       training["gradient_clip_norm"])
         optimizer.step()
         scheduler.step()
         step += 1
@@ -311,7 +416,7 @@ def main(argv=None) -> int:
                 dist.all_reduce(stats)
                 stats /= world
             log_event(out, rank, {"event": "train", "step": step, "loss": float(stats[0]),
-                                  "own_centroid_accuracy": float(stats[1]), "w": float(raw.w), "b": float(raw.b),
+                                  "own_centroid_accuracy": float(stats[1]), "w": float(w_b[0]), "b": float(w_b[1]),
                                   "lr": optimizer.param_groups[0]["lr"],
                                   "max_memory_gib": torch.cuda.max_memory_allocated(device) / 2 ** 30
                                   if device.type == "cuda" else 0.0,
@@ -319,7 +424,7 @@ def main(argv=None) -> int:
         flag = torch.tensor(int(stop[0]), device=device)
         if distributed():
             dist.all_reduce(flag, op=dist.ReduceOp.MAX)
-        if step % training["checkpoint_steps"] == 0 or flag.item():
+        if step % training["checkpoint_steps"] == 0 or flag.item() or step == decay_start:
             save(step)
         if flag.item():
             log_event(out, rank, {"event": "stopped", "step": step})
@@ -330,6 +435,9 @@ def main(argv=None) -> int:
     export_embeddings(raw, config, config["eval_splits"], lengths, device, rank, world)
     if rank == 0:
         torch.save({"model": raw.state_dict(), "config": config, "steps": step}, out / "model.pt")
+        if head is not None:
+            (out / "head").mkdir(exist_ok=True)
+            torch.save(head_payload(head, step, config["seed"]), out / "head" / "best.pt")
     if distributed():
         dist.barrier()
         dist.destroy_process_group()
