@@ -114,33 +114,52 @@ def _images(a: np.ndarray):
         yield b[:, ::-1]
 
 
-def reply_keys(rel: np.ndarray, prev: int | None, point: int) -> tuple[np.int64, np.int64]:
-    """(context, outcome) of L2: window around the opponent's previous move `prev`."""
+def reply_keys(rel: np.ndarray, prev: int | None, point: int, win_half: int = WIN,
+               tag: str = "r") -> tuple[np.int64, np.int64]:
+    """(context, outcome) of L2: window around the opponent's previous move `prev`
+    (7x7 by default; stage 2 adds the 5x5 window, win_half 2, as a coarser level)."""
     if prev is None:
         return NONE, NONE
+    w = win_half
     pr, pc = divmod(int(prev), SIZE)
     r, c = divmod(int(point), SIZE)
-    pad = np.full((SIZE + 2 * WIN, SIZE + 2 * WIN), 3, rel.dtype)
-    pad[WIN:WIN + SIZE, WIN:WIN + SIZE] = rel
-    win = pad[pr:pr + 2 * WIN + 1, pc:pc + 2 * WIN + 1]
+    pad = np.full((SIZE + 2 * w, SIZE + 2 * w), 3, rel.dtype)
+    pad[w:w + SIZE, w:w + SIZE] = rel
+    win = pad[pr:pr + 2 * w + 1, pc:pc + 2 * w + 1]
     dr, dc = r - pr, c - pc
-    inside = abs(dr) <= WIN and abs(dc) <= WIN
+    inside = abs(dr) <= w and abs(dc) <= w
     mark = np.zeros_like(win)
     if inside:
-        mark[WIN + dr, WIN + dc] = 1
+        mark[w + dr, w + dc] = 1
     best, offs = None, []
     for w_img, m_img in zip(_images(win), _images(mark)):
         b = np.ascontiguousarray(w_img).tobytes()
         if inside:
             i, j = np.unravel_index(int(np.argmax(m_img)), m_img.shape)
-            off = (int(i) - WIN, int(j) - WIN)
+            off = (int(i) - w, int(j) - w)
         else:
             off = TENUKI
         if best is None or b < best:
             best, offs = b, [off]
         elif b == best:
             offs.append(off)
-    return _key("r", best), _key("r", best, min(offs))
+    return _key(tag, best), _key(tag, best, min(offs))
+
+
+FAR = 4                      # offsets beyond this Chebyshev distance count as "far"
+
+
+def offset_keys(prev: int | None, point: int, tag: str) -> tuple[np.int64, np.int64]:
+    """(context, outcome) of a board-free offset level: the move's offset from `prev`,
+    folded over the 8 symmetries (sorted absolute row/column distances), "far" beyond FAR.
+    The context is one key per tag, so the term is the candidate's offset distribution."""
+    if prev is None:
+        return NONE, NONE
+    pr, pc = divmod(int(prev), SIZE)
+    r, c = divmod(int(point), SIZE)
+    a, b = sorted((abs(r - pr), abs(c - pc)))
+    out = ("far",) if b > FAR else (a, b)
+    return _key(tag), _key(tag, *out)
 
 
 def game_keys(moves: np.ndarray, own: int, n_own: int) -> np.ndarray:
@@ -157,5 +176,28 @@ def game_keys(moves: np.ndarray, own: int, n_own: int) -> np.ndarray:
             rel = _relabel(board, 1 + own)
             out[i, :2] = corner_keys(rel, moves[ply])
             out[i, 2:] = reply_keys(rel, moves[ply - 1] if ply > 0 else None, moves[ply])
+        play(board, moves[ply], color)
+    return out
+
+
+def game_keys2(moves: np.ndarray, own: int, n_own: int) -> np.ndarray:
+    """Stage-2 levels, int64 [n_own, 6]: (L3 ctx, L3 out, L4 ctx, L4 out, L5 ctx, L5 out).
+
+    L3 reply5    the L2 state with a 5x5 window (coarser back-off of L2)
+    L4 reply-off offset of the move from the opponent's previous move (no board content)
+    L5 follow    offset of the move from the player's own previous move (no board content)
+    """
+    board = np.zeros((SIZE, SIZE), np.int8)
+    out = np.zeros((n_own, 6), np.int64)
+    last = own + 2 * (n_own - 1)
+    for ply in range(last + 1):
+        color = 1 + ply % 2
+        if ply % 2 == own:
+            i = (ply - own) // 2
+            rel = _relabel(board, 1 + own)
+            prev = moves[ply - 1] if ply > 0 else None
+            out[i, 0:2] = reply_keys(rel, prev, moves[ply], 2, "r5")
+            out[i, 2:4] = offset_keys(prev, moves[ply], "o")
+            out[i, 4:6] = offset_keys(moves[ply - 2] if ply >= 2 else None, moves[ply], "f")
         play(board, moves[ply], color)
     return out

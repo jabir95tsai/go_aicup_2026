@@ -1,0 +1,73 @@
+{
+  "seed": 2026,
+  "device": "cuda",
+  "precision": "bf16",
+  "paths": {
+    "cache_dir": "data/processed/boards/strength_v1",
+    "init_model": "outputs/pid/ge2e/pid_ge2e_v2_both_p0/model.pt",
+    "output_dir": "outputs/pid/ge2e/pid_e2e_scratch32_14400",
+    "extend_from": "outputs/pid/ge2e/pid_e2e_scratch32_9600/stable_step7680.pt"
+  },
+  "exclude_splits": [
+    0,
+    1,
+    2
+  ],
+  "eval_splits": [],
+  "model": {
+    "channels": 256,
+    "blocks": 20,
+    "embedding": 256,
+    "bn_eps": 1e-05,
+    "bn_momentum": 0.1,
+    "checkpoint_segments": 5
+  },
+  "batch": {
+    "players": 64,
+    "games": 8,
+    "moves": 32
+  },
+  "loader": {
+    "num_workers": 8,
+    "prefetch_factor": 2,
+    "max_open_shards": 16
+  },
+  "optimizer": {
+    "lr": 0.0003,
+    "weight_decay": 0.0001,
+    "betas": [
+      0.9,
+      0.999
+    ],
+    "eps": 1e-08
+  },
+  "training": {
+    "steps": 14400,
+    "warmup_fraction": 0.05,
+    "minimum_lr_ratio": 0.0,
+    "gradient_clip_norm": 1.0,
+    "log_every": 10,
+    "checkpoint_steps": 400,
+    "deterministic": false,
+    "cudnn_benchmark": false,
+    "allow_tf32": false,
+    "keep_steps": [
+      14400
+    ],
+    "schedule": "wsd",
+    "decay_fraction": 0.2
+  },
+  "evaluation": {
+    "batch": 8192
+  },
+  "sampling": {
+    "colors": "both",
+    "min_ply": 0,
+    "player_d4": true,
+    "max_handicap": 1
+  },
+  "head": {
+    "arm": "B",
+    "seed": 2026
+  }
+}
