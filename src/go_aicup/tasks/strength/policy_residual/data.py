@@ -180,7 +180,8 @@ class Cache:
         ids = np.concatenate([np.arange(self.bounds[r], self.bounds[r + 1]) for r in rows])
         owner = np.repeat(np.arange(len(rows)), np.diff(self.bounds)[rows])
         for start in range(0, len(ids), chunk):
-            index = torch.as_tensor(ids[start:start + chunk])
+            # Gather where the cache lives: CPU RAM by default, or GPU when the whole cache was moved there.
+            index = torch.as_tensor(ids[start:start + chunk], device=self.arrays['q'].device)
             q = self.arrays['q'][index].to(self.device)
             lp = self.arrays['logp'][index].to(self.device)
             target = self.arrays['target'][index].long().to(self.device)
