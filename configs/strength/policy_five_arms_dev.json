@@ -1,0 +1,10 @@
+{
+  "run": "outputs/rank/humansl/policy_cnn/cached_AB_mondev_seed2027/five_arms/796606",
+  "encoder_workers": 11,
+  "games_per_batch": 32,
+  "inference_positions": 409,
+  "compile_teacher": true,
+  "zip_threads": 12,
+  "position_chunk": 4096,
+  "monitor_tolerance": 0.0005
+}

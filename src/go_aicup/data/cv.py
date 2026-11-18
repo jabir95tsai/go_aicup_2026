@@ -670,3 +670,138 @@ def make_cached_policy_games(meta: pd.DataFrame, cached: pd.DataFrame, dev_cache
         raise ValueError('invalid player-disjoint same-colour split')
     games['color'] = games.player_color.map({0: 'B', 1: 'W'})
     return games
+
+
+def make_large_policy_tables(meta, excluded_players, *, train_games_per_rank=20000,
+                             monitor_players_per_rank=20, dev_players_per_rank=40,
+                             games_per_holdout_player=20, train_questions=80000,
+                             monitor_questions=4000, dev_questions=8000, split_seed=20261119):
+    """Full-pool player-disjoint policy split; fixed rank/k quotas cover every selected game."""
+    fields = ['game_index', 'rank_id', 'player_id', 'player_color', 'handicap', 'length']
+    if not meta.game_index.is_unique or meta[fields].isna().any().any():
+        raise ValueError('duplicate/null canonical policy metadata')
+    if meta.groupby('player_id').rank_id.nunique().gt(1).any():
+        raise ValueError('a player has multiple ranks')
+    frame = meta.loc[meta.handicap.isin([0, 1]), fields].sort_values('game_index').copy()
+    frame['player_id'] = frame.player_id.astype(str)
+    if set(frame.rank_id) != set(range(10)) or (frame.length <= 0).any():
+        raise ValueError('invalid policy rank or length')
+    if not frame.player_color.isin([0, 1]).all() or games_per_holdout_player != 20:
+        raise ValueError('invalid player color or holdout game count')
+    if train_games_per_rank < 20 or train_games_per_rank % 20:
+        raise ValueError('per-rank TRAIN count must be a positive multiple of twenty')
+    excluded = set(map(str, excluded_players))
+    rng, held, pieces = np.random.default_rng(split_seed), set(), []
+    for rank in range(10):
+        table = frame[frame.rank_id.eq(rank)]
+        groups = {(pid, color): g.game_index.to_numpy() for (pid, color), g in
+                  table.groupby(['player_id', 'player_color'], sort=True)}
+        eligible = sorted({pid for (pid, color), ids in groups.items() if len(ids) >= 20 and pid not in excluded})
+        need = monitor_players_per_rank + dev_players_per_rank
+        if len(eligible) < need:
+            raise ValueError(f'rank {rank}: insufficient C-untouched holdout players')
+        players = np.asarray(eligible)[rng.permutation(len(eligible))[:need]]
+        for i, pid in enumerate(players):
+            choices = [color for color in (0, 1) if len(groups.get((pid, color), [])) >= 20]
+            color = choices[int(rng.integers(len(choices)))]
+            ids = rng.choice(groups[pid, color], 20, replace=False)
+            part = table[table.game_index.isin(ids)].copy()
+            part['role'] = 'monitor' if i < monitor_players_per_rank else 'dev'
+            pieces.append(part)
+            held.add(pid)
+    for rank in range(10):
+        table = frame[frame.rank_id.eq(rank) & ~frame.player_id.isin(held)]
+        groups = {(pid, color): rng.permutation(g.game_index.to_numpy()) for (pid, color), g in
+                  table.groupby(['player_id', 'player_color'], sort=True) if len(g) >= 20}
+        if sum(map(len, groups.values())) < train_games_per_rank:
+            raise ValueError(f'rank {rank}: insufficient eligible TRAIN games')
+        players = sorted({key[0] for key in groups})
+        players = list(np.asarray(players)[rng.permutation(len(players))])
+        order = []
+        choices = {pid: [key for key in groups if key[0] == pid] for pid in players}
+        for pid in players:
+            rng.shuffle(choices[pid])
+        for color_round in (0, 1):
+            order.extend(choices[pid][color_round] for pid in players if len(choices[pid]) > color_round)
+        selected, take, left = [], {}, train_games_per_rank
+        for key in order:
+            if left < 20:
+                break
+            selected.extend(groups[key][:20])
+            take[key] = 20
+            left -= 20
+        while left:
+            progressed = False
+            for pid in players:
+                candidates = [k for k in choices[pid] if k in take and take[k] < len(groups[k])]
+                if not candidates:
+                    continue
+                key = min(candidates, key=lambda k: take[k])
+                selected.append(groups[key][take[key]])
+                take[key] += 1
+                left -= 1
+                progressed = True
+                if not left:
+                    break
+            if not progressed:
+                raise ValueError('unable to fill TRAIN fairly')
+        part = table[table.game_index.isin(selected)].copy()
+        part['role'] = 'train'
+        if len(part) != train_games_per_rank:
+            raise ValueError('TRAIN game selection count mismatch')
+        pieces.append(part)
+    games = pd.concat(pieces, ignore_index=True).sort_values('game_index').reset_index(drop=True)
+    games['color'] = games.player_color.map({0: 'B', 1: 'W'})
+    if not games.game_index.is_unique or games.groupby('player_id').role.nunique().gt(1).any():
+        raise ValueError('large policy split has game/player overlap')
+    if set(games.loc[games.role.ne('train'), 'player_id']) & excluded:
+        raise ValueError('C-touched player entered holdout')
+    questions = {}
+    for role_number, (role, count) in enumerate([('train', train_questions), ('monitor', monitor_questions), ('dev', dev_questions)]):
+        if count < 40 or count % 40:
+            raise ValueError('question count must be divisible by forty')
+        gen = np.random.default_rng(np.random.SeedSequence([split_seed, role_number, 71]))
+        records = []
+        for rank in range(10):
+            part = games[games.role.eq(role) & games.rank_id.eq(rank)]
+            groups = [(pid, color, gen.permutation(g.game_index.to_numpy())) for (pid, color), g in
+                      part.groupby(['player_id', 'color'], sort=True)]
+            remaining = {k: count // 40 for k in K_BUCKETS}
+            def add(pid, color, k, ids):
+                if len(set(map(int, ids))) != k or remaining[k] <= 0:
+                    raise ValueError('invalid coverage question')
+                records.append(dict(player_id=pid, rank_id=rank, k=k, color=color,
+                                    games=np.sort(np.asarray(ids, dtype=np.int64))))
+                remaining[k] -= 1
+            for pid, color, ids in sorted(groups, key=lambda x: len(x[2])):
+                for offset in range(0, len(ids), 20):
+                    unseen = ids[offset:offset + 20]
+                    available = [k for k in K_BUCKETS if k <= len(ids) and remaining[k] > 0]
+                    fitting = [k for k in available if k >= len(unseen)]
+                    k = min(fitting) if fitting else max(available, default=0)
+                    if not k or len(unseen) > k:
+                        raise ValueError('question quotas cannot cover selected games')
+                    pad = np.setdiff1d(ids, unseen)
+                    chosen = np.r_[unseen, gen.choice(pad, k-len(unseen), replace=False)]
+                    add(pid, color, k, chosen)
+            for k in K_BUCKETS:
+                by_player = {}
+                for pid, color, ids in groups:
+                    if len(ids) >= k:
+                        by_player.setdefault(pid, []).append((color, ids))
+                players = sorted(by_player)
+                if not players and remaining[k]:
+                    raise ValueError(f'no players eligible for k={k}')
+                gen.shuffle(players)
+                for i in range(remaining[k]):
+                    pid = players[i % len(players)]
+                    color, ids = by_player[pid][(i // len(players)) % len(by_player[pid])]
+                    add(pid, color, k, gen.choice(ids, k, replace=False))
+        q = pd.DataFrame(records).iloc[gen.permutation(len(records))].reset_index(drop=True)
+        q.insert(0, 'question_id', np.arange(len(q), dtype=np.int64))
+        actual = set(np.concatenate(q.games.to_numpy()).tolist())
+        expected = set(games.loc[games.role.eq(role), 'game_index'])
+        if len(q) != count or actual != expected or q.groupby(['rank_id', 'k']).size().nunique() != 1:
+            raise ValueError('question coverage or balance failed')
+        questions[role] = q
+    return games, questions

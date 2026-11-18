@@ -167,7 +167,51 @@ def training_players(config: dict):
         info["gallery_players"] = [str(p) for p in candidates]
         info["gallery_games"] = [g.tolist() for g in fixed]
     color = meta["player_color"].to_numpy().astype(np.int8) if both else None
-    return player_games, meta["length"].to_numpy(), len(held), color, info
+    lengths = meta["length"].to_numpy()
+    external = sampling.get("external")
+    if external:
+        # OGS players appended after the Yugen ones (identity/external.py, 2026-11-18); paths.cache_dir must
+        # be the merged cache, whose first len(meta) rows are the Yugen cache unchanged.
+        if not both:
+            raise ValueError("sampling.external needs colors=both")
+        cache_dir = Path(config["paths"]["cache_dir"])
+        merged = pd.read_parquet(cache_dir / "games.parquet", columns=["game_index", "length", "player_color"])
+        n = len(meta)
+        if not (np.array_equal(merged["length"].to_numpy()[:n], lengths)
+                and np.array_equal(merged["player_color"].to_numpy()[:n], meta["player_color"].to_numpy())):
+            raise ValueError("merged cache does not start with the Yugen cache")
+        ext = pd.read_parquet(cache_dir / "external_players.parquet")
+        if ext["game_index"].min() < n:
+            raise ValueError("external rows overlap the Yugen rows")
+        ext_groups = ext.groupby("player", sort=True)["game_index"].apply(np.asarray)
+        ext_groups = ext_groups[ext_groups.map(len) >= config["batch"]["games"]]
+        limit = external.get("max_players")
+        if limit is not None and len(ext_groups) > limit:
+            pick = np.sort(np.random.default_rng([external.get("seed", 2026), 41]).choice(
+                len(ext_groups), size=limit, replace=False))
+            ext_groups = ext_groups.iloc[pick]
+        info["yugen_players"] = len(player_games)
+        info["external_players"] = len(ext_groups)
+        player_games = player_games + list(ext_groups)
+        info["players"] += [str(p) for p in ext_groups.index]
+        info["rank_ids"] += [-1] * len(ext_groups)
+        # OGS games run to 980 plies; the E2E head's ply-position table has 512 rows (seqagg.MAX_PLY), and
+        # Yugen games stop at 445. Sample OGS plies only from the first max(Yugen length) moves (35 of
+        # 800,000 OGS games exceed 511 plies; job 796341 crashed on one). Yugen rows are unchanged.
+        lengths = merged["length"].to_numpy().copy()
+        lengths[n:] = np.minimum(lengths[n:], int(lengths[:n].max()))
+        color = merged["player_color"].to_numpy().astype(np.int8)
+    return player_games, lengths, len(held), color, info
+
+
+def player_probabilities(config: dict, info: dict) -> np.ndarray | None:
+    """sampling.external.yugen_share = s: each drawn player is a Yugen player with probability s
+    (uniform within each source); absent = uniform over all players."""
+    share = config.get("sampling", {}).get("external", {}).get("yugen_share")
+    if share is None:
+        return None
+    n_y, n_e = info["yugen_players"], info["external_players"]
+    return np.concatenate([np.full(n_y, share / n_y), np.full(n_e, (1 - share) / n_e)])
 
 
 class EvalChunks(torch.utils.data.Dataset):
@@ -368,6 +412,7 @@ def main(argv=None) -> int:
                           world=world if cross_gpu else 1, extra_games=extra_games,
                           extra_per_group=extra_per_group, pick=config["model"].get("pick", False),
                           player_rank=np.asarray(info["rank_ids"]),
+                          player_p=player_probabilities(config, info),
                           rank_focus=config.get("sampling", {}).get("rank_focus"))
     if rank == 0 and dataset.rank_focus:
         (out / "rank_exposure.json").write_text(json.dumps(dataset.rank_exposure(world)))

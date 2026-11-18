@@ -1,0 +1,16 @@
+{
+  "run": "outputs/rank/humansl/policy_cnn_h/cached_AB_mondev_seed2027/five_arms/799148",
+  "encoder_workers": 10,
+  "games_per_batch": 32,
+  "inference_positions": 409,
+  "compile_teacher": true,
+  "zip_threads": 12,
+  "position_chunk": 4096,
+  "monitor_tolerance": 0.0005,
+  "feature_name": "H",
+  "source_files": [
+    "src/go_aicup/tasks/strength/policy_h/dev_eval.py",
+    "src/go_aicup/tasks/strength/policy_h/five_arms.py",
+    "src/go_aicup/tasks/strength/policy_h/extract.py"
+  ]
+}

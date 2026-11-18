@@ -1,0 +1,40 @@
+{
+  "out": "outputs/rank/humansl/policy_large/200k_deep_seed2027",
+  "split_seed": 20261119,
+  "seed": 2027,
+  "train_games_per_rank": 20000,
+  "monitor_players_per_rank": 20,
+  "dev_players_per_rank": 40,
+  "games_per_holdout_player": 20,
+  "train_questions": 80000,
+  "monitor_questions": 4000,
+  "dev_questions": 8000,
+  "epochs": 12,
+  "questions_per_k": 8,
+  "lr": 0.0003,
+  "weight_decay": 0.0001,
+  "evaluate_every": 500,
+  "patience": 5,
+  "position_chunk": 4096,
+  "train_probe_questions": 8000,
+  "gpu_count": 8,
+  "encoder_workers": 80,
+  "inference_positions": 256,
+  "games_per_batch": 8,
+  "compile_teacher": true,
+  "cache_fraction": 0.75,
+  "family_devices": {
+    "H": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "C": [
+      4,
+      5,
+      6,
+      7
+    ]
+  }
+}

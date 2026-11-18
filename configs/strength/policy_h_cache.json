@@ -1,0 +1,10 @@
+{
+  "out": "outputs/rank/humansl/policy_cnn_h/cached_AB_mondev_seed2027/extract",
+  "teacher": "HumanSL plain ckpt, official makeBasicRankProfile metadata for the colour to move",
+  "profiles": ["rank_10k", "rank_7k", "rank_5k", "rank_3k", "rank_1k", "rank_1d", "rank_2d", "rank_3d", "rank_4d"],
+  "gpus": 5,
+  "encoder_workers": 10,
+  "games_per_shard": 32,
+  "inference_positions": 409,
+  "compile_teacher": true
+}

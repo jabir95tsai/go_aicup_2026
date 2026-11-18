@@ -3530,3 +3530,411 @@ Slurm 提交成功後結束對話，不監看、不訓練、不抽 dev。
 已重新提交 **792691**（2026-11-17T18:18:52.111990+08:00），5×H200／60 CPU／500 GiB／2h；
 收據：`outputs/rank/humansl/policy_cnn/cached_AB_mondev_seed2027/extract/792691/submission.json`；log：`outputs/slurm-rank-policy-cache-792691.out`。
 舊792644產出已刪除，以原policy／extract檔名從零重新抽取；提交後不查佇列、不監看，不宣稱完成。
+
+### 2026-11-18：競賽一——追冠重新規劃：A0（OGS 外部資料可行性）＋B0（既有編碼器互補性）（使用者定稿順序；事前登記，看結果前寫定）
+
+**目標尺度：** 11/15 歷史榜首 Public 0.9060 對我方 0.8245254，差 0.0815；只改新增集須提高 0.163。即使 k=1 做到滿分，新增集也只加 (1−0.44)/4＝0.14（本地四桶估算）→ 須能從每盤取得更好辨識訊號、且多盤合起來仍受益的方法。順序：A0、B0 並行 → A0 通過後先做同算力跨站短測（只用幽玄 vs 幽玄＋OGS）→ 才決定 A1（約 85 GPU-h）。C1、C2 跳過；B1 備案。
+
+**A0（CPU，登入節點下載＋串流過濾，不佔 GPU）：** 來源 za3k 整理的 OGS 2025 合集（2013–2025-05，約 5,600 萬盤；發布頁載明經 OGS 同意重散布，README 記載 OGS 代表同意研究使用；正式用於有獎競賽與得獎交付的範圍 A1 前須再確認）。
+- 樣本（`sample-100k.json.gz`，實為 2021 版隨機 10 萬盤）：19×19 47.6%；19×19、完成、HD≤1、無擺子、≥60 手 33.6%，其中 ranked 27.2%；速度 live 88%／correspondence 10%／blitz 2%；中位手數 201；段級中位約 9k（OGS 0＝30k、30＝1d；90 百分位約 2k）→ 與幽玄（多為段位）有明顯棋力落差。JSON 欄位含雙方 player id、ranked、width/height、handicap、time_control、moves。
+- 下載速度：za3k 主機約 0.36–1.5 MB/s（並行反而 0.39 MB/s），Internet Archive 2021 鏡像更慢；全量 JSON 43 GB 約 20 小時，改用 **2025 by-username SGF**（16.2 GB；資料夾＝數字 player id，bot 沒有自己的資料夾；SGF 有 SZ、HA、RE、GC[速度,ranked]、BR/WR、DT 與著手）。可續傳下載到 `/home/jason1122/ogs2025/`，同時以 `scripts/identity/ogs_stream_filter.py` 串流過濾（每盤只存一次；19×19、無擺子、HA≤1、完成、≥60 手、黑先交替、前 60 手無 pass），輸出 int16 著手＋meta 分片與 `stats.json`（各資料夾擁有者的合格 ranked 盤數分布）。11/18 09:54 開始，預計當日 17:30–22:30 完成。
+- **A0 通過條件（往下做跨站短測）：** 雙方都是真人（雙方皆有資料夾）、19×19、ranked、HA≤1 的對局中，**≥20 盤的玩家 ≥ 30,000 人**；另報即時棋／通信棋占比、年份與段級分布、儲存量。
+
+**B0（1 卡，`scripts/identity/pid2_ensemble_b0.py`）：** 基底＝現行 `hung-seqB-e2emix-ml` 融合。候選成員：既有 15 個編碼器的驗證台盤向量（各自逐手平均；含基底編碼器本身的平均聚合 A9600）＋E2E14400（含其 B 頭）；排除 v6_gal_p1_4800（訓練用過 pool 1 的 gallery 盤）。風格項改為 (cos_B＋cos_E9600＋Σβ_m·cos_m)／(2＋Σβ_m)。開發 pool 0 draws 100–119 貪婪前向選擇：每輪試每個未選成員 × β ∈ {0.25, 0.5, 1}，開發增益 ≥ +0.002 才加入，最多 3 個（blend 上限 5）。封存 draws 1500–（pool 0 1500–1519、pool 1 1500–1529）只評一次。**gate（對基底）：pool 1 Δ ≥ +0.010、z ≥ 2.5、四桶各 ≥ −0.005、pool 0 Δ > 0。** 預期：小（多數成員與基底同為 V2 初始化），過關換算 Public 約 +0.005，當可累積收益。成本 < 1 GPU-h。已送 Slurm 795939。
+
+**B0 結果（Slurm 795939，1 卡 5 分 35 秒，`outputs/pid/pid2_ensemble_b0/dev_choice.json`）→ 開發題組沒有任何成員能加入，封存題組未開，不產生提交檔。** 16 個候選 × 3 個 β 在開發 pool 0 draws 100–119 全部為負：最佳 E2E14400 β=0.25 −0.0003，其次 E2E14400 β=0.5 −0.0008、A9600（基底編碼器逐手平均）−0.0012、v4_4800 −0.0013、v5_sub82 −0.0016、v2_both −0.0016、v7_band −0.0018（皆 β=0.25）。判讀：既有編碼器都與基底同為 V2 初始化（或與 E2E9600 同一條訓練路徑），在 B＋E2E9600 混合之上沒有新資訊；E2E 的 +0.027 來自訓練方式不同，不是「多平均幾個」。→ 便宜的集成路線結案；B1（同架構不同 seed）預期同樣有限，維持備案。
+
+**A0 進度與跨站短測的程式（11/18 上午，使用者「先寫轉檔和雙來源 loader」；未送 GPU 作業）：**
+- 下載速度降到約 0.1–0.3 MB/s（09:54–10:52 共 1.0 GB），16.2 GB 全量需 14–40 小時。by-username 封存每個資料夾＝一位玩家的完整歷史 → **不必等全量**：讀到的資料夾擁有者都是真人且棋局完整，可在合格玩家數足夠時停止下載。對手資料夾可能尚未到，故「對手也是真人」只能報下界；訓練只用玩家本人的著手，bot 對手只出現在盤面上。
+- 磁碟：`/home` 72 GB 已用，封存 16.2 GB＋全部合格棋局約 8.6 GB 會到 97 GB（配額 100 GB、寫滿會無聲失敗）→ 過濾改為**只存 ranked 對局**（仍全部計數），10:47 重啟。
+- `src/go_aicup/tasks/identity/external.py`：選玩家（ranked、玩家為資料夾擁有者、可選對手真人／年份／最低段級、≥min_games、上限人數與每人盤數）→ 合併 BoardCache：前 1,000,000 列就是幽玄快取（shard 檔 symlink、同 build id、game_index 不變），其後為 OGS 列（遇第一個 pass 截斷）＋`external_players.parquet`。預設幽玄快取與所有既有程式不受影響。
+- `train_ge2e.training_players`：`sampling.external` 時把 OGS 玩家接在幽玄玩家後（檢查合併快取前段與幽玄逐列相同）；`external.yugen_share` 設定每次抽到幽玄玩家的機率（`GE2EBatches(player_p=…)`；未設時抽樣與原本逐位相同，已測）。
+- 測試：`tests/test_identity_external.py` 2 項（合併快取幽玄列逐盤相同、OGS 列含 pass 截斷與執色、bot 排除；抽樣比例與未設時相同）＋既有 identity 16 項通過。
+- 短測設定 `configs/identity/pid_e2e_ogs_short_{Y,YO}.json`：同 E2E-scratch 9,600 步配方、960 步（十分之一），兩臂只差資料；YO 暫定 yugen_share 0.5（待使用者確認）。評估腳本尚未寫。
+- **使用者決定（11/18）：** YO 臂 `yugen_share` 0.5；合格玩家達 3 萬人即停下載並建快取。**實際：** 下載在 11:07 全部完成（16,191,860,680 bytes；後段速度大增）。第一次過濾在登入節點 25 分鐘 RSS 已 11 GB——串流 `tarfile` 仍累積每個 TarInfo（全量約需 80 GB）——停掉後修正（每個成員後清空 `tf.members`；300 MB 測試峰值 374 MB、約 16k 檔／秒），並修正進度列只在保留盤觸發的錯。前 1.85% 的封存已有 4,388 位 ≥20 盤 ranked 合格對局的玩家（對手不限）→ 3 萬人門檻可滿足，限制改為磁碟：快取上限 **40,000 人 × 每人 20 盤、對手也須是真人**（約 15 GB）。過濾＋刪封存＋計數（全部／2021 起，對手不限／真人）＋建合併快取一個作業：Slurm **796320**（1 卡配額當 CPU 用，上限 5 小時）。
+
+**跨站短測（事前登記，看結果前寫定；使用者計畫第 3 步；A0 通過後仍待使用者明確同意才送）：**
+- **執行條件：** 建快取作業 796320 成功，且 `external.json` 的合格玩家（ranked、HA≤1、雙方皆真人、≥20 盤）≥ 30,000（`ogs_short_train.sh` 會先檢查，不足則不訓練）。
+- **兩臂：** `configs/identity/pid_e2e_ogs_short_Y.json`（只用幽玄 6,426 人）與 `_YO.json`（幽玄＋OGS 至多 40,000 人，每次抽到幽玄玩家的機率 0.5）；同 E2E-scratch 配方（同初始化、同 B 頭設定、同 batch 64×8×32、同 seed），各 960 步 WSD（十分之一）。各 8 卡約 1.1 小時，合計約 17.6 GPU-h。
+- **評估（`src/go_aicup/tasks/identity/ogs_short_eval.sh` → `scripts/identity/pid2_ogs_short_eval.py`，1 卡）：** 抽兩臂驗證台逐手向量（快取 `/work/jason1122/ogs_short_cache/`，`/home` 空間不足）；在現行融合內比較（rest＝開局＋類別＋L1／L2）：單獨 rest＋16w·cos_X，以及與 B 各半 rest＋16w·(0.5 cos_B＋0.5 cos_X)；不調權重；新封存 draws 1600–（pool 0 1600–1619、pool 1 1600–1629）。
+- **繼續門檻（mix_YO 對 mix_Y）：** pool 1 Δ ≥ +0.010、pool 0 Δ > 0、四桶各 ≥ −0.005（k=1 的增益不被其他桶抵銷）。兩臂單獨都不高於「無風格項」→ 記為無法判定。過門檻才提 A1（完整 9,600 步，約 85 GPU-h）給使用者決定。
+- **使用者同意送出（11/18）：** 訓練 Slurm **796340**（Y）、**796341**（YO），皆 afterok 796320、8 卡、上限 1 小時 45 分；評估 **796342**（afterok 兩臂，1 卡）。
+- **A0 實際數字（job 796320，11/18 13:34 完成）：** 封存 106,533,633 個成員；19 路 32,675,323 盤，其中 ranked 且通過全部篩選、去重後 13,393,664 盤（未 ranked 5,887,981 盤只計數不保存；讓子 >1 共 71,838、前 60 手內 pass 121,518、未完局 52,326）。資料夾擁有者 1,209,590 人。**≥20 盤 ranked 合格對局的玩家 82,481 人；要求對手也是人類（有資料夾）時 49,961 人**（1,809,413 盤次），遠超 3 萬門檻。快取：從 49,961 人隨機抽 40,000 人、每人 20 盤＝800,000 列、1.51 億手、14.36 GB，`/home` 建完剩 11 GB。即時／通信對局比例與年份分布：filter 有記 speed／year 欄位但本次未統計，**未知**。
+- **Y（796340）完成**（1 小時 04 分）。**YO（796341）13:35 崩潰**：OGS 對局最長 980 手，E2E head 的手數位置表只有 512 格（`seqagg.MAX_PLY`），800,000 盤中 35 盤超過 511 手 → CUDA index assert；評估 796342 因相依而取消。修正：`train_ge2e.training_players` 外部分支把 OGS 盤的可抽手數上限截為幽玄最長 445 手（幽玄列不變，Y 臂不受影響）；CPU 實資料空跑 2,000 步：最大 ply 444、OGS 抽中比例 0.4995。崩潰的輸出目錄改名 `pid_e2e_ogs_short_YO.crash796341`。重新送出 YO **804782**、評估 **804783**（afterok 804782），設定與資源不變。
+
+### 2026-11-18：補登 787069／792691 結果，刪除舊 policy 實驗目錄；policy 快取改為只存 ZIP
+
+**787069（C-only A0／S／F × LR 1e-3／3e-4，每臂 4 epochs＝1,000 updates，11/16 COMPLETED 48 分 58 秒，約 4.05 配置 GPU-h）補登：** monitor 選模結果是 S、F 四臂都選 step 0（等於共同起點），A0 兩臂選 step 1,000。dev Equal-k：A0 lr1e-3 0.7117、A0 lr3e-4 0.7137、S／F 四臂 0.7139（k=5/10/15/20：0.672／0.7163／0.7284／0.7388）。S−A0、F−A0 差 +0.0002～+0.0022，95% 區間都跨 0，全部未過 gate。單一 seed、dev 曾重複使用、monitor 有 190／200 名 C 向量學習玩家重疊。
+
+**792691（TRAIN＋monitor 逐手 policy 持久快取）補登：** COMPLETED 19 分 52 秒，約 1.58 配置 GPU-h；`policy/complete.json` status=complete，24,000 盤、5,343,778 位置、765 分片，identity `cc1ca4f6…f72`。
+
+**policy 快取改存 ZIP：** 依使用者要求，`data/processed/strength_features/humansl/policy_cnn/cached_AB_mondev_seed2027/`（38,922,334,146 bytes、5,367 檔）以 `scripts/data/zip_dir_incremental.py` 逐分片搬入同層 `cached_AB_mondev_seed2027.zip`（deflate level 1，25,080,805,865 bytes）。每分片先以 `complete.json` 的 SHA-256 核對原檔，寫入並 fsync 後讀回逐檔比對 SHA-256 才刪除；逐檔雜湊記在 `data/processed/migrations/zip_cached_AB_mondev_seed2027/journal.jsonl`。登入節點開始、Slurm 796332（12 CPU，11 分 51 秒）續完，原目錄已移除。讀取用 `go_aicup.tasks.strength.policy_residual.policy_zip.load()`，直接在記憶體解壓，沿雜湊鏈驗證，不寫磁碟；完整 logp 約需 38.7 GB RAM。`persistent_cache.py` 抽取流程寫原目錄，重抽前須先解壓。
+
+**刪除（使用者要求，結果皆已記於 RESULTS）：** `outputs/rank/humansl/policy_cnn/cached_AB_mondev_seed2027/`（792691 執行紀錄＋preflight，含與 src 相同的程式副本，4.1 MB）、`outputs/rank/humansl/policy_branches/seed2027_b32_e12/788616/`（四臂 A0／R10／Z10／Z32，結果見 11/17「788616 原預算續跑」節，82 MB）、`outputs/rank/humansl/policy_residual_epoch/`（787069，35 MB）。三者都不會續跑；新切分的五臂實驗（plan.md）會重新訓練 A0／R10／Z32。785715（`policy_residual/seed2027_t1000_m200/`）未刪，仍被 11/16 S 融合規格引用。Slurm log 未刪。
+
+### 2026-11-18：競賽二——新切分單卡五臂（plan.md）短測與正式提交
+
+**短測（各臂 50 updates，1×H200）：** 796473（快取在 CPU RAM、每塊 512 位置）12 分 34 秒；796545（快取整份放 GPU）10 分 12 秒；796590（GPU＋每塊 4,096）3 分 26 秒。每步 32 題涵蓋約 396 盤／88,139 位置，題級 loss 須對全部位置前向兩遍；瓶頸依序為 CPU 取樣＋H2D、再來是小分塊的 kernel／Python 開銷。796590 秒／update：A0 0.004、R10 0.256、Z32 0.253、CNN-R10 0.155、CNN-Z32 0.150；秒／完整評估 2.5／7.8／7.7／5.6／5.5；顯存峰值 36.3–37.5 GiB（快取約 36.3 GiB）。五臂 step 0 與共同起點一致；改分塊只讓 R10 monitor Equal-k 差 0.00016（約 1 題，加總順序不同的浮點差）。50 步分數只作工程檢查。參數量 A0 210、R10 9,949、Z32 12,019、CNN-R10 54,684、CNN-Z32 56,754（plan 寫 56,786）。
+
+**正式提交：** commit `3ea4062`，Slurm **796606**，`8gpus` 1×H200／12 CPU／200G／2h 上限；設定 `configs/strength/policy_five_arms.json`（plan §5：batch 32 題、每 k 8 題、12 epochs＝3,000 updates、AdamW LR 3e-4、encoder WD 1e-4、每 125 步評估、monitor 嚴格改善選模、seed 2027）。預估約 55 分鐘（50 步外推）。輸出 `outputs/rank/humansl/policy_cnn/cached_AB_mondev_seed2027/five_arms/796606/`。不碰 dev。
+
+**完成結果（2026-11-18，796606 讀 log 與各臂 `result.json` 登記）：** `COMPLETED`、exit 0，牆鐘 57 分 31 秒（≈0.96 配置 GPU-h），快取載入 50.2 秒（5,343,778 位置），五臂各 3,000 updates、無非有限值；顯存峰值 36.3–37.5 GiB；持久產物 96,903,776 bytes。每臂看過 TRAIN 1,000 人全部（約 19,820 盤）。以下為 monitor（200 人、4,000 題）本地官方公式，不是 LB、不是 dev：
+
+| 臂 | 選中 step | k=5 | k=10 | k=15 | k=20 | Equal-k | −A0 | 後 12 次評估平均 | 評估 sd | 支路 logits RMS（q≈13.5） |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| A0 | 3000 | .6863 | .7507 | .7544 | .7729 | .7411 | — | .7392 | .0009 | 0 |
+| R10 | 875 | .6848 | .7472 | .7641 | .7849 | .7452 | +.0042 | .7381 | .0033 | .053 |
+| Z32 | 3000 | .6889 | .7507 | .7547 | .7748 | .7423 | +.0012 | .7393 | .0012 | .008 |
+| CNN-R10 | 2500 | .6898 | .7473 | .7635 | .7817 | .7456 | +.0045 | .7389 | .0033 | .080 |
+| CNN-Z32 | 1500 | .6853 | .7510 | .7603 | .7792 | .7440 | +.0029 | .7391 | .0019 | .052 |
+
+判讀：選中值是 24 次評估取最大，對波動大的臂（R10／CNN-R10 sd .0033 vs A0 .0009）偏樂觀；後半段平均五臂都在 .738–.739，無可分辨差異，最大差 +.0045 也未達候選 gate +.005。支路對 logits 的貢獻比 q 小兩個數量級以上，TRAIN Equal-k 全程只在 .741–.743 間 → 不是過擬合，而是支路沒學到可用訊號或 LR 3e-4／3,000 步推不動，現有資料無法區分。R10／CNN-R10 的增加集中在 k=15／20，k=5 略低於 A0。預期 dev 不會有臂過 gate；依 plan §6 步驟 6–7 仍做 dev 收尾（使用者 11/18 指示），結果另記。
+
+**Dev 收尾（2026-11-18，Slurm 796930，`policy_residual/dev_eval.py`＋`configs/strength/policy_five_arms_dev.json`）：** `COMPLETED`、exit 0，`8gpus` 1×H200，牆鐘 28 分 17 秒（≈0.47 配置 GPU-h），GPU 顯存峰值 15.4 GiB；持久產物 9,157,685 bytes。各臂只評估 monitor 選中的 checkpoint（同上表 step），dev 未參與選模。五臂 monitor 分數重算與訓練紀錄差 0.0。dev＝360 人、7,200 盤、8,000 題、1,600,205 位置（1,419 盤重用快取、5,781 盤重新推論）；抽取誤差 mass 0.00061、q 0.0077、C 0.00029。此 dev 為歷史上已用過的固定 outer dev，屬有限證據。以下為本地官方公式，不是 LB：
+
+| 臂 | 選中 step | k=5 | k=10 | k=15 | k=20 | Equal-k | CE |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| A0 | 3000 | .6896 | .7420 | .7556 | .7762 | .7409 | .9632 |
+| R10 | 875 | .6877 | .7419 | .7532 | .7779 | .7402 | .9616 |
+| Z32 | 3000 | .6888 | .7429 | .7553 | .7762 | .7408 | .9635 |
+| CNN-R10 | 2500 | .6907 | .7429 | .7541 | .7654 | .7383 | .9628 |
+| CNN-Z32 | 1500 | .6912 | .7465 | .7529 | .7747 | .7413 | .9654 |
+
+玩家配對 bootstrap（2,000 次；gate：ΔEqual-k ≥ .005、P(>0) ≥ .90、每 k ≥ −.005）：
+
+| 比較 | ΔEqual-k | Δk5／k10／k15／k20 | 95% CI | P(>0) | gate |
+|---|---:|---|---|---:|---|
+| R10−A0 | −.0007 | −.0019／−.0001／−.0024／+.0018 | [−.0053, +.0042] | .389 | ✗ |
+| Z32−A0 | −.0000 | −.0008／+.0009／−.0003／.0000 | [−.0007, +.0006] | .444 | ✗ |
+| CNN-R10−A0 | −.0026 | +.0011／+.0009／−.0016／−.0108 | [−.0092, +.0038] | .202 | ✗ |
+| CNN-Z32−A0 | +.0005 | +.0016／+.0045／−.0027／−.0015 | [−.0048, +.0059] | .559 | ✗ |
+| Z32−R10 | +.0006 | +.0011／+.0010／+.0021／−.0018 | [−.0042, +.0055] | .605 | ✗ |
+| CNN-R10−R10 | −.0019 | +.0030／+.0010／+.0008／−.0126 | [−.0068, +.0027] | .211 | ✗ |
+| CNN-Z32−Z32 | +.0005 | +.0024／+.0035／−.0024／−.0015 | [−.0047, +.0059] | .560 | ✗ |
+| CNN-Z32−CNN-R10 | +.0030 | +.0005／+.0035／−.0011／+.0093 | [−.0019, +.0085] | .887 | ✗ |
+
+**判讀：** 八組比較全部未過 gate，`claims` 全為 false。四個候選臂對 A0 皆在 ±.003 內、CI 跨 0；Z32 與 A0 的 CI 僅 ±.0007，與其支路 logits RMS .008 一致——z 支路幾乎未被使用。monitor 上 R10／CNN-R10 的 +.004 在 dev 消失（−.0007／−.0026），符合上節「24 次評估取最大偏樂觀」的預期。CNN-R10 在 k=20 退 .011（對 A0）／.013（對 R10），是唯一超過 −.005 的單桶退步，原因未知（殘差頭在大 k 的信心尺度或 dev 雜訊，現有資料無法區分）。CNN-Z32−CNN-R10 的 +.003 主要來自 CNN-R10 的 k=20 退步。**結論：** C 的逐手 policy 特徵以 set 或 CNN、殘差或獨立支路接上 A0，在此規模（1,000 TRAIN 人、3,000 updates、LR 3e-4）量不出增益；不推進 H＋C 融合、不做 LB 探針、不加 seed。產物：`outputs/rank/humansl/policy_cnn/cached_AB_mondev_seed2027/five_arms/796606/dev/796930/summary.json`。
+
+### 2026-11-18：競賽二——H 版逐手 policy 快取抽取（9 個 HumanSL profile；使用者核准先抽特徵）
+
+**目的：** 為 H 版五臂（A0／R10／Z32／CNN-R10／CNN-Z32，架構照 C 版 plan.md，條件數 10→9）準備 TRAIN＋monitor 逐手 policy 特徵；本次只做抽取與壓縮，不訓練、不抽 dev。
+**Teacher：** 凍結 HumanSL 一般權重；`input_meta` 為官方 `makeBasicRankProfile`（雙方同段位）經原 metadata encoder 的輸出，依行棋顏色取用。profile＝`rank_10k, 7k, 5k, 3k, 1k, 1d, 2d, 3d, 4d`（現有 H 15 個中落在 10k–4d 者）。貼目 HD0 6.5／HD1 0.5、遮罩與 C 快取相同。作業開頭在 GPU 上對 HD0／HD1 各一盤，比對「向量索引 teacher」與「未改 metadata encoder 的原網路」的每手 log p，最大差 >1e-3 則中止（`parity.json`）。
+**資料：** C 版選盤 ZIP 已刪，以 `policy_h/select.py`（同 seed、同 `cv.py` 函式，讓子表改讀 `data/raw/raw.zip`）重產；games／train／monitor 題組 SHA-256 與 796606 記錄逐位元相同，重用／補建盤數同 plan §2。TRAIN 20,000 盤＋monitor 4,000 盤＝5,343,778 位置；預估 logp FP16 約 32.7 GiB，壓縮後約 23 GB。
+**程式：** 新目錄 `src/go_aicup/tasks/strength/policy_h/`（`select.py`、`extract.py`、`extract.slurm`、`zip.slurm`）、`configs/strength/policy_h_cache.json`；不改既有程式，`extract.py` import `policy_residual.persistent_cache`，只覆寫寫死 10 個條件的 `infer`／`validate_policy`／`validate_shard`／`worker` 與路徑。CPU 預檢（選盤 hash、ZIP／重播 planes 一致、容量）通過，identity `80e80404…`；假 teacher 的 CPU 冒煙測試確認 shape `[n,9,362]`、行棋顏色索引與分片寫入／驗證。
+**提交：** 抽取 Slurm **797636**（5×H200／60 CPU／500 GiB／2h，上限 10 配置 GPU-h；依 C 版 792691 的 19 分 52 秒估約 20 分鐘、約 1.6 GPU-h）。前兩次 parity 中止（各約 20 秒）：797605 最大差約 3e-3，是 TF32 雜訊；parity 改為 FP32（TF32 關閉）後吻合到 4e-6。797621 原本以「顏色對調」當反向對照，但 `makeBasicRankProfile` 讓黑白兩方同段位，輪黑下與輪白下的向量完全相同（差 0.0），顏色不影響 H，因此改用「相鄰 profile」對照（差 5.0–7.3）。797636 parity 通過，抽取本身照 C 快取用 TF32。
+**壓縮：** 新增 `policy_h/zip_parallel.py`：11 個 worker 程序並行讀檔、算 SHA-256／CRC-32，並以 zipfile 相同的 raw deflate（level 1）壓縮；單一主程序依序寫入，每批 32 片關檔 fsync 後由 worker 平行讀回比對 SHA-256，通過才刪原檔。journal 與續跑語意同 `scripts/data/zip_dir_incremental.py`。CPU 合成測試：成員內容與壓縮後大小和原工具逐位元相同；續跑、來源與 complete.json 不符時拒絕刪除，皆通過。Slurm **797670**（afterok:797636，1 GPU／12 CPU／64 GiB／2h；取代未執行的單執行緒版 797639）。產物：`data/processed/strength_features/humansl/policy_cnn_h/cached_AB_mondev_seed2027_h9.zip`；log 與來源紀錄在 `outputs/rank/humansl/policy_cnn_h/cached_AB_mondev_seed2027/extract/797636/`。成功以 `policy/complete.json`（壓縮前）與 797670 的 `done` 為準；結果待補。
+
+**H 五臂短測（2026-11-18，Slurm 798446，`8gpus` 1×H200，`policy_h/five_arms.py`＋`configs/strength/policy_h_five_arms_smoke.json`）：** 各臂 50 updates，其餘照 C 版 796590。`COMPLETED`、exit 0，牆鐘 3 分 23 秒；H 快取從 ZIP 載入 49.8 秒（5,343,778 位置），每盤 H 平均的 FP16 還原誤差最大 0.00031；顯存峰值 32.7–33.8 GiB；產物 31 MB。五臂 step 0 一致（monitor Equal-k 0.7370、CE 0.9248；TRAIN 0.7432），殘差臂零起點斷言通過。
+
+| 臂 | 參數 | 秒／update | 秒／完整評估 | 峰值 GiB | step 50 monitor Equal-k（k=5/10/15/20） | 支路 logits RMS（q≈14.5） |
+|---|---:|---:|---:|---:|---|---:|
+| A0 | 190 | 0.004 | 2.5 | 32.7 | .7364（.6777／.7396／.7554／.7729） | 0 |
+| R10 | 9,704 | 0.250 | 7.6 | 33.8 | .7385（.6827／.7414／.7579／.7720） | .216 |
+| Z32 | 11,839 | 0.248 | 7.5 | 33.8 | .7355（.6770／.7365／.7557／.7729） | .015 |
+| CNN-R10 | 52,007 | 0.149 | 5.4 | 33.2 | .7397（.6849／.7414／.7592／.7734） | .118 |
+| CNN-Z32 | 54,142 | 0.145 | 5.4 | 33.2 | .7475（.6846／.7509／.7666／.7878） | .083 |
+
+50 步的分數只作工程檢查（單次評估、未過 dev，C 版經驗是 monitor 單點偏樂觀）。外推正式 3,000 步＋每 125 步評估（25 次）：A0 約 1 分、R10／Z32 各約 16 分、CNN 兩臂各約 10 分，加載入約 53 分鐘、約 0.9 配置 GPU-h（C 版 796606 為 57.5 分）。正式設定 `configs/strength/policy_h_five_arms.json` 已建立，尚未提交。
+
+**H 五臂正式提交：** Slurm **799148**，`8gpus` 1×H200／12 CPU／200G／2h 上限；設定 `configs/strength/policy_h_five_arms.json`（batch 32 題、每 k 8 題、12 epochs＝3,000 updates、AdamW LR 3e-4、encoder WD 1e-4、每 125 步評估、monitor 嚴格改善選模、seed 2027）。預估約 53 分鐘。輸出 `outputs/rank/humansl/policy_cnn_h/cached_AB_mondev_seed2027/five_arms/799148/`。不碰 dev；依使用者指示提交後不監看，結果待補。
+
+
+### 2026-11-18：799148 H 五臂正式結果分析（monitor；未評 dev）
+
+Slurm **799148** `COMPLETED`、exit 0，牆鐘 **53 分 58 秒**（約 **0.90 配置 GPU-h**）；程式內耗時 3,226.9 秒。五臂各完成 3,000 updates／12 epochs，皆有 `complete.json`；各見過 TRAIN 全部 1,000 人、19,820 盤。快取載入 49.2 秒，5,343,778 位置；GPU 峰值 32.7–33.8 GiB，持久產物 95,918,521 bytes。逐筆檢查五臂共 15,000 筆 gradient log，非有限梯度與缺梯度參數均為 0。以下是 monitor 200 人／4,000 題的本地官方公式，非 dev、非 LB；同一 monitor 同時選 checkpoint，分數有選模偏差。
+
+| 臂 | 選中 step | k=5 | k=10 | k=15 | k=20 | Equal-k | −A0 | 後 12 次評估平均 | 評估 sd | 支路 logits RMS |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| A0 | 875 | .6807 | .7460 | .7564 | .7716 | .7387 | — | .7367 | .0008 | 0 |
+| R10 | 2625 | .6798 | .7424 | .7560 | .7792 | .7394 | +.0007 | .7348 | .0024 | .0770 |
+| Z32 | 875 | .6797 | .7457 | .7564 | .7748 | .7391 | +.0005 | .7366 | .0012 | .0042 |
+| CNN-R10 | 875 | .6812 | .7434 | .7620 | .7777 | .7411 | +.0024 | .7350 | .0022 | .1144 |
+| CNN-Z32 | 1500 | .6782 | .7488 | .7627 | .7771 | .7417 | +.0030 | .7362 | .0024 | .0624 |
+
+**判讀與機制限制：**
+- 最佳 CNN-Z32 對 A0 四桶差為 −.0025／+.0028／+.0063／+.0055，Equal-k +.0030；CNN-R10 為 +.0005／−.0025／+.0056／+.0061，Equal-k +.0024。增益主要在大 k，k=5 未穩定改善；所有候選連 monitor 的 +.005 增益門檻都未達，尚不能宣稱通過 dev gate。
+- 五臂後半段平均 .7348–.7367，均未高於 A0；CNN-Z32 最後一步 .7351，低於其選中 .7417。每臂從含 step 0 的 25 次評估選最大，波動較大的支路臂容易出現樂觀單點。798446 短測 CNN-Z32 step 50 的 .7475 也未在正式每 125 步的評估網格維持；兩者評估步數不同，不作同一步比較。
+- Z32 支路 logits RMS .0042，相對 q 約 14.47 很小；R10／CNN-R10／CNN-Z32 分別 .077／.114／.062。這支持支路在目前設定只小幅修正 logits，但 RMS 比值本身不能證明沒有改變決策邊界。TRAIN Equal-k 全程約 .7409–.7460，沒有明顯持續學升；不能據此斷言是過擬合、LR 太小或特徵本身無效，原因未知。
+- C 版 796606 的最佳 monitor 增益約 +.0045，dev 最佳僅 +.0005 且全部未過 gate。H 版目前 +.0030 也沒有更強的 monitor 證據；兩版 A0 的輸入／基準不同，不能用絕對分數差當 H 與 C 的公平勝負。
+
+**建議：** 目前不據此延長訓練、加 seed 或製作 LB 探針。若要完成與 C 版相同的實驗收尾，下一步僅對 monitor 已選定的五份 checkpoint 做一次固定 dev 評估及玩家配對 bootstrap；不依 dev 重選步數。此次只分析現有產物，未啟動 dev、GPU 作業或上傳；泛化增益與信賴區間未知。
+
+來源：`outputs/rank/humansl/policy_cnn_h/cached_AB_mondev_seed2027/five_arms/799148/` 的 `summary.json`、各臂 `result.json`／`learning_curve.json`／`complete.json`／`gradients_epoch_*.jsonl`，及 `outputs/slurm-rank-policy-h-five-799148.out`、Slurm `sacct`。後 12 次為 step 1625–3000，sd 使用母體標準差，只描述同一題組跨 checkpoint 波動，並非泛化標準誤。
+
+
+### 2026-11-18：799148 H 五臂 dev 收尾（使用者要求 2 GPU）
+
+使用者核准比照 C 版 policy CNN 做固定 dev 評估與總結，申請兩卡。新增 `policy_h/dev_eval.py`、`policy_h/dev_eval.slurm` 與 `configs/strength/policy_h_five_arms_dev.json`；重用 C 版 `policy_residual/dev_eval.py` 的選模重現、輸入稽核、逐臂評分、八組玩家配對 bootstrap／gate／claims，抽取函式僅增加可選 teacher hooks（C 預設不變）。H adapter 使用九 profile teacher 與 H 模型／head／cache；兩個 spawn worker 各用一張 GPU 處理連續一半 dev 棋局，以 `/dev/shm` 暫存串接（退出清除，不寫 /work policy 大檔），逐臂評估在 GPU 0 完成。monitor 重現容忍 .0005；dev 不重選 checkpoint、不延長訓練。
+
+預檢：dev 360 人／7,200 盤／8,000 題／1,600,205 位置，與 TRAIN／monitor 玩家零重疊；H teacher SHA-256、profile 清單、五臂完成標記、所需 monitor.zip 通過。CPU 兩項測試（雙 worker 合併順序／offset、H archive／model 接線）通過，CLI import 與 Slurm bash 語法通過；兩卡真推論尚待作業驗證。
+
+資源：8gpus，單節點 2×H200／24 CPU／400 GiB／1 小時上限，最多 2 配置 GPU-h。C 單卡歷史 28 分 17 秒，H 雙卡粗估 20–30 分鐘（約 .7–1.0 GPU-h）；此非量測，讀 ZIP／編譯／重播／評估／bootstrap 未全部平行，需以各 worker 與整體耗時確認加速。gate 沿用 ΔEqual-k ≥ .005、每 k ≥ −.005、Pr_boot(Δ>0) ≥ .90；預期增益未知，monitor 最大 +.0030 尚不足以支持候選。提交 job ID 與結果待補。
+
+**已提交：Slurm 804562**，命令 `sbatch src/go_aicup/tasks/strength/policy_h/dev_eval.slurm`。正式產物 `outputs/rank/humansl/policy_cnn_h/cached_AB_mondev_seed2027/five_arms/799148/dev/804562/`，log `outputs/slurm-rank-policy-h-dev-804562.out`。
+
+
+### 2026-11-18：804562 H 五臂 dev 完成總結（799148，兩張 H200）
+
+**COMPLETED、exit 0，Slurm 牆鐘 14 分 39 秒，約 0.488 配置 GPU-h。** 程式內總計 863.9 秒，雙卡抽取含啟動／合併 828.2 秒；GPU 0／1 各 3,600 盤（810,940／789,265 位置），worker 抽取 782.7／768.4 秒，峰值各約 13.89 GiB。相對 C 版 796930 單卡 28 分 17 秒，整體時間減少約 48.2%、速度約 1.93 倍；H 為 9 profile、C 為 10 conditions，並非同版本單／雙卡控制實驗，不將全部加速歸因於卡數。C 約 .471、H 約 .488 配置 GPU-h，這次主要節省等待時間，沒有證明節省 GPU 用量。
+
+範圍沿用固定 outer dev：360 人／7,200 盤／8,000 題（各 k 2,000 題）／1,600,205 位置；只評估 monitor 選定 checkpoint。五臂 monitor 重算與訓練紀錄差均為 0.0。H FP16 還原每盤均值最大誤差 .0002954，policy mass 最大誤差 .0006459、逐手 q 最大誤差 .0077724，均通過既有精度門檻。持久產物約 8.87 MB；dev policy 暫存僅在 RAM。此為本地官方公式，非 LB，且 outer dev 過去已使用，證據有限。
+
+| 臂 | 選中 step | k=5 | k=10 | k=15 | k=20 | Equal-k | CE |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| A0 | 875 | 0.6918 | 0.7350 | 0.7519 | 0.7776 | 0.7391 | 0.9506 |
+| R10 | 2625 | 0.6920 | 0.7364 | 0.7537 | 0.7777 | 0.7400 | 0.9532 |
+| Z32 | 875 | 0.6927 | 0.7353 | 0.7513 | 0.7776 | 0.7392 | 0.9507 |
+| CNN-R10 | 875 | 0.6927 | 0.7373 | 0.7536 | 0.7689 | 0.7381 | 0.9521 |
+| CNN-Z32 | 1500 | 0.6907 | 0.7374 | 0.7524 | 0.7704 | 0.7377 | 0.9560 |
+
+玩家配對 bootstrap 2,000 次；gate：ΔEqual-k ≥ .005、P(>0) ≥ .90、各 k ≥ −.005。
+
+| 比較 | ΔEqual-k | Δk5／k10／k15／k20 | 95% CI | P(>0) | gate |
+|---|---:|---|---|---:|---|
+| R10-A0 | +0.0009 | +0.0002／+0.0014／+0.0018／+0.0001 | [-0.0031, +0.0050] | 0.6595 | ✗ |
+| Z32-A0 | +0.0002 | +0.0009／+0.0003／-0.0006／+0.0000 | [-0.0003, +0.0006] | 0.7185 | ✗ |
+| CNN-R10-A0 | -0.0010 | +0.0009／+0.0023／+0.0016／-0.0088 | [-0.0065, +0.0044] | 0.3500 | ✗ |
+| CNN-Z32-A0 | -0.0014 | -0.0011／+0.0024／+0.0004／-0.0072 | [-0.0052, +0.0022] | 0.2320 | ✗ |
+| Z32-R10 | -0.0007 | +0.0008／-0.0011／-0.0024／-0.0001 | [-0.0048, +0.0033] | 0.3695 | ✗ |
+| CNN-R10-R10 | -0.0018 | +0.0008／+0.0009／-0.0002／-0.0088 | [-0.0054, +0.0013] | 0.1325 | ✗ |
+| CNN-Z32-Z32 | -0.0015 | -0.0021／+0.0021／+0.0011／-0.0072 | [-0.0053, +0.0020] | 0.2080 | ✗ |
+| CNN-Z32-CNN-R10 | -0.0004 | -0.0021／+0.0001／-0.0012／+0.0016 | [-0.0065, +0.0057] | 0.4640 | ✗ |
+
+**判讀：** 八組 gate 全未過，claims 全 false。R10 對 A0 四桶均微增，但 Equal-k 只有 +.000865、95% CI [−.003126, +.004992]、P(>0)=.6595，不能宣稱有效。Z32 僅 +.000158、區間約 [−.00034, +.00064]，配合支路 logits RMS .00419，仍幾乎等同 A0。CNN-R10／CNN-Z32 對 A0 分別 −.000966／−.001361；monitor 的 +.002425／+.003031 沒有轉移到 dev。兩者 k=20 分別 −.008764／−.007184，超過單桶 −.005 的容許退步，但各自單桶 bootstrap 區間仍跨 0，不能當作已證實的系統性傷害。
+
+相對 C 版：C 的四候選對 A0 為 −.0007／約 .0000／−.0026／+.0005，H 為 +.0009／+.0002／−.0010／−.0014，兩版都未過 gate。CNN-R10 的 k=20 退步在兩版重現（C −.0108、H −.0088），值得保留為風險訊號；是信心尺度、聚合方式或固定 dev 雜訊，現有實驗無法分辨。H 的 A0 .7391、C 的 A0 .7409；輸入／基準不同，不以絕對分數判斷 teacher 勝負。
+
+**結論／建議：** 在此設定（1,000 TRAIN 玩家、3,000 updates、LR 3e-4、seed 2027），C 與 H 的完整逐手 policy 支路都未量出相對各自 A0 的可靠增益。建議此輪收尾，不推進 H＋C 融合、不加 seed／延長訓練、不據此做 LB 探針或更換既有提交基底；這不代表所有預算或架構下 policy 特徵都無效。
+
+驗證：完成標記與 summary 身分一致；另從五臂各 8,000 列 parquet 重算機率正規化、score_rank 解碼、官方逐題得分與各 k 平均，全部一致，題組逐列配對及每 k 2,000 題通過。沒有重跑 GPU 或上傳。
+
+產物：`outputs/rank/humansl/policy_cnn_h/cached_AB_mondev_seed2027/five_arms/799148/dev/804562/summary.json`、各臂 `dev_predictions.parquet`／`dev_features.npz`／`dev_result.json`、`identity.json`、`complete.json`；log `outputs/slurm-rank-policy-h-dev-804562.out`。
+
+### 2026-11-18：H/C policy CNN 凍結融合 B3（兩卡實作；未提交）
+
+依使用者確認實作兩卡方案：GPU0／GPU1 分別讀取原位置 H／C TRAIN＋monitor policy ZIP，
+同批逐手 policy 分別通過各自已選定、全凍結的 CNN-R10／CNN-Z32，FP32 聚合本人／對手每盤平均。
+不重跑 teacher、不解壓 policy 到持久磁碟；兩個 worker 結束後由 GPU0 訓練 B3，第二卡仍計配置 GPU-h。
+原 H／C 管線及既有實驗產物未修改。
+
+三臂：A0-HC 原始 q_h18＋原始 q_c20＝38；R-HC r10_h18＋原始 q_h18＋r10_c20＋原始 q_c20＝76；
+Z-HC z_h64＋原始 q_h18＋z_c64＋原始 q_c20＝166。r10 是 q＋delta，z 是每側32維輸出、不是hidden64，
+原始 q 永遠讀獨立未修正欄位。各臂四個 k 分別訓練 Linear(d,10)，共12頭，scaler 僅該 k TRAIN 擬合；
+三臂同 k 均以相同原始 H＋C sklearn LR 初始化，新增欄 head weight 為0，全部特徵按 TRAIN 統計標準化。
+每頭2,000題、batch8、250 updates/epoch、12 epochs／3,000 updates、seed2027、AdamW LR=.0003、
+head WD=0、CE＋weight L2/(2×2000)，step0／每125步完整 TRAIN／monitor；嚴格 monitor 改善選模、同分留早，
+不早停。epoch 原子保存 optimizer／當時 best／history，半輪中斷確定性重播，不保留未提交半輪的 best。
+
+固定來源 H799148／C796606；dev 直接重用 H804562／C796930 已完成的每盤特徵，核對來源 run identity、
+checkpoint selected step、檔案SHA-256、H/C清單與題組逐欄一致、玩家隔離與同色題組。
+12頭全部訓練完成後才讀取dev特徵值；不依dev重選。報四k、Equal-k、三組玩家配對bootstrap2,000次；
+gate delta Equal-k≥.005、每k≥−.005、Pr_boot(delta>0)≥.90。
+假設：H/C學習特徵互補且保留原始q可帶來融合增益；增益未知，C-only歷史CNN最佳dev增益僅+.0005，不能當收益保證。
+
+新增 `src/go_aicup/tasks/strength/policy_hc_b3/`（features.py、train.py、README.md、train.slurm）、
+`configs/strength/policy_hc_b3.json`、`tests/test_policy_hc_b3.py`。
+輸出 `outputs/rank/humansl/policy_hc_b3/seed2027_b8_e12/<job_id>/`，保存小型每盤特徵與checksum、12頭／scaler、
+續跑狀態、learning curve、逐題預測與bootstrap；完整來源／設定／程式身分不符拒絕續跑。
+
+CPU驗證：新測試11項＋既有branches／H-dev相關23項，**34項通過（7.61s）**；
+涵蓋原始q／z維度、對齊與非法輸入、H/C真CNN與既有聚合數值一致、無encoder梯度、共同起點、
+逐k隔離、完整遍歷、epoch中斷重播、mock雙卡完整12頭至dev發布與完成重開不重跑。
+真實來源prepare-only通過（TRAIN20,000／monitor4,000／dev7,200盤）；Slurm bash語法與diff空白檢查通過。
+擴大回歸發現既有 `tests/test_policy_five_arms.py::test_resume_matches_uninterrupted` 單獨亦失敗：
+測試直接傳不存在的父目錄，既有five_arms.run_arm僅mkdir(exist_ok=True)而沒有parents，故FileNotFoundError；本次不修改舊流程。
+
+Slurm入口規劃2×H200／24CPU／400G／1h，最多2配置GPU-h；完整兩卡吞吐未知，初估數十分鐘待短測。
+未提交Slurm、未執行GPU或正式特徵計算／訓練、未產生提交CSV或上傳。
+限制：單seed與反覆使用dev、上游CNN與B3共用monitor選模；本輪玩家隔離不等於上游C向量皆未見玩家。
+
+### 2026-11-19：競賽一——E2E14400 兩個提交探針（使用者要求用上傳額度；B0 本身開發全負、不產檔）
+
+B0 的最佳組合 (B＋E9600＋0.25·E14400)／2.25 幾乎等於 11/18 已封存比較過的 mix3_ml，故改用有封存證據的兩臂產檔（`scripts/identity/pid2_combine_ml3.py`，CPU 數秒；`outputs/pid/pid2_multilevel/ml_mix_compare/combine_report.json`）。先驗證可由 parts 逐列重現現行基底 `hung-seqB-e2emix-ml.csv`；原測試集列與 `772748-hung.csv` 相同；只改新增集風格項，開局、類別、ML、λ＝16 不變、不調權重。
+
+| 檔案 | 新增集風格項 | 封存 draws 1300– pool 1 對基底（795581） | 改 top-1 對基底 pub2（k=1／2／3／5）／priv2 | sha256 |
+|---|---|---|---|---|
+| `submissions/pid/mix3ml.csv` | 0.5 B＋0.25 E9600＋0.25 E14400 | +0.0031（z 3.9），pool 0 +0.0009 | 26（10／10／2／4）／18 | `b440eac4` |
+| `submissions/pid/ml14400.csv` | 0.5 B＋0.5 E14400 | +0.0035（z 3.5），pool 0 −0.0010 | 42（15／15／6／6）／33 | `3290abd5` |
+
+- **預期 Public：** 本地 pool 1 增益約 +0.003，新增集占一半 → 約 +0.0015；遠低於 Public 標準誤約 0.02。
+- **事前判讀規則：** 兩者本地都未達換用規則（+0.005）；LB 升、降、持平都**維持基底 `hung-seqB-e2emix-ml.csv`**，只記錄方向。若某檔 Public 降 ≥ 0.02，回查 E2E14400 正式風格項的推論路徑。
+- **LB（11/18 23:57，使用者回報）：** `mix3ml.csv` **0.8208402**（−0.0037 對基底 0.8245254）、`ml14400.csv` **0.8205517**（−0.0040，33/109）。兩者都小幅低於基底，差距約 3 題、遠在雜訊 0.02 內，未達回查門檻 −0.02。依事前規則**基底維持 `hung-seqB-e2emix-ml.csv`**；E2E14400（含延長訓練與三者混合）方向不支持，不再探。
+
+### 2026-11-18：H/C B3 兩卡 smoke50（使用者授權短測）
+
+完整讀取原 H／C TRAIN＋monitor ZIP，各卡計算兩個凍結 CNN 的全部逐手→每盤特徵；不重跑teacher。
+三臂各四個k頭均只跑50 updates，保留完整2,000題/k的scaler與sklearn起點、batch8、LR=.0003，step0／25／50監控。
+新增 `configs/strength/policy_hc_b3_smoke.json`；smoke明確不讀dev特徵值，不做dev預測／bootstrap／gate，summary標記smoke=true。
+來源metadata／hash稽核仍包含既有dev產物身分；不將其值用於短測。正式預設12epochs／3,000updates未變。
+資源上限2×H200／24CPU／400G／30分鐘＝最多1配置GPU-h；預估數分鐘至二十分鐘，實測待補。
+新增更新上限／重開測試及mock雙卡smoke不讀dev整合測試；提交前須CPU回歸與真實prepare-only通過。
+輸出 `outputs/rank/humansl/policy_hc_b3/smoke50_seed2027/<job_id>/`；本節不代表已完成GPU驗收。
+
+已提交 **Slurm 804869**，兩卡／30分鐘上限；CPU相關回歸36項通過（8.28s），真實prepare-only通過，來源identity `4a31d30a…09a4`。收據：`outputs/rank/humansl/policy_hc_b3/smoke50_seed2027/804869/submission.json`；log：`outputs/slurm-rank-policy-hc-b3-smoke-804869.out`。結果待補。
+
+### 2026-11-19：競賽一——OGS 跨站短測後的夜間續跑規則（使用者「結果出來後重新評估並繼續訓練」；看結果前寫定）
+
+- **磁碟：** `/work` 只剩 4.1 GB，評估要寫兩份約 2.6 GB 的驗證台快取 → `/work/jason1122/ogs_short_cache` 改為指向 `/home/jason1122/ogs_short_cache` 的連結（`/home` 剩 9.8 GB）；804783 不必重送。未刪任何既有資料。
+- **續跑規則（804783 的 mix_YO 對 mix_Y）：** 事前門檻全過 → 送 A1。門檻未過但 pool 1 Δ > 0 且四桶各 ≥ −0.005 → 也送 A1（使用者已指示繼續；960 步只有十分之一預算，可能低估外部資料的效果）。pool 1 Δ ≤ 0、某桶 < −0.005，或判為無法判定 → 不送，等使用者決定。
+- **A1：** `configs/identity/pid_e2e_ogs_A1_YO9600.json`＝E2E9600 配方（`pid_e2e_scratch32_9600.json`）只換成幽玄＋OGS 合併快取、yugen_share 0.5；8 卡，9,600 × 約 3.93 秒 ≈ 10.5 小時（約 84 GPU-h），上限 12 小時 30 分，可由 last.pt 續跑。
+- **A1 評估（afterok，1 卡，`src/go_aicup/tasks/identity/ogs_a1_eval.sh`）：** Y＝現有 E2E9600（即現行基底內的那一個），YO＝A1 step 9600；同短測的融合與 gate（pool 1 Δ ≥ +0.010、pool 0 Δ > 0、四桶各 ≥ −0.005），新封存 draws 1700–（pool 0 1700–1719、pool 1 1700–1729）。過 gate 才產生新增集正式風格項與提交檔。
+- **OGS 授權：** 用於有獎競賽與得獎交付的範圍仍待確認（A0 節）；訓練先做，提交前須確認。
+- **補充（使用者「門檻沒過就訓練別的，不用等我決定」；仍在看結果前寫定）：** 上面「不送 A1」的情況改送 **B1**：E2E-scratch 9,600 步同配方、只用幽玄、seed 2027（`configs/identity/pid_e2e_scratch32_9600_s2027.json`；初始化同為 `pid_ge2e_v2_both_p0` 主幹，投影層／B 頭初值與抽樣順序不同），8 卡約 10.5 小時、約 84 GPU-h。假設：B0 的 E2E14400 是同一次訓練接續，與 E9600 高度相關；獨立 seed 的同配方模型較不相關，三方混合可能有小增益；預期 +0.003～+0.010，未知。評估（afterok，1 卡，`src/go_aicup/tasks/identity/b1_eval.sh` → `scripts/identity/pid2_seed_mix_b1.py`）：mix3s_ml＝開局＋16w(0.5 cos_B＋0.25 cos_E9600＋0.25 cos_S2027)＋類別＋ML 對現行 mix_ml9600，封存 draws 1700–；換用規則同 11/18 9,600 vs 14,400：pool 1 Δ ≥ +0.005、z ≥ 2.5、四桶各 ≥ −0.005、pool 0 Δ > 0。A1 與 B1 只會送其中一個，故共用 draws 1700– 不衝突。
+- **短測結果（YO 804782 完成 1 小時 05 分；評估 804783，23 分鐘，`outputs/pid/ogs/short_eval/report.json`）→ 事前門檻未過，但符合夜間續跑規則 → 送 A1。** 封存 draws 1600–，mix_YO 對 mix_Y：
+
+| | k=1／2／3／5 Δ | 整體 Δ（SE） |
+|---|---|---|
+| pool 1（30 draws） | +0.0018／+0.0022／+0.0042／+0.0025 | **+0.0026（0.0011，z 2.3，63% draw 為正）** |
+| pool 0（20 draws） | +0.0079／−0.0012／+0.0028／+0.0034 | +0.0032（0.0012） |
+
+  單獨風格項 alone_YO 對 alone_Y：pool 1 +0.0027（0.0019）、pool 0 +0.0032（0.0021）。兩臂都有學到（alone 對 no_style +0.217／+0.220），非無法判定。絕對分數（pool 1）：B 0.6640、mix_Y 0.6647、mix_YO 0.6673。判讀：960 步時 OGS 資料方向一致為正，但量小（約 +0.003），未達 +0.010；完整 9,600 步是否放大未知。
+- **A1 已送（11/19 01:13）：** 訓練 Slurm **805157**（8 卡、上限 12 小時 30 分）、評估 **805158**（afterok，1 卡；驗證台快取改放 `/work/jason1122/ogs_a1_cache`，因 `/home` 只剩 4.7 GB）。第一次 sbatch 因未帶資源參數被拒，未產生作業。
+- **算力預算：** sbatch 錯誤訊息顯示專案 GOV115094 SU 餘額 **22,876**（10/25 為 108,387）；`sreport` 同期全專案 5,154 GPU-h（本帳號 848）→ 約 16.6 SU／GPU-h（含其他成員與 CPU，粗估）。A1 約 84 GPU-h ≈ 1,400 SU；剩餘約 1,380 GPU-h 由全專案共用。
+
+
+### 2026-11-19：804869 H/C B3 smoke50 完成
+
+Slurm `COMPLETED`、exit 0:0，2×H200 配置耗時 **2分41秒＝0.0894 GPU-h**。
+summary／全12頭／H與C特徵完成標記身分一致（`4a31d30a…09a4`），每頭均完成50 updates、2,000 TRAIN題。
+完整特徵階段125.98s；H載入114.80s、CNN6.14s、GPU allocated峰值33.16GiB；
+C載入96.26s、CNN6.50s、峰值36.82GiB。B3十二頭共4.56s，程式總耗時153.15s；主要成本是ZIP載入。
+
+| 臂（monitor選定步數） | k=5 | k=10 | k=15 | k=20 | Equal-k | Δ對A0 |
+|---|---:|---:|---:|---:|---:|---:|
+| A0（50/0/0/0） | .670717 | .739644 | .763400 | .766918 | .735170 | — |
+| R-HC（50/0/0/0） | .673085 | .739644 | .763400 | .766918 | .735762 | +.000592 |
+| Z-HC（50/0/0/50） | .675085 | .739644 | .763400 | .768815 | .736736 | +.001566 |
+
+這些是選模用monitor成績；8/12頭仍選step0，50步不能判斷正式收斂或融合收益。
+smoke未評估dev、未做bootstrap／gate，不能將上表當泛化增益。
+額外唯讀驗證：重算兩份特徵NPZ的SHA-256、核對完成身分，從六份TRAIN／monitor逐題預測重算機率正規化、
+score_rank解碼、官方得分與各k平均，均一致；確認沒有dev預測檔。未重跑GPU或修改訓練程式。
+
+**正式估時：** 12頭×3,000 updates為短測60倍；以4.56s直接外推約273s（正式監控每125步，短測每25步，
+此外推只作粗估）。加完整特徵126s及啟動／稽核約31s，dev／bootstrap成本尚未實測，
+建議預留 **10–15分鐘、2卡約0.33–0.50配置GPU-h**；既有Slurm 1h上限＝2 GPU-h不變。
+建議可進行原配方正式實驗，仍以固定dev門檻ΔEqual-k≥.005、每k≥−.005、bootstrap正向比例≥.90判斷；
+預期增益未知，不改提交基底。本輪只驗收短測、未提交正式作業。
+
+產物：`outputs/rank/humansl/policy_hc_b3/smoke50_seed2027/804869/summary.json`；
+log：`outputs/slurm-rank-policy-hc-b3-smoke-804869.out`。
+
+
+### 2026-11-19：H/C B3 正式作業 804927 已提交
+
+使用者授權「提交正式作業，不監控」；沿用 `configs/strength/policy_hc_b3.json` 原配方，未修改訓練程式或內建monitor選模。
+兩卡H200／24CPU／400G／1h上限（最多2配置GPU-h），預估10–15分鐘、0.33–0.50配置GPU-h；
+三臂各四個k頭、每頭12epochs／3,000updates，完成後自動dev評估與bootstrap／gate。
+提交前真實prepare-only及Slurm語法檢查通過；來源identity `74bd3471…738a`。
+已提交 **804927**，依要求不追蹤排隊、執行或完成狀態；結果未知。
+收據：`outputs/rank/humansl/policy_hc_b3/seed2027_b8_e12/804927/submission.json`；
+log：`outputs/slurm-rank-policy-hc-b3-804927.out`。未產生提交CSV或上傳。
+
+
+### 2026-11-19：804927 H/C B3 正式實驗完成，兩候選皆未過 gate
+
+使用者回報完成後查核：Slurm `COMPLETED`、exit 0:0，2×H200 配置耗時 **5分38秒＝0.1878 GPU-h**。
+十二頭皆完成12 epochs／3,000 updates，每頭2,000 TRAIN題；完成身分 `74bd3471…738a` 一致。
+
+| 臂（monitor選定步數，k=5/10/15/20） | dev k=5 | k=10 | k=15 | k=20 | Equal-k | Δ對A0 |
+|---|---:|---:|---:|---:|---:|---:|
+| A0（2875/875/625/1625） | .692214 | .731913 | .748286 | .768462 | .735219 | — |
+| R-HC（1375/2375/2875/500） | .692237 | .730229 | .753659 | .771364 | .736872 | +.001653 |
+| Z-HC（1375/1250/125/250） | .684968 | .731545 | .746258 | .753981 | .729188 | −.006031 |
+
+玩家配對bootstrap 2,000次：R-HC−A0 95% CI [−.002531, +.006166]、正向比例 .759；
+Z-HC−A0 [−.012108, +.000011]、正向比例 .027；Z-HC−R-HC [−.013788, −.001777]、正向比例 .0075。
+事前gate為 ΔEqual-k≥.005、每k≥−.005、正向比例≥.90；**R-HC增益及正向比例不足，Z-HC三項皆不過**。
+R-HC各k增益為 +.000023／−.001684／+.005373／+.002902；Z-HC為 −.007246／−.000368／−.002028／−.014482。
+不升為提交候選，現行提交基底維持。monitor Equal-k 為 A0 .739290／R-HC .741977／Z-HC .742675；
+monitor較高沒有轉成穩定dev增益，原因未知，不能據此宣稱CNN融合有效。
+
+特徵階段251.10s；H載入231.86s、CNN6.03s、allocated峰值33.16GiB；
+C載入208.93s、CNN6.46s、峰值36.82GiB。B3十二頭48.20s，程式總耗時332.34s；主要成本仍為ZIP載入。
+唯讀CPU驗證：兩份特徵NPZ SHA-256與完成身分、十二頭完成標記／更新數，
+九份TRAIN／monitor／dev逐題表的機率正規化、score_rank解碼、官方得分、四桶與Equal-k皆核對通過；
+三組gate算式與summary一致。未另重抽bootstrap或重跑GPU。
+限制仍為單seed、反覆使用dev、上游CNN與B3共用monitor選模，以及上游C向量玩家隔離未獲認證。
+未提交新作業、未產生提交CSV或上傳。
+
+產物：`outputs/rank/humansl/policy_hc_b3/seed2027_b8_e12/804927/summary.json`；
+log：`outputs/slurm-rank-policy-hc-b3-804927.out`。
+
+
+### 2026-11-19：804927 融合退步診斷（既有產物CPU分析，未重訓）
+
+H804562／C796930／HC804927 的dev題組逐列對齊通過（同8,000題）。CE由保存的逐題機率重算，越低越好。
+單獨H／C各用跨k共用head、8,000 TRAIN題；HC每k獨立head、各2,000題，故不是只改特徵的受控比較。
+
+| 來源／臂 | monitor選中step（HC依k=5/10/15/20） | dev CE | dev Equal-k |
+|---|---|---:|---:|
+| H A0 | 875 | .950640 | .739089 |
+| H CNN-R10 | 875 | .952137 | .738124 |
+| H CNN-Z32 | 1500 | .956010 | .737729 |
+| C A0 | 3000 | .963218 | .740852 |
+| C CNN-R10 | 2500 | .962762 | .738273 |
+| C CNN-Z32 | 1500 | .965367 | .741316 |
+| HC A0 | 2875/875/625/1625 | .963070 | .735219 |
+| HC R-HC | 1375/2375/2875/500 | .964248 | .736872 |
+| HC Z-HC | 1375/1250/125/250 | .969675 | .729188 |
+
+HC dev CE分k：A0 1.093134/.979901/.911780/.867467；R-HC 1.092911/.983294/.908942/.871846；
+Z-HC 1.099086/.981761/.915530/.882322。選模按monitor官方分數，不按最低CE。
+Z-HC k10 step0→3000：TRAIN CE .94912→.92129、monitor CE .93663→.95633；
+k5為TRAIN 1.06127→1.03179、monitor 1.07591→1.08937，支持新增z特徵的過擬合跡象。
+k20選中step250的monitor官方分數 .76692→.78272，但CE .83550→.84050，顯示兩指標選擇不一致。
+
+其他診斷：H/C A0的dev預測相同91.2375%、逐題得分相關 .8570，支持訊號高度重疊、互補空間有限；
+不能由此斷言沒有互補。TRAIN+monitor每盤q與r=q+delta同欄相關中位數H .9999976／C .9999864，
+殘差標準差相對q中位數僅 .261%／.537%，R-HC的[q,r]高度重複。
+Z-HC將128個z欄與38個q欄全部按TRAIN標準化，與單獨CNN支路的原尺度／原head不同；
+可能放大原本弱小的z變動，尚未做消融證實。
+
+新增玩家配對bootstrap2,000次（seed2126）：HC A0−H A0 −.003870，95% [−.011290,+.003833]；
+HC A0−C A0 −.005633，[−.015595,+.004026]；HC R−H CNN-R −.001251，[−.010736,+.008455]；
+HC R−C CNN-R −.001401，[−.012224,+.009595]；HC Z−H CNN-Z −.008541，[−.017028,+.000102]；
+HC Z−C CNN-Z −.012128，[−.022902,−.001085]。多組探索比較，未校正多重比較；不作新選模依據。
+結論：原始HC A0已低於單獨A0，不能全歸因CNN；較可信的候選原因為head按k拆分減少共享、
+高度重複特徵缺少增量，以及Z-HC的TRAIN／monitor CE分歧與score選模波動。
+尚未隔離各因素，確切因果未知；R-HC的表面退步區間跨0。不新增模型、調參或提交。
+
+### 2026-11-19：policy_large 200k 八卡完整實驗（使用者授權實作並直接提交，不做GPU短測）
+
+最新規格見 `plan.md`；新套件 `src/go_aicup/tasks/strength/policy_large/`，設定
+`configs/strength/policy_large_200k.json`。TRAIN由全官方HD≤1資料公平選每級20,000盤，
+實際4,298人／200,000盤／44,481,777位置／80,000題；monitor200人／4,000盤／893,253位置／4,000題，
+dev400人／8,000盤／1,776,590位置／8,000題。三組玩家互斥；monitor/dev均排除C-v2 learn＋monitor
+全部4,174位上游玩家，交集0。TRAIN全200,000盤進入固定題組；各k/rank等量、同色、題內盤互異。
+切分唯一來源data/cv.py；split seed20261119、training seed2027。
+
+GPU0–3共享H九profile policy分片，GPU4–7共享C十級分片，各完整推理一次。
+兩份大快取全在VRAM，約287.85／319.82GiB；每卡約71.96／79.96GiB，另保留工作空間。
+從原board cache有界重播HumanSL planes，H/C各組裝一次；不保存全量planes、不寫policy／q／每盤／B3特徵。
+A0完成後，八個深版實驗臂各一GPU並行，經NVLink跨卡取所屬family資料。
+R10/Z32候選點phi加Linear32→32；CNN-R10/CNN-Z32加第三個5×5 valid conv，19→15→11→7、RF13。
+H/C含題目頭參數：R10 10,760／11,005，Z32 12,895／13,075，CNN-R10 77,639／80,316，CNN-Z32 79,774／82,386。
+原始q、輸出維度、共同起點與殘差零初始化保留。
+
+上游每臂batch32、最多12epochs／30,000updates；五組同名H/C配對×四k共20個B3，
+各20,000 TRAIN題、batch8、最多30,000updates；LR=.0003。
+head正則維持CE＋W²/(2×8,000)上游／(2×2,000)B3，TRAIN-only LR初始化C=.1，encoder WD=.0001。
+全部step0及每500步monitor，第一epoch2,500步不計耐心，之後monitor CE＋head L2連續5次
+未嚴格創歷史低點即停，最早step5,000。選模仍以monitor官方分數最高、同分留早。
+全30個checkpoint固定後才評dev；報四k／Equal-k／CE與玩家配對bootstrap2,000，
+gate沿用ΔEqual-k≥.005、每k≥−.005、正向比例≥.90。預期增益未知，不自動改提交基底。
+
+CPU新流程與既有相關回歸37項通過（29.61s），包括真實CPU梯度與B3更新、深度／參數／共同起點、
+早停暖期／同分／重置、跨分片順序／重複盤／尾批、全覆蓋題組及mock完整十網路＋20B3、dev延後與完成重開。
+排除既有test_resume_matches_uninterrupted：先前已記錄的舊five_arms父目錄缺失，未更動舊流程。
+真實prepare-only通過：canonical／HD／C來源、250個board shards的moves/colors可讀性與SHA、盤長／顏色、
+C向量shape／finite皆核對；Slurm語法、diff空白與sbatch --test-only通過。
+來源身分 `4ff990d513ebd14dae5ec1f6d29919c8eb8a1869ee024eefcfb4c2d0a7c6c343`。
+
+正式資源8×H200／96CPU／200G RAM／36h＝最多288配置GPU-h；粗估8–16h、64–128GPU-h，
+新增CUDA跨卡／多thread／編譯吞吐未短測。依使用者指示直接提交完整作業，不自動requeue。
+若VRAM隨作業中斷消失，拒絕對同一未完成run自動重推teacher；模型checkpoint仍保存，需另訂新run。
+單seed、歷史dev使用、B3上游in-sample TRAIN特徵及兩階段共用monitor限制保留。
+輸出 `outputs/rank/humansl/policy_large/200k_deep_seed2027/<job_id>/`；提交編號及收據待下行補登。
+
+已提交 **Slurm 805280**（2026-11-19T01:56:05.101852+08:00）；收據 `outputs/rank/humansl/policy_large/200k_deep_seed2027/805280/submission.json`，
+log `outputs/slurm-rank-policy-large-805280.out`。未執行GPU短測；正式執行／完成及dev結果未知。

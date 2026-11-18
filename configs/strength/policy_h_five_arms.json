@@ -1,0 +1,12 @@
+{
+  "out": "outputs/rank/humansl/policy_cnn_h/cached_AB_mondev_seed2027/five_arms",
+  "seed": 2027,
+  "epochs": 12,
+  "questions_per_k": 8,
+  "lr": 0.0003,
+  "weight_decay": 0.0001,
+  "evaluate_every": 125,
+  "position_chunk": 4096,
+  "zip_threads": 12,
+  "cache_on_gpu": true
+}

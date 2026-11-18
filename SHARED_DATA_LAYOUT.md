@@ -87,3 +87,8 @@
 原目錄包含 `legacy/`、`standard/`、`se3_hc_b2/` 及來源 manifest；既有指向該目錄的相容連結在還原前無法讀取。重做依賴這批舊 H/C 特徵的 prepare／實驗前，先從下載備份將 ZIP 傳回 `data/processed/strength_train_hc.zip`，再執行 `unzip data/processed/strength_train_hc.zip -d data/processed/`，還原原目錄與相對路徑。
 
 本次僅更新文件，未再刪除資料、還原、重建或提交作業。
+
+
+## 2026-11-18：C v2 向量搬入共用資料
+
+依使用者要求，競賽二現行基底的 C 級別向量 `outputs/rank/humansl/cvec_v2/learn/vectors.pt`（33,688 bytes，SHA-256 `1640cc8c9493cc9f43a35246bb53c8dfaff636136e99b03ce90213224c07a355`）已移至 `data/processed/strength_features/humansl/cvec_v2/learn/vectors.pt`，與同目錄的 learn／ext／c 特徵放在一起；搬移前後 SHA-256 相同。原路徑保留相對連結，`rank_cvec_v2.py`、C4x 的 `INIT=` 等寫死舊路徑的程式不需修改。同目錄的 `train.json` 與 log 仍留在 `outputs/`。

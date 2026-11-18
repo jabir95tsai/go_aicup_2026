@@ -141,7 +141,7 @@ class GE2EBatches(torch.utils.data.Dataset):
                  max_open_shards: int = 8, player_color: np.ndarray | None = None, min_ply: int = MIN_PLY,
                  player_d4: bool = False, world: int = 1, extra_games: list[np.ndarray] | None = None,
                  extra_per_group: int = 0, pick: bool = False, player_rank: np.ndarray | None = None,
-                 rank_focus: dict | None = None):
+                 rank_focus: dict | None = None, player_p: np.ndarray | None = None):
         # player_color[game] (0 black, 1 white): sample that colour's moves, white ones colour-swapped
         # (added test set, 2026-11-12). None = the original black-only sampling.
         # player_d4: every board of one sampled player gets the same random D4 transform, so a
@@ -171,6 +171,11 @@ class GE2EBatches(torch.utils.data.Dataset):
             if len(self.player_rank) != len(player_games) or not 0 < self.focus < players or min(bands) < self.focus:
                 raise ValueError("rank_focus: bad share, or a rank band smaller than the focused part")
         self.cache_dir, self.player_games, self.lengths = cache_dir, player_games, lengths
+        # player_p: drawing probabilities of the players (external data mix, 2026-11-18); None = uniform
+        self.player_p = None if player_p is None else np.asarray(player_p, np.float64)
+        if self.player_p is not None and (len(self.player_p) != len(player_games) or self.extra_per_group
+                                          or rank_focus):
+            raise ValueError("player_p needs one probability per player and no gallery or rank focus")
         self.shape = (players, games, moves)
         self.steps, self.seed, self.rank, self.start = steps, seed, rank, start_step
         self.max_open_shards = max_open_shards
@@ -184,8 +189,8 @@ class GE2EBatches(torch.utils.data.Dataset):
         rng = np.random.default_rng([self.seed, self.rank, step])
         if self.world > 1:
             shared = np.random.default_rng([self.seed, step, 7])
-            chosen = shared.choice(len(self.player_games), size=n * self.world,
-                                   replace=False)[self.rank * n:(self.rank + 1) * n]
+            chosen = shared.choice(len(self.player_games), size=n * self.world, replace=False,
+                                   p=self.player_p)[self.rank * n:(self.rank + 1) * n]
         elif self.extra_per_group:
             e = self.extra_per_group
             chosen = rng.choice(len(self.player_games), size=n - e, replace=False)
@@ -193,7 +198,7 @@ class GE2EBatches(torch.utils.data.Dataset):
         elif self.rank_focus:
             chosen = self.focused_players(rng)
         else:
-            chosen = rng.choice(len(self.player_games), size=n, replace=False)
+            chosen = rng.choice(len(self.player_games), size=n, replace=False, p=self.player_p)
         groups = [self.player_games[p] for p in chosen]
         if self.extra_per_group:
             groups += [self.extra_games[p] for p in extra]
