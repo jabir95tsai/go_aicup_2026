@@ -4023,3 +4023,26 @@ A0/R10改動與既有cv2-l10完全相同；CNN-Z32多改2題來自原模型預�
 - **判定（同路徑換檔規則，事前寫定）：** 封存題組 2000-（pool 0 2000–2019、pool 1 2000–2029），融合固定為 ogsw 形式 1.5×(0.25 seqB＋0.75 X)。A2w（X＝A2）與 A12w（X＝A1、A2 cosine 平均）各對 A1w（＝ogsw）：pool 1 Δ ≥ +0.005、z ≥ 2.5、各 k ≥ −0.005、pool 0 Δ > 0；兩者都過取 pool 1 Δ 較大者，都沒過維持 ogsw。不調權重。程式 `scripts/identity/pid2_ogs_a2_eval.py`，輸出 `outputs/pid/ogs/a2_eval/`。
 - **成本：** 建快取 1 卡約 0.5 小時內、訓練 8 卡約 10.6 小時（≈85 GPU-h）、評估 1 卡約 20 分鐘；合計約 86 GPU-h（約 1,430 SU）。
 - **已送（11/19 21:50）：** 建快取 811842 → 訓練 811843（afterok，8 卡、上限 12 小時 30 分）→ 評估 811844（afterok，1 卡）。
+
+### 2026-11-19：cvec2 逐手正規化與全盤 policy（只提交第一階段）
+
+第一階段三臂：A 原版 H15＋C v2，B H9＋逐手 log_softmax(C10)，C 兩組皆逐手 log_softmax。
+149,615 擬合盤／5,728 人、35,083 Valid-U 盤；原版 Valid-S 先驗、每 k 20,000 合成題、
+B2 seeds 2027–2031。主比較 C−B，報四桶／Equal-k 及玩家配對 bootstrap，預期增益未知。
+建議第二階段用 C 的門檻為 E2 C−B > 0、E1 ≥ 0、E2 各 k ≥ −.005，其餘用 B，須手動指定。
+
+已用完整恢復的 ZIP 真實重現 seed 2027：E1 四桶 .6128／.7219／.7661／.7461（.7117）、
+E2 .7022／.7494／.7762／.7740（.7505）；對 751959-cvec2.csv 800 題改動 0。
+CPU 回歸 16 項通過。C 184,698 盤、HD1 H 35,979 盤重用原逐手快取；
+另以原 KataGo 補 H9 148,719 盤，粗估約 3 小時抽取、八卡五小時配置上限。
+入口與報表格式見 `src/go_aicup/tasks/strength/cvec2_policy/README.md`。
+
+第二階段 R10 和 CNN-R10 各落點／全盤一對，雙 softmax 殘差頭，AdamW LR .0003、WD .0001、
+batch 32、每臂 2,500 updates，固定首個 B2 再按五 seed 重擬合。已完成程式及 CPU 測試，
+GPU 效能與正式分數尚未驗證。第二階段獨立手動提交，沒有 afterok 或自動派送。
+
+已提交 Slurm **812254**（僅第一階段）；收據 `outputs/rank/humansl/cvec2_policy/stage1/812254/submission.json`，日誌 `outputs/slurm-rank-cvec2-policy-s1-812254.out`。
+
+**重送 812274（僅第一階段）：** 812254 在 cvec2 重現通過後、H9 補抽派工前因 `missing_rows` 未定義失敗，50 秒、exit 1，未留下補抽分片。補抽棋局及 cvec2 特徵共用同一份位置索引，新增混合命中與兩分片回歸，17 項 CPU 測試通過。
+
+**再重送 812279（僅第一階段）：** 812274 已派發八分片，KataGo 因缺 CUDA 12.8 函式庫搜尋路徑以 127 結束（Slurm 55 秒、exit 1）。登入節點重現缺 `libcublas.so.12`；補上與舊 HumanSL 相同的路徑後 `katago version` 通過。補抽失敗會保存 stderr，17 項 CPU 回歸通過。

@@ -5,6 +5,7 @@ import json
 import multiprocessing as mp
 import os
 from pathlib import Path
+import shutil
 from tempfile import TemporaryDirectory
 
 import numpy as np
@@ -73,6 +74,11 @@ def c_offsets(games, canon):
             raise ValueError(f"expected eight complete C shards in {run}")
         for marker in shards:
             shard = marker.parent
+            meta = json.loads(marker.read_text())
+            if (not meta["per_move"] or meta["finetuned"] is not None
+                    or meta["komi"] != (.5 if hd else 6.5)
+                    or not meta["vectors"].endswith("/cvec_v2/learn/vectors.pt")):
+                raise ValueError(f"unexpected C teacher identity: {shard}")
             table = pd.read_parquet(shard / "games.parquet")
             rows = target.get_indexer(table.game_index)
             done = np.load(shard / "done.npy", allow_pickle=False)
@@ -97,7 +103,7 @@ def c_offsets(games, canon):
     return offsets, max_error
 
 
-def _h_worker(device, games, out):
+def _h_worker(device, games, canon, out):
     os.environ["CUDA_VISIBLE_DEVICES"] = device
     out.mkdir(parents=True, exist_ok=True)
     files = []
@@ -108,9 +114,18 @@ def _h_worker(device, games, out):
             # KataGo's existing extraction API writes raw arrays. Keep them on local scratch only.
             with TemporaryDirectory(prefix="cvec2-h9-") as scratch:
                 scratch = Path(scratch)
-                humansl.run(humansl.cache_games(table.game_index), PROFILES, scratch,
-                            komi=6.5, overrides="numAnalysisThreads=64")
+                try:
+                    humansl.run(humansl.cache_games(table.game_index), PROFILES, scratch,
+                                komi=6.5, overrides=f'numAnalysisThreads=64,logFile={scratch / "katago.log"}')
+                except Exception:
+                    stderr = scratch / "katago_stderr.log"
+                    if stderr.is_file():
+                        shutil.copyfile(stderr, path.with_suffix(".stderr.log"))
+                    raise
                 mean, offsets = h_means(scratch, table)
+                error = float(np.abs(mean - canon[start:start + len(table)]).max())
+                if not np.isfinite(error) or error > H_MEAN_TOLERANCE:
+                    raise ValueError(f"H played-move means differ from cvec2 in {path}: {error:.6g}")
                 partial = path.with_suffix(".partial.npz")
                 np.savez(partial, games=table.game_index, raw=mean, offsets=offsets)
                 partial.replace(path)
@@ -150,7 +165,8 @@ def h_offsets(games, canon, out):
             raw, norm = h_means(shard, games.iloc[rows])
             ingest(table.game_index, raw, norm, shard)
 
-    missing = games.loc[~np.isfinite(offsets).all(axis=1)]
+    missing_rows = np.flatnonzero(~np.isfinite(offsets).all(axis=1))
+    missing = games.iloc[missing_rows]
     if missing.handicap.eq(1).any():
         raise ValueError("missing original HD1 H played-move coverage")
     reused = len(games) - len(missing)
@@ -160,7 +176,7 @@ def h_offsets(games, canon, out):
     if len(missing):
         with ProcessPoolExecutor(len(devices), mp_context=mp.get_context("spawn")) as pool:
             tasks = [pool.submit(_h_worker, device, missing.iloc[i::len(devices)],
-                                 out / f"h_backfill_{i:02d}")
+                                 canon[missing_rows[i::len(devices)]], out / f"h_backfill_{i:02d}")
                      for i, device in enumerate(devices) if i < len(missing)]
             for task in tasks:
                 for path in task.result():
