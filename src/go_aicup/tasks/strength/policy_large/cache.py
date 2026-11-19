@@ -123,11 +123,12 @@ class CacheView:
             yield gather(used)
 
 
-def init_encoder(net_config):
-    global _TABLE,_SHARDS,_NET_CONFIG
+def init_encoder(net_config, board_root=None):
+    global _TABLE,_SHARDS,_NET_CONFIG,_BOARD_ROOT
     torch.set_num_threads(1)
     _NET_CONFIG = net_config
-    _TABLE = pd.read_parquet(ROOT/'data/processed/boards/strength_v1/games.parquet').set_index('game_index')
+    _BOARD_ROOT = Path(board_root) if board_root else ROOT/'data/processed/boards/strength_v1'
+    _TABLE = pd.read_parquet(_BOARD_ROOT/'games.parquet').set_index('game_index')
     _SHARDS = {}
 
 
@@ -143,7 +144,7 @@ def encode(item):
         _LAST_HD = hd
     sid = int(row.shard_id)
     if sid not in _SHARDS:
-        prefix = ROOT/f'data/processed/boards/strength_v1/shard_{sid:05d}'
+        prefix = _BOARD_ROOT/f'shard_{sid:05d}'
         _SHARDS[sid] = (np.load(f'{prefix}_moves.npy',mmap_mode='r'),np.load(f'{prefix}_colors.npy',mmap_mode='r'))
     a,b = int(row.local_offset),int(row.local_offset+row.length)
     moves,colors = (v[a:b] for v in _SHARDS[sid])
@@ -279,7 +280,7 @@ def infer_family(family,games,config,out,cancel=None):
             del teacher,forward
             torch.cuda.synchronize(device)
             return {'device':str(device),'games':completed,'errors':maxima.tolist()}
-    with ProcessPoolExecutor(workers,mp_context=context,initializer=init_encoder,initargs=(net_config,)) as pool:
+    with ProcessPoolExecutor(workers,mp_context=context,initializer=init_encoder,initargs=(net_config,config.get('board_root'))) as pool:
         with ThreadPoolExecutor(4) as threads:
             futures = [threads.submit(worker,shard,pool) for shard in shards]
             try:

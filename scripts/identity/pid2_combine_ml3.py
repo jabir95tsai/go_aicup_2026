@@ -1,16 +1,19 @@
-"""Write the two E2E14400 probe files mix3ml.csv and ml14400.csv (2026-11-19).
+"""Write fusion files that change only the added-set style term (2026-11-19).
 
 Same fusion as hung-seqB-e2emix-ml.csv (opening + category + 16 * style + ML, lambda1/lambda2 from stage 1)
 with only the added-set style term changed, matching the sealed arms of pid2_ml_mix_compare.py (job 795581):
   mix3ml   style = 0.5 seqB + 0.25 E2E9600 + 0.25 E2E14400
   ml14400  style = 0.5 seqB + 0.5 E2E14400
+  ogsmix   style = 0.5 seqB + 0.5 A1 (E2E-scratch 9,600 steps on Yugen+OGS)
+  ogsw     style = 1.5 (0.25 seqB + 0.75 A1) (pid2_ogs_weight_sweep, job 811134)
 Original test-set rows copied from 772748-hung.csv. Checks that the current base file is reproduced first.
 Refuses to overwrite.
 
-    python -m scripts.identity.pid2_combine_ml3
+    python -m scripts.identity.pid2_combine_ml3 [--names ogsmix]
 """
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 
@@ -25,20 +28,26 @@ SUB = ROOT / "submissions" / "pid"
 OUT = ROOT / "outputs" / "pid" / "pid2_multilevel" / "ml_mix_compare" / "combine_report.json"
 COLS = [f"top_{i}" for i in range(1, 6)]
 STYLE = {"mix3ml": {"_seqB": 0.5, "_e2e9600": 0.25, "_e2e14400": 0.25},
-         "ml14400": {"_seqB": 0.5, "_e2e14400": 0.5}}
+         "ml14400": {"_seqB": 0.5, "_e2e14400": 0.5},
+         "ogsmix": {"_seqB": 0.5, "_e2eogs9600": 0.5},
+         "ogsw": {"_seqB": 0.375, "_e2eogs9600": 1.125}}  # m 1.5 x (0.25 seqB + 0.75 A1), weight sweep 811134
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--names", nargs="+", default=["mix3ml", "ml14400"], choices=sorted(STYLE))
+    names = parser.parse_args().names
     base = pd.read_csv(SUB / "772748-hung.csv", dtype=str).set_index("question_id")
     cur = pd.read_csv(SUB / "hung-seqB-e2emix-ml.csv", dtype=str).set_index("question_id")
     choice = json.loads((ROOT / "outputs/pid/pid2_multilevel/stage1/dev_choice.json").read_text())["chosen"]
     l1, l2 = choice["lambda1"], choice["lambda2"]
-    outs = {name: base.copy() for name in STYLE}
+    outs = {name: base.copy() for name in names}
     for name in outs:
         assert not (SUB / f"{name}.csv").exists(), name
     report = {name: {"style": STYLE[name], "parts": {}} for name in outs}
+    needed = {"_seqB", "_e2e9600", "_seqB_ml"} | {s for n in names for s in STYLE[n]}
     for part, prefix in (("public", "pub2"), ("private", "priv2")):
-        src = {s: DAY0 / f"{part}2_d4_9600{s}" for s in ("_seqB", "_e2e9600", "_e2e14400", "_seqB_ml")}
+        src = {s: DAY0 / f"{part}2_d4_9600{s}" for s in sorted(needed)}
         pred = pd.read_parquet(src["_seqB"] / "predictions.parquet")
         ids, ks = pred.question_id.astype(str).tolist(), pred.num_games.to_numpy()
         cand = np.load(src["_seqB"] / "candidates.npy", allow_pickle=True).astype(str)
@@ -47,7 +56,7 @@ def main() -> None:
             assert pd.read_parquet(d / "predictions.parquet").question_id.astype(str).tolist() == ids
             assert np.array_equal(np.load(d / "candidates.npy", allow_pickle=True).astype(str), cand)
             p[s] = dict(np.load(d / "parts.npz"))
-        for s in ("_e2e9600", "_e2e14400", "_seqB_ml"):
+        for s in sorted(needed - {"_seqB"}):
             np.testing.assert_array_equal(p[s]["opening"], p["_seqB"]["opening"])
             np.testing.assert_array_equal(p[s]["category"], p["_seqB"]["category"])
         rest = p["_seqB"]["opening"] + p["_seqB"]["category"]
@@ -55,7 +64,8 @@ def main() -> None:
         cur_style = 0.5 * (p["_seqB"]["style"] + p["_e2e9600"]["style"])
         cur_top = cur.loc[ids, COLS].to_numpy()
         np.testing.assert_array_equal(cand[top5(rest + 16 * cur_style + ml)], cur_top)
-        for name, weights in STYLE.items():
+        for name in names:
+            weights = STYLE[name]
             style = sum(w * p[s]["style"] for s, w in weights.items())
             sc = rest + 16 * style + ml
             assert np.isfinite(sc).all() and sc.shape == (400, 600)
@@ -73,7 +83,8 @@ def main() -> None:
         out.to_csv(target)
         pd.testing.assert_frame_equal(pd.read_csv(target, dtype=str).set_index("question_id"), out)
         report[name]["sha256"] = hashlib.sha256(target.read_bytes()).hexdigest()
-    OUT.write_text(json.dumps(report, indent=2))
+    out = OUT if names == ["mix3ml", "ml14400"] else OUT.with_name(f"combine_report_{'_'.join(names)}.json")
+    out.write_text(json.dumps(report, indent=2))
     print(json.dumps(report, indent=2))
 
 

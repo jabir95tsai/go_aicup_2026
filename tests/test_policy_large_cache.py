@@ -23,6 +23,25 @@ def sample():
     return PolicyCache(games,shards,np.zeros((len(games),4),np.float32),np.array(counts))
 
 
+def test_encoder_uses_release_board_root(tmp_path, monkeypatch):
+    from go_aicup.tasks.strength.policy_large import cache
+    from go_aicup.features import humansl_torch
+    pd.DataFrame([dict(game_index=77, length=2, shard_id=0, local_offset=1)]).to_parquet(tmp_path/'games.parquet')
+    np.save(tmp_path/'shard_00000_moves.npy', np.array([99, 12, 34], np.int16))
+    np.save(tmp_path/'shard_00000_colors.npy', np.array([0, 0, 1], np.int8))
+    monkeypatch.setattr(cache, '_LAST_HD', None)
+    monkeypatch.setattr(humansl_torch, '_init_worker', lambda config, komi: None)
+    def encode(item):
+        np.testing.assert_array_equal(item[0], [12, 34])
+        np.testing.assert_array_equal(item[1], [0, 1])
+        return np.zeros((2, 1, 19, 19), np.uint8), np.zeros((2, 1)), np.array([12, 34])
+    monkeypatch.setattr(humansl_torch, 'encode_game', encode)
+    cache.init_encoder({}, tmp_path)
+    bits, glob, target, side = cache.encode((77, 1, 1, 2))
+    np.testing.assert_array_equal(target, [12, 34])
+    np.testing.assert_array_equal(side, [1, 0])
+
+
 def test_cross_shard_batches_duplicates_tail_and_counts():
     c=sample();v=c.for_device('cpu');rows=np.array([7,0,5,7,3])
     chunks=list(v.chunks(rows,5))

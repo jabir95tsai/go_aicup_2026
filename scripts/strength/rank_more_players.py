@@ -53,20 +53,24 @@ class PriorMatched(RankModel):
         super().__init__("B2")
         self.prior = prior
 
-    def _fit_synthetic(self, games, x, y) -> None:
-        rng = np.random.default_rng(hs.SEED)
+    def synthetic_rows(self, games, y, seed):
+        """Yield the exact ordered game rows and labels used by each production B2 head."""
+        rng = np.random.default_rng(seed)
         by_player = list(games.groupby(games["player_id"].astype(str)).indices.values())
-        self.per_k = {}
         for k in K_BUCKETS:
             players = [rows for rows in by_player if len(rows) >= k]
             by_rank = [[p for p in players if y[p[0]] == r] for r in range(10)]
             ranks = rng.choice(10, hs.SYNTHETIC, p=self.prior[k])
-            features, labels = [], []
+            draws = []
             for r in ranks:
                 rows = by_rank[r][rng.integers(len(by_rank[r]))]
-                features.append(x[rng.choice(rows, k, replace=False)].mean(axis=0))
-                labels.append(r)
-            features = np.stack(features)
+                draws.append(rng.choice(rows, k, replace=False))
+            yield k, np.stack(draws), ranks
+
+    def _fit_synthetic(self, games, x, y) -> None:
+        self.per_k = {}
+        for k, rows, labels in self.synthetic_rows(games, y, hs.SEED):
+            features = np.stack([x[draw].mean(axis=0) for draw in rows])
             scaler = StandardScaler().fit(features)
             model = LogisticRegression(C=1.0, max_iter=5000)
             self.per_k[k] = (scaler, model.fit(scaler.transform(features), np.array(labels)))

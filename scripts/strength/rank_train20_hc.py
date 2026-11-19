@@ -46,18 +46,18 @@ LEARNED = ROOT / "outputs" / "rank" / "humansl" / "humansl_rankvec" / "games.par
 NOA = bag.NOA
 
 
-def metadata() -> pd.DataFrame:
+def metadata(handicap_path=None) -> pd.DataFrame:
     meta = pd.read_parquet(hf.CANONICAL, columns=["game_index", "rank", "game_id", "rank_id", "player_id",
                                                    "player_color"])
-    return meta.merge(pd.read_csv(hf.HANDICAP, usecols=["rank", "game_id", "handicap"]), on=["rank", "game_id"],
+    return meta.merge(pd.read_csv(handicap_path or hf.HANDICAP, usecols=["rank", "game_id", "handicap"]), on=["rank", "game_id"],
                       validate="one_to_one")
 
 
-def train20_games() -> pd.DataFrame:
+def train20_games(meta=None, table=None) -> pd.DataFrame:
     """train20 games used here: HD<=1, not used to learn the C vectors."""
-    t20 = pd.read_parquet(TRAIN20, columns=["game_index"])
+    t20 = pd.read_parquet(table or TRAIN20, columns=["game_index"])
     learned = set(pd.read_parquet(LEARNED, columns=["game_index"])["game_index"])
-    games = metadata().set_index("game_index").loc[t20["game_index"]].reset_index()
+    games = (metadata() if meta is None else meta).set_index("game_index").loc[t20["game_index"]].reset_index()
     games = games[(games["handicap"] <= 1) & ~games["game_index"].isin(learned)].reset_index(drop=True)
     return games.assign(role="T")
 

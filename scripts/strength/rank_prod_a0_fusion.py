@@ -42,18 +42,19 @@ def _h_frame(path) -> pd.DataFrame:
     return fu._h_frame("x", path)
 
 
-def train_data():
+def train_data(*, standard=None, handicap_path=None, train20_table=None):
     """(fit, eval_games, x_fit, x_eval): fit = Valid-S HD<=1 then train20 (standard-array order), eval = Valid-U;
     x = [H 30 | C v2 20 | HD1 flags 2]."""
     import scripts.strength.humansl_hd_filter as hf
     import scripts.strength.humansl_p3_komi as p3
     import scripts.strength.rank_cvec_v2 as cv2
     import scripts.strength.rank_train20_hc as t20
-    meta = t20.metadata()
+    meta = t20.metadata(handicap_path)
     folds = pd.read_parquet(ROOT / "data" / "processed" / "cv" / "strength_folds_seed2027.parquet").set_index("player_id")["fold"]
     valid_ids = set(pd.concat([pd.read_parquet(cv2.OUT / f"ext_valid_hd{h}.parquet") for h in (0, 1)])["game_index"])
-    std_index = np.load(hf.STANDARD / "game_index.npy")
-    std_h = pd.DataFrame(np.load(hf.STANDARD / "features.npy"), index=std_index)
+    standard = standard or hf.STANDARD
+    std_index = np.load(standard / "game_index.npy")
+    std_h = pd.DataFrame(np.load(standard / "features.npy"), index=std_index)
     order = std_index[np.isin(std_index, list(valid_ids))]
     if len(order) != len(valid_ids):
         raise ValueError("Valid games missing from the H standard array")
@@ -61,7 +62,7 @@ def train_data():
     valid["role"] = np.where(folds.loc[valid["player_id"]].to_numpy() == 0, "U", "S")
     if ((valid["role"] == "S") & (valid["handicap"] > 1)).any():
         raise ValueError("Valid-S HD>=2 game in the C v2 table")
-    t20g = t20.train20_games()
+    t20g = t20.train20_games(meta, train20_table)
     h_valid = std_h.loc[valid["game_index"]].to_numpy()
     h1 = _h_frame(p3.OUT / "h_train")
     rows = np.flatnonzero((valid["handicap"] == 1).to_numpy())
@@ -87,7 +88,7 @@ def train_data():
     return fit, eval_games, x[is_fit], x[is_eval]
 
 
-def test_data(part: str):
+def test_data(part: str, raw_dir=None):
     """(x, game_index, questions) of one test part, C v2 and komi-0.5 H for HD1 games."""
     import scripts.strength.humansl_p3_komi as p3
     import scripts.strength.rank_cvec_v2 as cv2
@@ -99,7 +100,8 @@ def test_data(part: str):
     if [c.split("_", 1)[0] for c in hcols] != ["own"] * 15 + ["opp"] * 15:
         raise ValueError("unexpected test H column order")
     table = a024.join(human[hcols], how="inner").join(
-        hp.hd1_features(work, ROOT / "data" / "raw" / "tests" / f"rank_prediction_test_{part}.csv"), how="inner")
+        hp.hd1_features(work, (raw_dir or (ROOT / "data" / "raw" / "tests")) /
+                        f"rank_prediction_test_{part}.csv"), how="inner")
     hd1 = table.index[table[hp.HD1_COLUMNS].sum(axis=1) > 0]
     h1 = _h_frame(p3.OUT / f"h_test_{part}")
     if not set(hd1) <= set(h1.index):
@@ -112,9 +114,9 @@ def test_data(part: str):
     return x, table.index.to_numpy(), hp.question_table(work)
 
 
-def question_sets() -> dict:
+def question_sets(e1_path=None) -> dict:
     import scripts.strength.humansl_hd_filter as hf
-    e1 = pd.read_parquet(hf.Q1000)
+    e1 = pd.read_parquet(e1_path or hf.Q1000)
     return {"E1": e1[e1["role"] == "U"].reset_index(drop=True),
             "E2": pd.read_parquet(hf.OUT / "questions_e2_hd01.parquet")}
 
@@ -126,7 +128,7 @@ def _fit(fit: pd.DataFrame, x: np.ndarray, prior: dict, seed: int):
     return more.PriorMatched(prior).fit(fit.reset_index(drop=True), pd.DataFrame(), x)
 
 
-def step1(fit, eval_games, x_fit, x_eval, sets) -> dict:
+def step1(fit, eval_games, x_fit, x_eval, sets, raw_dir=None) -> dict:
     import scripts.strength.humansl_hd_filter as hf
     import scripts.strength.rank_cvec_v2 as cv2
     import scripts.strength.rank_more_players as more
@@ -146,7 +148,7 @@ def step1(fit, eval_games, x_fit, x_eval, sets) -> dict:
     model_all = _fit(stacked, np.vstack([x_fit, x_eval[u]]), prior_all, 2027)
     rows = []
     for part in ("public", "private"):
-        x, index, questions = test_data(part)
+        x, index, questions = test_data(part, raw_dir)
         p = model_all.probabilities(x, index, questions)
         rows.append(pd.DataFrame({"question_id": questions["question_id"], "pred_rank": [RANKS[r] for r in score_rank(p)]}))
     ours = pd.concat(rows).set_index("question_id")["pred_rank"]

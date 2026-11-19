@@ -3790,6 +3790,17 @@ B0 的最佳組合 (B＋E9600＋0.25·E14400)／2.25 幾乎等於 11/18 已封�
   單獨風格項 alone_YO 對 alone_Y：pool 1 +0.0027（0.0019）、pool 0 +0.0032（0.0021）。兩臂都有學到（alone 對 no_style +0.217／+0.220），非無法判定。絕對分數（pool 1）：B 0.6640、mix_Y 0.6647、mix_YO 0.6673。判讀：960 步時 OGS 資料方向一致為正，但量小（約 +0.003），未達 +0.010；完整 9,600 步是否放大未知。
 - **A1 已送（11/19 01:13）：** 訓練 Slurm **805157**（8 卡、上限 12 小時 30 分）、評估 **805158**（afterok，1 卡；驗證台快取改放 `/work/jason1122/ogs_a1_cache`，因 `/home` 只剩 4.7 GB）。第一次 sbatch 因未帶資源參數被拒，未產生作業。
 - **算力預算：** sbatch 錯誤訊息顯示專案 GOV115094 SU 餘額 **22,876**（10/25 為 108,387）；`sreport` 同期全專案 5,154 GPU-h（本帳號 848）→ 約 16.6 SU／GPU-h（含其他成員與 CPU，粗估）。A1 約 84 GPU-h ≈ 1,400 SU；剩餘約 1,380 GPU-h 由全專案共用。
+- **A1 結果（訓練 805157 完成 10 小時 35 分，84.4 GPU-h；評估 805158，17 分鐘，`outputs/pid/ogs/a1_eval/report.json`）→ GATE PASS。** 封存 draws 1700–；Y＝現有 E2E9600、YO＝A1；rest＝開局＋類別＋L1／L2，故 mix_Y 即現行基底 `hung-seqB-e2emix-ml` 的融合。
+
+| mix_YO 對 mix_Y | k=1／2／3／5 Δ | 整體 Δ（SE） |
+|---|---|---|
+| pool 1（30 draws） | +0.0165／+0.0165／+0.0135／+0.0033 | **+0.0125（0.0019，z 6.6，87% draw 為正）** |
+| pool 0（20 draws） | +0.0216／+0.0183／+0.0148／+0.0042 | +0.0147（0.0015） |
+
+  絕對分數（pool 1）：B 0.6761、mix_Y 0.6973、mix_YO 0.7097、alone_YO 0.7130。單獨風格項 alone_YO 對 alone_Y：pool 1 +0.0310（0.0022）、pool 0 +0.0324。判讀：960 步時只有 +0.003 的外部資料效果，在 9,600 步放大到單獨 +0.031、融合 +0.0125；增益集中在 k=1–3，k=5 小。alone_YO（不與 B 混合）在 pool 1 比 mix_YO 再高 +0.0033、pool 0 持平（−0.0004），但不是事前登記的臂，k=5 對 mix_Y −0.002，**只記為觀察**，不採用。換算 Public：新增集約占一半 → 約 +0.006。
+- **提交檔（事前規則：過 gate 才做）：** 新增集正式風格項匯出 Slurm **806692**（1 卡，tag `e2eogs9600`，先以同一路徑重現 seqB 風格項才繼續）→ `scripts/identity/pid2_combine_ml3.py --names ogsmix` 寫 `submissions/pid/ogsmix.csv`（新增集風格項＝0.5 seqB＋0.5 A1，其餘同基底）。**升基底規則（事前寫定）：** 封存 gate 已過 → 依本地證據升為競賽一基底候選；Public 只作方向確認，降 ≥ 0.02 才回查推論路徑。**OGS 用於有獎競賽與得獎交付的授權仍待使用者確認，確認前不應作為最終提交。**
+- **提交檔完成：** 806692（7 分 42 秒）參考路徑重現 seqB 風格項最大差 8.9e-15／9.8e-15、top-1 相同；A1 單獨改 top-1 對 seqB：pub2 129、priv2 146，寫入 `outputs/pid/day0_1112/{public,private}2_d4_9600_e2eogs9600/`。`submissions/pid/ogsmix.csv`（`92989f0b`，1,600 列；原測試集列同 `772748-hung.csv`；先驗證可重現現行基底）改 top-1 對基底 `hung-seqB-e2emix-ml.csv`：pub2 52（k=1／2／3／5：25／16／6／5）、priv2 49。預期 Public 約 +0.006（0.8245 → 約 0.831）。報告 `outputs/pid/pid2_multilevel/ml_mix_compare/combine_report_ogsmix.json`。
+- **LB（2026-11-19 19:17 上傳）：** `ogsmix.csv` Public **0.8347463**（29/115），對基底 `hung-seqB-e2emix-ml.csv` 0.8245254 **+0.0102**（預期 +0.006；方向一致，幅度在 Public 雜訊內）。依事前規則升為競賽一基底候選；**OGS 授權確認前，最終提交仍用 `hung-seqB-e2emix-ml.csv`。**
 
 
 ### 2026-11-19：804869 H/C B3 smoke50 完成
@@ -3938,3 +3949,77 @@ C向量shape／finite皆核對；Slurm語法、diff空白與sbatch --test-only�
 
 已提交 **Slurm 805280**（2026-11-19T01:56:05.101852+08:00）；收據 `outputs/rank/humansl/policy_large/200k_deep_seed2027/805280/submission.json`，
 log `outputs/slurm-rank-policy-large-805280.out`。未執行GPU短測；正式執行／完成及dev結果未知。
+
+### 2026-11-19：806639 H+C 三臂正式測試推論（使用者要求）
+
+使用者指定 A0、R10、CNN-Z32 的已選定 H/C 編碼器與四個 k 的 B3 頭直接推論，
+不重擬合、不加入先驗修正或 L10；解碼沿用 softmax＋score_rank。
+已完成官方 ZIP 中 800 題／10,000 盤解析與 HD0/HD1 檢查，2,222,151 個位置；
+逐盤與既有 release cache 核對全部 moves/colors/length/player_color 一致。
+新增 export 入口重用 teacher/原特徵組合；cache 只增加可選 board_root，原訓練預設不變。
+CPU cache 測試 8 項通過、語法與 Slurm test-only 通過。
+
+提交作業 **810420**，8×H200、96 CPU、200G RAM、1h 上限；預估實跑15–25分鐘、2–3.3 GPU-h。
+log：`outputs/slurm-rank-policy-export-810420.out`；推論診斷：原 run 的 `test_export/`。
+依使用者追加要求，每盤 H/C 三臂特徵、每題 B3 輸入與十級機率保存於
+`data/processed/strength_features/humansl/policy_large/806639_test/`；全盤 policy 不落盤。
+
+| 候選檔（完成後驗證） | monitor Equal-k（k5/k10/k15/k20） | 獨立 dev Equal-k | 假設與預期 LB |
+|---|---|---|---|
+| `submissions/rank/806639-hc-a0.csv` | 0.732276（0.692483/0.731380/0.749126/0.756115） | 0.728281 | 新20萬盤切分＋38維線性聚合；預期 LB 未知 |
+| `submissions/rank/806639-hc-r10.csv` | 0.731934（0.690162/0.735172/0.748126/0.754276） | 0.727617 | policy 殘差聚合；dev 對 A0 −0.000664、gate未過；預期 LB 未知 |
+| `submissions/rank/806639-hc-cnn-z32.csv` | 0.732779（0.691955/0.735494/0.746229/0.757437） | 0.723371 | policy CNN z32聚合；dev 對 A0 −0.004909、gate未過；預期 LB 未知 |
+
+Public 升降均僅登記探針；本次沒有授權自動換基底，亦不代使用者上傳。完成狀態與 SHA 待補。
+
+**完成：810420 COMPLETED、exit 0、12分26秒（約1.658配置GPU-h）。**
+H/C 各完整推論10,000盤、2,222,151位置；teacher分別659.5／718.7秒。
+三檔皆800列（Public/Private各400）、ID唯一且與既有合法模板完全覆蓋、級別合法、順序一致。
+從落盤的H/C每盤特徵重新組合B3每題輸入，與保存的38／76／166維矩陣逐值相同；
+重新載入12個選定B3頭所得十級機率逐值相同，score_rank結果重現三份CSV全部預測。
+
+| 提交檔 | SHA-256 | 對cv2-l10改Public／Private題數 |
+|---|---|---|
+| `806639-hc-a0.csv` | `da6ae3ff729d22cc58d38266e22aa893742cfd6465711f128837490df2633802` | 66／69 |
+| `806639-hc-r10.csv` | `7edf284f3b3234017ced17d070d2496826600dd712939fd3a861887971f56e5a` | 70／66 |
+| `806639-hc-cnn-z32.csv` | `3d59dec6d8da6173f05e3fee51e30a923f4decd231fcdad44b6651e4a4bf7c0e` | 65／72 |
+
+共用特徵路徑 `data/processed/strength_features/humansl/policy_large/806639_test/`：
+H/C各A0、R10、CNN-Z32每盤.npy共6份；B3各臂每題輸入.npy共3份；
+各臂十級機率與預測.parquet共3份；games／questions.parquet及完整manifest（欄名、維度、SHA、來源checkpoint）。
+共10,971,143 bytes（約10.46MiB）。已驗證由這些特徵直接重現提交，可避免重跑teacher。
+推論實際使用的export.py／export.slurm／cache.py已封存在原run的test_export/source/。
+未上傳，三份LB分數未知；未增加先驗修正或L10、不改現行基底。
+
+### 2026-11-19：806639 三臂＋既有 L10 覆寫（使用者要求）
+沿用 rank_identity_merge.overlay 與既有 l10_real_test.questions.csv，門檻為未見玩家 null 最大 gap 71.484618；7題命中 gap 79.759–199.316，未調門檻或重做比對。
+| 提交檔 | Public／Private 實改題數 | SHA-256 |
+|---|---|---|
+| `submissions/rank/806639-a0-l10.csv` | 2／2 | `3766662ae978923685add782a542d04d21f319bf0fc938713738a2b16610af47` |
+| `submissions/rank/806639-z32-l10.csv` | 3／3 | `80e38fddc3c8912d23b0f556e4924a9b81bdafe5ecb4f4e4f1d91f562052196a` |
+| `submissions/rank/806639-r10-l10.csv` | 2／2 | `a80c1e086e3ec4e9d75b39a9d9828c85b6d5f92cc59533d2a780bb5b783927c9` |
+
+三臂共同改：pub_q_0046 4D→6D、pub_q_0135 3D→2D、priv_q_0047 4D→3D、priv_q_0168 4D→5D。CNN-Z32另改pub_q_0073 A→1D、priv_q_0159 4D→5D。priv_q_0396原已為A，皆不變。
+驗證三檔各800列、ID與順序不變、合法級別、只改固定7題內的列，其餘793題逐值不變；所有命中題最終一致。
+A0/R10改動與既有cv2-l10完全相同；CNN-Z32多改2題來自原模型預測不同，覆寫行為正常。4D→6D跨兩級仍照固定L10匹配級別，不把歷史LB的整體提升當作各題真值證明。
+未重跑GPU或修改保存特徵／模型機率；＋L10 CSV屬後處理提交，原機率仍為模型原始輸出。變更明細與來源在原run test_export/l10_report.json及outputs/rank/identity_merge/overlay_806639-*.json。未上傳、三臂LB未知，不自動更換基底。
+
+### 2026-11-19：競賽一——ogsmix 之後的新增集風格項權重掃描（使用者「(b) 先做，之後做 a」；看結果前寫定）
+
+- **假設：** A1 單獨（pool 1 0.7130）略高於 0.5 seqB＋0.5 A1（0.7097），且 A1 的 cosine 尺度可能和原 16w 不同 → 調 seqB 比例 a 與風格項倍率 m 可能再加分。預期增益未知（推測 0～+0.005）。
+- **設定：** 分數＝opening＋category＋L1/L2＋16w·m·(a·cos_B＋(1−a)·cos_A1)；ogsmix＝a 0.5、m 1。網格 a∈{0, 0.25, 0.5, 0.75, 1}、m∈{0.75, 1, 1.25, 1.5, 2, 2.5}（30 組）。
+- **選擇：** 新開發題組 pool 0 1800–1819、pool 1 1800–1829，50 個 draw 平均取最高；選到 ogsmix 則不開封存題組。落在 m 網格邊界時記錄為風險。
+- **判定（同路徑換檔規則）：** 封存題組 1900-（pool 0 1900–1919、pool 1 1900–1929）只評一次，對 ogsmix：pool 1 Δ ≥ +0.005、z ≥ 2.5、各 k ≥ −0.005、pool 0 Δ > 0 才換；否則維持 ogsmix。
+- **成本：** 1 張 H200，約 30–40 分鐘（前次同類評估 17–23 分鐘、這次 draw 數兩倍）。程式 `scripts/identity/pid2_ogs_weight_sweep.py`，輸出 `outputs/pid/ogs/weight_sweep/`。
+- **結果（811134，13 分 44 秒）：** 開發題組 50 draw 最佳 **a 0.25、m 1.5**（0.7173；ogsmix 0.7073；不在網格邊界）。前幾名都是 a 0.25（m 1.25 0.7168、m 2 0.7148、m 1 0.7139），a 0（A1 單獨）次之（m 1.5 0.7122），a 1（不用 A1）最差。**封存題組對 ogsmix：pool 1 +0.0071**（SE 0.0011，z 6.6，29/30 draw 為正；k=1／2／3／5：+0.0001／+0.0107／+0.0063／+0.0111），**pool 0 +0.0107**（20/20 為正）→ **通過換檔規則**。增益在 k≥2；k=1 持平（m 加大使 k=1 略降、k=5 上升）。
+- **提交檔：** `submissions/pid/ogsw.csv`（sha256 `f52ed0ba`，1,600 列）＝`pid2_combine_ml3 --names ogsw`，新增集風格項＝1.5×(0.25 seqB＋0.75 A1)，其餘同 ogsmix；原測試集列不變。改 top-1 對 ogsmix：pub2 46、priv2 44；對 `hung-seqB-e2emix-ml.csv`：pub2 78、priv2 76。預期 Public 對 ogsmix 約 +0.0035（新增集占 Public 一半）→ 約 0.838，在雜訊內。依本地證據升為競賽一基底候選，取代 ogsmix；Public 降 ≥ 0.02 才回查。**OGS 授權確認前仍不作最終提交。**
+- **LB（2026-11-19 22:01 上傳）：** `ogsw.csv` Public **0.8340333**（30/116），對 ogsmix 0.8347463 **−0.0007**（預期 +0.0035）。差距遠小於 Public 標準誤約 0.02（且只改了 pub2 46 題），依事前規則維持 ogsw 為基底候選（本地兩個封存 pool 皆正、z 6.6）；OGS 授權確認前最終提交仍用 `hung-seqB-e2emix-ml.csv`。
+
+### 2026-11-19：競賽一——A2：全部 OGS 玩家的 E2E 編碼器（使用者選「更多 OGS 玩家」、同意刪舊 A1 快取；看結果前寫定）
+
+- **假設：** A1 的增益來自外部玩家多樣性（alone_YO 對 alone_Y +0.031）→ 把 OGS 玩家由 40,000 增到全部 82,481 位（每人 10 盤，總盤數約與 A1 相同），風格向量對未見玩家的鑑別力再提高。預期增益未知；推測新增集 pool 1 +0.003～+0.01。
+- **設定：** 快取 `/home/jason1122/boards/yugen_ogs_v2`（`external build --min-games 20 --games-per-player 10 --human-opponent --seed 2026`，不限人數；幽玄部分照舊以符號連結）。訓練設定 `configs/identity/pid_e2e_ogs_A2_YO9600.json`＝A1 只改 `cache_dir`、`output_dir`、`keep_steps`＝[9600]（只影響保存的 checkpoint）；yugen_share 0.5、9,600 步、8 卡不變。輸出 `outputs/pid/ge2e/pid_e2e_ogs_A2_YO9600` 為連到 `/home/jason1122/ogs_runs/` 的符號連結；Slurm log 在 `/home/jason1122/ogs_runs/logs/`（/work 已滿）。
+- **磁碟：** 已刪 `/home/jason1122/boards/yugen_ogs_v1`（A1 快取 14 GB，使用者同意）；中繼資料（external.json、manifest.json、external_players.parquet、games.parquet sha256）存於 `/home/jason1122/ogs_runs/yugen_ogs_v1_meta/`。重現 A1 時以 `ogs_build.slurm` 最後的 build 指令（`--max-players 40000 --games-per-player 20 --seed 2026`）從 `/home/jason1122/ogs2025/filtered` 重建。
+- **判定（同路徑換檔規則，事前寫定）：** 封存題組 2000-（pool 0 2000–2019、pool 1 2000–2029），融合固定為 ogsw 形式 1.5×(0.25 seqB＋0.75 X)。A2w（X＝A2）與 A12w（X＝A1、A2 cosine 平均）各對 A1w（＝ogsw）：pool 1 Δ ≥ +0.005、z ≥ 2.5、各 k ≥ −0.005、pool 0 Δ > 0；兩者都過取 pool 1 Δ 較大者，都沒過維持 ogsw。不調權重。程式 `scripts/identity/pid2_ogs_a2_eval.py`，輸出 `outputs/pid/ogs/a2_eval/`。
+- **成本：** 建快取 1 卡約 0.5 小時內、訓練 8 卡約 10.6 小時（≈85 GPU-h）、評估 1 卡約 20 分鐘；合計約 86 GPU-h（約 1,430 SU）。
+- **已送（11/19 21:50）：** 建快取 811842 → 訓練 811843（afterok，8 卡、上限 12 小時 30 分）→ 評估 811844（afterok，1 卡）。
