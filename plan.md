@@ -38,8 +38,8 @@ GPU0–3保留H九profile policy分片，GPU4–7保留C十級policy分片。
    只將小型每盤本人／對手q均值、counts放RAM。
    保留非法位置-inf；mask沿用空點／排除ko／含pass；P在使用時FP32正規化重建。
    不額外做teacher parity重推；不足整批的尾端eager計算，不補重複位置。
-3. 各family先完成A0；八個實驗模型分別在八卡同時訓練，各讀自己的family四片cache。
-4. 全十網路monitor選模固定後，從同份policy聚合各網路每盤特徵到RAM，釋放全部policy。
+3. H／C各用獨立spawn process：各自teacher完成後立即擬合初始LR、訓練A0，再以本family四卡並行訓練四個實驗模型及抽取所選特徵，不等待另一family。獨立process隔離TF32／FX全域狀態；失敗透過共用事件取消兩邊。兩邊完成後才開始B3。
+4. 各family五網路monitor選模固定後，即從本family policy聚合每盤特徵到RAM；兩邊特徵回傳且process退出後釋放全部policy，才進入B3。
 5. 固定每盤特徵訓練五組×四k＝20個B3。全部選模固定後才讀取並報告dev分數。
 
 H快取309,078,869,100 bytes（約287.85GiB）；C343,405,248,460 bytes（約319.82GiB）。

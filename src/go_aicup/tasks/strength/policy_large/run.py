@@ -1,13 +1,12 @@
 """Eight-GPU, once-per-family policy experiment through all twenty frozen B3 heads."""
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
 import argparse
-import gc
 import json
 import math
+import multiprocessing as mp
 import os
 import shutil
-import threading
 import time
 
 import numpy as np
@@ -17,13 +16,16 @@ from go_aicup.paths import ROOT
 from go_aicup.tasks.strength.policy_residual.data import question_rows
 from go_aicup.tasks.strength.policy_residual.train import predict
 from go_aicup.tasks.strength.policy_residual.branches import paired_difference, gate
-from . import data, cache, fit, b3
+from . import data, cache, fit, b3, stopping
 from .models import ARMS, module_for
 from .stopping import ABORT
 
 
-def parallel(tasks, workers):
-    ABORT.clear()
+def parallel(tasks, workers, reset_abort=True):
+    if reset_abort:
+        ABORT.clear()
+    elif ABORT.is_set():
+        raise RuntimeError('another experiment worker failed')
     try:
         with ThreadPoolExecutor(workers) as pool:
             futures = {pool.submit(fn, *args): key for key, fn, args in tasks}
@@ -38,7 +40,8 @@ def parallel(tasks, workers):
                 raise
         return result
     finally:
-        ABORT.clear()
+        if reset_abort:
+            ABORT.clear()
 
 
 def code_sources():
@@ -89,6 +92,62 @@ def frozen_features(family,arm,policy,out,device,chunk,identity):
         return values
 
 
+def init_family(cancel):
+    global ABORT
+    ABORT = stopping.ABORT = fit.ABORT = cache.ABORT = cancel
+    torch.set_num_threads(1)
+
+
+def run_family(family,games,questions,config,identity,out):
+    # Separate processes keep teacher TF32/FX state isolated from the other family's training.
+    try:
+        if ABORT.is_set():
+            raise RuntimeError('another experiment worker failed')
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        policy,teacher = cache.infer_family(family,games,config,out,ABORT)
+        if ABORT.is_set():
+            raise RuntimeError('another experiment worker failed')
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+        print({'stage':'family_training_start','family':family},flush=True)
+        initial = fit.fit_initial(family,policy.arrays['c'],games,questions['train'])
+        devices = config['family_devices'][family]
+        networks = {'A0':fit.train_arm(family,'A0',policy.for_device(torch.device('cuda',devices[0])),
+                    questions,initial,config,identity,out/family/'A0')}
+        tasks = [(arm,fit.train_arm,(family,arm,policy.for_device(torch.device('cuda',device)),
+                  questions,initial,config,identity,out/family/arm))
+                 for arm,device in zip(ARMS[1:],devices)]
+        networks.update(parallel(tasks,4,reset_abort=False))
+        compact = {'A0':policy.arrays['c'].numpy().copy()}
+        compact.update(parallel([(arm,frozen_features,(family,arm,policy,out,
+                       torch.device('cuda',device),config['position_chunk'],identity))
+                       for arm,device in zip(ARMS[1:],devices)],4,reset_abort=False))
+        print({'stage':'family_complete','family':family},flush=True)
+        return {'teacher':teacher,'networks':networks,'compact':compact}
+    except BaseException:
+        ABORT.set()
+        raise
+
+
+def run_families(games,questions,config,identity,out):
+    context = mp.get_context('spawn')
+    cancel = context.Event()
+    with ProcessPoolExecutor(2,mp_context=context,initializer=init_family,initargs=(cancel,)) as pool:
+        futures, result = {}, {}
+        try:
+            for family in ('H','C'):
+                futures[pool.submit(run_family,family,games,questions,config,identity,out)] = family
+            for future in as_completed(futures):
+                result[futures[future]] = future.result()
+        except BaseException:
+            cancel.set()
+            for future in futures:
+                future.cancel()
+            raise
+    return result
+
+
 def prediction_frame(q,pred,scores,probs):
     frame = q[['question_id','player_id','rank_id','k']].copy()
     frame['pred_rank'],frame['score'] = pred,scores
@@ -132,8 +191,8 @@ def run(config,out,prepare_only=False):
     if torch.cuda.device_count() != 8:
         raise ValueError('exactly eight visible CUDA GPUs are required')
     torch.set_num_threads(1)
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
     out.mkdir(parents=True,exist_ok=True)
     write_json(out/'identity.json',dict(record,identity=identity))
     data_dir = out/'data';data_dir.mkdir(exist_ok=True)
@@ -144,52 +203,11 @@ def run(config,out,prepare_only=False):
         dest = out/'source'/relative
         dest.parent.mkdir(parents=True,exist_ok=True)
         shutil.copy2(ROOT/relative,dest)
-    # Each family owns four GPUs; both full policies stay in VRAM until selected feature extraction.
-    cancel = threading.Event()
-    def extract(family):
-        try:
-            return cache.infer_family(family,games,config,out,cancel)
-        except BaseException:
-            cancel.set()
-            raise
-    teachers = parallel([(f,extract,(f,)) for f in ('H','C')],2)
-    policies = {f:teachers[f][0] for f in teachers}
-    teacher_reports = {f:teachers[f][1] for f in teachers}
-    del teachers
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cudnn.allow_tf32 = False
-    initial = {f:fit.fit_initial(f,policies[f].arrays['c'],games,questions['train']) for f in ('H','C')}
-    results = {}
-    tasks = []
-    for family in ('H','C'):
-        devs = config['family_devices'][family]
-        for i,arm in enumerate(ARMS):
-            device = torch.device('cuda',devs[max(i-1,0)])
-            task = ((family,arm),fit.train_arm,(family,arm,policies[family].for_device(device),questions,
-                    initial[family],config,identity,out/family/arm))
-            if arm == 'A0':
-                tasks.append(task)
-    results.update(parallel(tasks,2))
-    del task
-    tasks=[]
-    for family in ('H','C'):
-        for i,arm in enumerate(ARMS[1:]):
-            device=torch.device('cuda',config['family_devices'][family][i])
-            tasks.append(((family,arm),fit.train_arm,(family,arm,policies[family].for_device(device),questions,
-                          initial[family],config,identity,out/family/arm)))
-    results.update(parallel(tasks,8))
-    compact={(f,'A0'):policies[f].arrays['c'].numpy().copy() for f in ('H','C')}
-    tasks=[]
-    for family in ('H','C'):
-        for i,arm in enumerate(ARMS[1:]):
-            device=torch.device('cuda',config['family_devices'][family][i])
-            tasks.append(((family,arm),frozen_features,(family,arm,policies[family],out,device,config['position_chunk'],identity)))
-    compact.update(parallel(tasks,8))
-    tasks.clear();policies.clear()
-    gc.collect()
-    for i in range(8):
-        with torch.cuda.device(i):
-            torch.cuda.synchronize();torch.cuda.empty_cache()
+    families = run_families(games,questions,config,identity,out)
+    teacher_reports = {f:r['teacher'] for f,r in families.items()}
+    results = {(f,a):v for f,r in families.items() for a,v in r['networks'].items()}
+    compact = {(f,a):v for f,r in families.items() for a,v in r['compact'].items()}
+    del families
     train_values,raw_values={},{}
     for role in ('train','monitor'):
         raw = b3.assemble('A0',None,None,compact['H','A0'],compact['C','A0'])

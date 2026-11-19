@@ -20,6 +20,12 @@ _TABLE = _SHARDS = _NET_CONFIG = None
 _LAST_HD = None
 
 
+def teacher_forward(fn, *args):
+    # FX tracing patches process-wide state, so it must not overlap other teacher calls.
+    with _INIT_LOCK:
+        return fn(*args)
+
+
 def split_games(lengths, parts):
     lengths = np.asarray(lengths, dtype=np.int64)
     if parts < 1 or len(lengths) < parts or (lengths <= 0).any():
@@ -230,8 +236,8 @@ def infer_family(family,games,config,out,cancel=None):
                         colors = np.concatenate([np.full(len(part[2]),int(games.iloc[i].player_color),np.int64) for i,part in zip(rows,parts)])
                         indices_side = s[a:b] ^ torch.as_tensor(colors[a:b],device=device)
                     fn = forward if b-a == size else teacher
-                    logits = fn(xb.repeat_interleave(p,0),gb.repeat_interleave(p,0),conditions,
-                                indices_side.repeat_interleave(p,0)).reshape(b-a,p,362)
+                    logits = teacher_forward(fn,xb.repeat_interleave(p,0),gb.repeat_interleave(p,0),conditions,
+                                             indices_side.repeat_interleave(p,0)).reshape(b-a,p,362)
                     legal = (xb[:,0]*(1-xb[:,1])*(1-xb[:,2])*(1-xb[:,6])).flatten(1).gt(0)
                     legal = torch.cat((legal,torch.ones_like(legal[:,:1])),1)
                     if not legal.gather(1,t[a:b,None]).all():

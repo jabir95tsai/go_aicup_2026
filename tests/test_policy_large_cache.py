@@ -1,3 +1,5 @@
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
+import threading
 import numpy as np
 import pandas as pd
 import torch
@@ -48,3 +50,32 @@ def test_shards_balance_positions():
     ranges=split_games(lengths,4)
     loads=[lengths[a:b].sum() for a,b in ranges]
     assert max(loads)-min(loads)<=max(lengths)
+
+
+def test_teacher_forward_serializes_calls_and_initialization():
+    from go_aicup.tasks.strength.policy_large.cache import _INIT_LOCK, teacher_forward
+    entered = threading.Event()
+    release = threading.Event()
+    def forward(value):
+        assert _INIT_LOCK.locked()
+        entered.set()
+        assert release.wait(5)
+        return value
+    with ThreadPoolExecutor(2) as pool:
+        first = pool.submit(teacher_forward, forward, 1)
+        try:
+            assert entered.wait(5)
+            assert not _INIT_LOCK.acquire(blocking=False)
+            second = pool.submit(teacher_forward, lambda value: value, 2)
+            with pytest.raises(TimeoutError):
+                second.result(timeout=.05)
+        finally:
+            release.set()
+        assert first.result(timeout=5) == 1
+        assert second.result(timeout=5) == 2
+    def failing_forward():
+        raise ValueError('compile failed')
+    with pytest.raises(ValueError, match='compile failed'):
+        teacher_forward(failing_forward)
+    assert not _INIT_LOCK.locked()
+    assert teacher_forward(lambda: 3) == 3

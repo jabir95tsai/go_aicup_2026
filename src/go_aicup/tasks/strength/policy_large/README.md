@@ -2,8 +2,12 @@
 
 Approved eight-GPU 200k TRAIN experiment. The full specification is in root `plan.md`.
 GPU0–3 own H shards; GPU4–7 own C shards. Each teacher sees all selected positions exactly
-once. Eight deeper experimental encoders train concurrently after the two A0 fits.
-Selected per-game features live in RAM; all thirty heads are locked before dev scoring.
+once. H and C run in separate spawned processes, each advancing immediately from its
+teacher to its initial LR, A0, four parallel experimental encoders, and selected feature
+extraction on its own four GPUs. The processes isolate teacher TF32/FX state from the
+other family's training. A shared cancellation event stops both families on failure.
+B3 waits for both families; selected per-game features cross back to the parent in RAM.
+All thirty heads are locked before dev scoring.
 No input planes, policy, q, per-game or B3 feature cache is written to disk.
 
 ```bash
@@ -11,8 +15,7 @@ PYTHONPATH=src:. ~/.conda/envs/go/bin/python -m go_aicup.tasks.strength.policy_l
 sbatch src/go_aicup/tasks/strength/policy_large/train.slurm
 ```
 
-The user explicitly requested full submission without a GPU smoke test. CPU validation
-and source/capacity checks remain mandatory. Maximum allocation: eight H200, 96 CPUs,
+CPU validation and source/capacity checks remain mandatory. Maximum allocation: eight H200, 96 CPUs,
 200G RAM, 36h (288 allocated GPU-h). Output: config's out / Slurm job ID.
 
 `data/` contains only split and question tables; `source/` archives source code. Family/arm
