@@ -25,7 +25,9 @@ H_CACHE = (
     PROCESSED / "strength_features/humansl/p3_komi/h_train",
     PROCESSED / "strength_features/humansl/train20_hc/h_hd1",
 )
-H_MEAN_TOLERANCE = 0.015
+# Re-extracted H9 means differ from the canonical cache by GPU batching noise; job 812279 saw
+# 0.0157 on a 2,048-game part. A side swap or komi/profile mismatch moves means by >= 0.1.
+H_MEAN_TOLERANCE = 0.03
 C_MEAN_TOLERANCE = 0.005
 
 

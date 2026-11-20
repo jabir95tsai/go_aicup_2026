@@ -87,3 +87,57 @@ def test_h_backfill_dispatch_keeps_games_and_canonical_rows_aligned(monkeypatch,
     np.testing.assert_array_equal(offsets[:, 0], games.game_index)
     np.testing.assert_array_equal(offsets[:, 1], -games.game_index)
     assert error == 0 and reused == 1
+
+
+def test_export_test_offsets_align_shards_with_release_rows(monkeypatch, tmp_path):
+    import json
+    from go_aicup.features import humansl as hfeat
+    from go_aicup.tasks.strength.cvec2_policy import export
+
+    rng = np.random.default_rng(5)
+    index = np.array([3, 8, 1, 6])
+    hd1 = np.array([0, 1, 0, 0])
+    moves = {g: rng.normal(size=(6, 15)) for g in index}
+    cmoves = {g: rng.normal(size=(6, 10)) for g in index}
+    slots = np.tile([0, 1], 3)
+    x = np.zeros((4, 52))
+    x[:, 50] = hd1
+    for row, g in enumerate(index):
+        h15, _ = means_and_offsets(moves[g], slots, 1)
+        x[row, :30] = h15[0]
+        x[row, 30:50] = means_and_offsets(cmoves[g], slots, 1)[0][0]
+
+    def h_shard(path, ids, komi):
+        path.mkdir(parents=True)
+        pd.DataFrame({"game_index": ids, "player_color": 0}).to_parquet(path / "games.parquet")
+        (path / "meta.json").write_text(json.dumps({"profiles": hfeat.PROFILES, "rules": hfeat.RULES,
+                                                    "model": hfeat.MODEL.name, "komi": komi}))
+        np.save(path / "offsets.npy", np.arange(len(ids) + 1) * 6)
+        np.save(path / "colors.npy", np.tile(np.tile([0, 1], 3), len(ids)))
+        np.save(path / "done.npy", np.ones((len(ids), 15), bool))
+        np.save(path / "logp.npy", np.vstack([moves[g] for g in ids]))
+
+    def c_shard(path, ids, komi):
+        path.mkdir(parents=True)
+        pd.DataFrame({"game_index": ids}).to_parquet(path / "games.parquet")
+        (path / "meta.json").write_text(json.dumps({"per_move": True, "finetuned": None, "komi": komi,
+                                                    "vectors": "x/cvec_v2/learn/vectors.pt"}))
+        np.save(path / "done.npy", np.ones(len(ids), bool))
+        np.save(path / "move_logp.npy", np.vstack([cmoves[g] for g in ids]))
+        np.save(path / "move_slot.npy", np.concatenate([slots + 2 * i for i in range(len(ids))]))
+
+    h_shard(tmp_path / "rel/rank_public/humansl/shard_0", [8, 1, 3, 6], 6.5)
+    h_shard(tmp_path / "p3/h_test_public/shard_0", [8], .5)
+    c_shard(tmp_path / "c/c_test_public_hd0/shard_0", [6, 3, 1], 6.5)
+    c_shard(tmp_path / "c/c_test_public_hd1/shard_0", [8], .5)
+    monkeypatch.setattr(export.prod, "RELEASE", tmp_path / "rel")
+    monkeypatch.setattr(export.p3, "OUT", tmp_path / "p3")
+    monkeypatch.setattr(export, "C_CACHE", tmp_path / "c")
+    h_off, c_off, audit = export.test_offsets("public", x, index)
+    assert audit["h_max_error"] < 1e-6 and audit["c_max_error"] < 1e-6
+    arms = stage1_features(x, H_COLUMNS, h_off, c_off)
+    for row, g in enumerate(index):
+        np.testing.assert_allclose(arms["C"][row, :18], log_softmax(moves[g][:, H_COLUMNS[:9]], axis=1)
+                                   .reshape(3, 2, 9).mean(0).reshape(18), atol=1e-6)
+        np.testing.assert_allclose(arms["C"][row, 18:38], log_softmax(cmoves[g], axis=1)
+                                   .reshape(3, 2, 10).mean(0).reshape(20), atol=1e-5)
