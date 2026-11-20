@@ -63,7 +63,7 @@ draws. It writes `question_scores.parquet`, `question_predictions.parquet`,
 features and a 40-column compatibility projection.
 
 ```bash
-SMOKE_STEPS=3 sbatch --partition=dev --time=00:15:00 \
+SMOKE_STEPS=3 sbatch --partition=8gpus --time=00:15:00 \
   src/go_aicup/tasks/strength/cvec2_policy/all.slurm
 ```
 
