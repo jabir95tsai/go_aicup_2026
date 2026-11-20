@@ -321,7 +321,8 @@ def played_logp(phi, b, slot, pos, theta, chunk=2_000):
 
 
 # ---------------------------------------------------------------- evaluation
-def evaluate(args) -> None:
+def _context(theta_fixed=None) -> dict:
+    """shared evaluation setup: bench positions and features, theta_pop, base fusion, draw and LLR."""
     import torch
 
     from go_aicup.data import cv
@@ -391,6 +392,10 @@ def evaluate(args) -> None:
     pos_p, own_p = positions_of([pop["game_index"].to_numpy()])
     zero = torch.zeros(DIM, device=device, dtype=torch.float64)
     theta_pop = fit(PHI, B, SLOT, pos_p, own_p, 1, zero, 10.0)[0]
+    if theta_fixed is not None:            # later rounds reuse the stage-0 value (as the export does)
+        fixed = torch.tensor(theta_fixed, device=device, dtype=torch.float64)
+        report["theta_pop_refit_max_diff"] = float((theta_pop - fixed).abs().max())
+        theta_pop = fixed
     report["theta_pop"] = theta_pop.cpu().tolist()
     print("theta_pop", np.round(theta_pop.cpu().numpy(), 3).tolist(), flush=True)
 
@@ -458,6 +463,31 @@ def evaluate(args) -> None:
     lp = played_logp(PHI, B, SLOT, pos_q, torch.stack([theta_pop, theta_pop]))
     report["zero_check"] = float((lp[:, 0] - lp[:, 1]).abs().max())
     assert report["zero_check"] < 1e-9
+
+    return dict(report=report, device=device, draw=draw, llr=llr, theta_pop=theta_pop, scale=scale,
+                env=env, PHI=PHI, B=B, SLOT=SLOT, positions_of=positions_of)
+
+
+def evaluate(args) -> None:
+    import torch
+
+    from go_aicup.data import cv
+    from go_aicup.features.humansl import CACHE, cache_games
+    from go_aicup.tasks.identity import data, twocolor
+    from go_aicup.tasks.identity.seqagg import MoveStore, game_vectors, load_head
+    from scripts.identity.pid2_cheap import (COLS, buckets, cosines, normalise, official, paired,
+                                             style, verdict)
+    from scripts.identity.pid2_diag_d123a import bucket_means
+    from scripts.identity.pid2_multilevel_fuse import OUT as STAGE1, STAGE0, PopTable, level_scores
+    from scripts.identity.pid2_ogs_a2_eval import ENC, OUT as A2OUT, RUN
+    from scripts.identity.pid2_paired import points
+    from scripts.identity.pid2_seqagg import BENCH
+    from scripts.identity.pid2_transductive import load
+
+    OUT.mkdir(parents=True, exist_ok=True)
+    ctx = _context()
+    report, device, draw, llr, theta_pop, scale = (ctx[k] for k in ("report", "device", "draw", "llr", "theta_pop", "scale"))
+    env, PHI, B, SLOT, positions_of = (ctx[k] for k in ("env", "PHI", "B", "SLOT", "positions_of"))
 
     # ---- development: sigma x lambda
     dev_rows, alone_rows = [], []
@@ -541,6 +571,111 @@ def evaluate(args) -> None:
     (OUT / "report.json").write_text(json.dumps(report, indent=1, default=float))
 
 
+# ---------------------------------------------------------------- round 2: wider grid + per-k
+R2 = OUT / "round2"
+R2_DEV = [(0, d) for d in range(2800, 2820)]
+R2_SEALED = [(0, d) for d in range(2900, 2920)] + [(1, d) for d in range(2900, 2930)]
+R2_SIGMAS = (3.0, 10.0)
+R2_LAMBDAS = (2.0, 3.0, 4.0, 6.0, 8.0)
+R2_MULTS = (0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0)
+B0 = (3.0, 2.0)
+
+
+def evaluate2(_args) -> None:
+    """L: (sigma, lambda) on a wider grid; LK: L plus a per-k style multiplier; both against B0
+    (sigma 3, lambda 2, multiplier 1.5) on fresh sealed draws (registered in RESULTS.md, 11/20)."""
+    from scripts.identity.pid2_cheap import COLS, buckets, official, paired, verdict
+
+    R2.mkdir(parents=True, exist_ok=True)
+    stage0 = json.loads((OUT / "report.json").read_text())
+    assert (stage0["dev"]["chosen"]["sigma"], stage0["dev"]["chosen"]["lambda"]) == B0
+    ctx = _context(stage0["theta_pop"])
+    report, draw, llr, scale = ctx["report"], ctx["draw"], ctx["llr"], ctx["scale"]
+    print("theta_pop refit max diff", report["theta_pop_refit_max_diff"], flush=True)
+
+    def fused(x, l, lam, mk):
+        m = np.array([mk[int(k)] for k in x["ks"]])[:, None]
+        return x["rest"] + scale * m * x["style"] + lam * l
+
+    flat = {k: BASE_M for k in (1, 2, 3, 5)}
+    # ---- development
+    cache = {}
+    rows = []
+    for pool, d in R2_DEV:
+        x = draw(pool, d)
+        ls = {s: llr(x, s)[0] for s in R2_SIGMAS}
+        cache[d] = (x, ls)
+        for s in R2_SIGMAS:
+            for lam in R2_LAMBDAS:
+                rows.append({"draw": d, "arm": f"s{s:g}_l{lam:g}",
+                             **buckets(official(fused(x, ls[s], lam, flat), x["owner"]), x["ks"])})
+        print(f"dev draw {d}", flush=True)
+    dev = pd.DataFrame(rows)
+    ref = f"s{B0[0]:g}_l{B0[1]:g}"
+    grid = paired(dev, ref).set_index("arm")
+    best = grid["d_all"].idxmax()
+    sigma, lam = float(best.split("_")[0][1:]), float(best.split("_")[1][1:])
+    report["dev_grid"] = grid[["d_1", "d_2", "d_3", "d_5", "d_all", "se_all", "pos"]].to_dict(orient="index")
+    report["L"] = {"sigma": sigma, "lambda": lam, "dev_delta_vs_B0": float(grid.loc[best, "d_all"]),
+                   "grid_edge": bool(sigma == R2_SIGMAS[-1] or lam == R2_LAMBDAS[-1])}
+    print("dev grid vs B0:\n", grid[["d_1", "d_2", "d_3", "d_5", "d_all", "se_all"]].round(4).to_string(),
+          f"\nL: sigma {sigma} lambda {lam}", flush=True)
+    mrows = []
+    for d, (x, ls) in cache.items():
+        for m in R2_MULTS:
+            mk = {k: m for k in (1, 2, 3, 5)}
+            mrows.append({"draw": d, "m": m, **buckets(official(fused(x, ls[sigma], lam, mk), x["owner"]), x["ks"])})
+    mean_m = pd.DataFrame(mrows).groupby("m")[COLS].mean()
+    mk = {}
+    for k in (1, 2, 3, 5):
+        col = mean_m[str(k)]
+        ties = [m for m in R2_MULTS if col[m] == col.max()]
+        mk[k] = min(ties, key=lambda m: abs(np.log(m / BASE_M)))
+    report["LK"] = {"m_k": mk, "dev_table": mean_m.reset_index().to_dict(orient="records"),
+                    "grid_edge": [k for k, m in mk.items() if m in (R2_MULTS[0], R2_MULTS[-1])]}
+    print("per-k dev means (at L):\n", mean_m.round(4).to_string(), "\nchosen m_k:", mk, flush=True)
+    del cache
+    (R2 / "report.json").write_text(json.dumps(report, indent=1, default=float))
+
+    # ---- sealed
+    same = (sigma, lam) == B0
+    out = []
+    for pool, d in R2_SEALED:
+        x = draw(pool, d)
+        l0 = llr(x, B0[0])[0]
+        ll = l0 if sigma == B0[0] else llr(x, sigma)[0]
+        arms = {"B0": fused(x, l0, B0[1], flat), "LK": fused(x, ll, lam, mk), "ogsa12w": x["base"]}
+        if not same:
+            arms["L"] = fused(x, ll, lam, flat)
+        for name, sc in arms.items():
+            out.append({"pool": pool, "draw": d, "arm": name, **buckets(official(sc, x["owner"]), x["ks"])})
+        print(f"sealed pool {pool} draw {d}", flush=True)
+    frame = pd.DataFrame(out)
+    frame.to_csv(R2 / "sealed_per_draw.csv", index=False)
+    t1, t0 = paired(frame[frame.pool == 1], "B0"), paired(frame[frame.pool == 0], "B0")
+    arms = ["LK"] + ([] if same else ["L"])
+    report["sealed"] = {"pool1": t1.to_dict(orient="records"), "pool0": t0.to_dict(orient="records"),
+                        "verdict": {a: verdict(t1, t0, a) for a in arms}}
+    if not same:
+        lk_l = paired(frame[frame.pool == 1], "L").set_index("arm").loc["LK"]
+        report["sealed"]["LK_minus_L_pool1"] = {"delta": float(lk_l["d_all"]), "se": float(lk_l["se_all"])}
+    v = report["sealed"]["verdict"]
+    if v["LK"]["pass"] and (same or report["sealed"]["LK_minus_L_pool1"]["delta"] >= 0):
+        final = "LK"
+    elif not same and v["L"]["pass"]:
+        final = "L"
+    else:
+        final = "B0"
+    report["final"] = final
+    report["final_params"] = {"B0": {"sigma": B0[0], "lambda": B0[1], "m_k": flat},
+                              "L": {"sigma": sigma, "lambda": lam, "m_k": flat},
+                              "LK": {"sigma": sigma, "lambda": lam, "m_k": mk}}[final]
+    print("sealed pool 1 vs B0:\n", t1.round(4).to_string(index=False), "\nsealed pool 0 vs B0:\n",
+          t0.round(4).to_string(index=False), "\nverdicts:", json.dumps(v), "\nfinal:", final,
+          json.dumps(report["final_params"]), flush=True)
+    (R2 / "report.json").write_text(json.dumps(report, indent=1, default=float))
+
+
 # ---------------------------------------------------------------- official export
 def position_tensors(arr: dict, moves_of, device):
     """sorted positions -> (B, PHI, SLOT tensors, first / end position per game id)."""
@@ -584,11 +719,19 @@ def export(args) -> None:
     from scripts.identity.pid2_style_export import STORE
 
     job = os.environ.get("SLURM_JOB_ID", "local")
-    target = SUB / f"{job}-lik.csv"
-    assert not target.exists(), target
     rep = json.loads((OUT / "report.json").read_text())
     assert rep["sealed"]["verdict"]["pass"], "stage 0 did not pass the switch rule"
     sigma, lam = rep["dev"]["chosen"]["sigma"], rep["dev"]["chosen"]["lambda"]
+    mk = {k: BASE_M for k in (1, 2, 3, 5)}
+    tag = "lik"
+    if args.round2:                        # round-2 choice (wider grid / per-k), only if it replaced B0
+        r2 = json.loads((R2 / "report.json").read_text())
+        assert r2["final"] != "B0", "round 2 kept B0; the stage-0 export stands"
+        fp = r2["final_params"]
+        sigma, lam, mk = fp["sigma"], fp["lambda"], {int(k): float(v) for k, v in fp["m_k"].items()}
+        tag = f"lik2{r2['final'].lower()}"
+    target = SUB / f"{job}-{tag}.csv"
+    assert not target.exists(), target
     device = torch.device("cuda")
     theta_pop = torch.tensor(rep["theta_pop"], device=device, dtype=torch.float64)
     official = OUT / "official"
@@ -636,7 +779,7 @@ def export(args) -> None:
     choice = json.loads((STAGE1 / "dev_choice.json").read_text())["chosen"]
     base = pd.read_csv(BASE, dtype=str).set_index("question_id")
     out = base.copy()
-    report = {"sigma": sigma, "lambda": lam, "base": str(BASE.relative_to(ROOT)), "parts": {}}
+    report = {"sigma": sigma, "lambda": lam, "m_k": mk, "base": str(BASE.relative_to(ROOT)), "parts": {}}
     for p_i, (part, prefix) in enumerate((("public", "pub2"), ("private", "priv2"))):
         pool_meta, q_meta, _ = stores[part]
         parts = {}
@@ -647,9 +790,10 @@ def export(args) -> None:
                 cand = np.load(d / "candidates.npy", allow_pickle=True).astype(str)
                 qids = pd.read_parquet(d / "predictions.parquet").question_id.astype(str).tolist()
         ml = dict(np.load(DAY0 / f"{part}2_d4_9600_seqB_ml" / "parts.npz"))
-        s_base = (parts["B"]["opening"] + parts["B"]["category"]
-                  + choice["lambda1"] * ml["ml_L1"] + choice["lambda2"] * ml["ml_L2"]
-                  + 16 * sum(w * parts[n]["style"] for n, (_, w) in ENC.items()))
+        rest = (parts["B"]["opening"] + parts["B"]["category"]
+                + choice["lambda1"] * ml["ml_L1"] + choice["lambda2"] * ml["ml_L2"])
+        style_term = 16 * sum(w * parts[n]["style"] for n, (_, w) in ENC.items())     # multiplier 1.5 inside
+        s_base = rest + style_term
         np.testing.assert_array_equal(cand[top5(s_base)], base.loc[qids, COLS].to_numpy())
         players = pool_meta["player_id"].astype(str).to_numpy()
         assert np.array_equal(np.array(sorted(set(players))), cand)
@@ -666,7 +810,8 @@ def export(args) -> None:
         llr = llr.cpu().numpy()
         np.savez(official / f"{prefix}.npz", llr=llr, theta=th.cpu().numpy(), base=s_base, k=ks,
                  candidates=cand, qids=np.array(qids))
-        ranked = cand[top5(s_base + lam * llr)]
+        factor = np.array([mk[int(k)] / BASE_M for k in ks])[:, None]
+        ranked = cand[top5(rest + factor * style_term + lam * llr)]
         out.loc[qids, COLS] = ranked
         ch = ranked[:, 0] != base.loc[qids, "top_1"].to_numpy()
         alone_top1 = cand[llr.argmax(1)] == base.loc[qids, "top_1"].to_numpy()
@@ -738,11 +883,14 @@ def main() -> None:
     p.add_argument("--limit", type=int, default=0)
     p.add_argument("--workers", type=int, default=11)
     sub.add_parser("evaluate")
+    sub.add_parser("evaluate2")
     e = sub.add_parser("export")
     e.add_argument("--workers", type=int, default=11)
+    e.add_argument("--round2", action="store_true", help="use the round-2 choice (refuses if it kept B0)")
     sub.add_parser("selfcheck")
     args = parser.parse_args()
-    {"games": games, "policy": policy, "evaluate": evaluate, "export": export, "selfcheck": selfcheck}[args.cmd](args)
+    {"games": games, "policy": policy, "evaluate": evaluate, "evaluate2": evaluate2, "export": export,
+     "selfcheck": selfcheck}[args.cmd](args)
 
 
 if __name__ == "__main__":
