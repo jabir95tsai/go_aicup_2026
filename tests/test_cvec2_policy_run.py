@@ -89,6 +89,43 @@ def test_h_backfill_dispatch_keeps_games_and_canonical_rows_aligned(monkeypatch,
     assert error == 0 and reused == 1
 
 
+def test_h_backfill_resume_reuses_saved_parts_and_resplits_the_rest(monkeypatch, tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    games = pd.DataFrame({"game_index": [70, 24, 12, 98, 51, 33],
+                          "player_color": 0, "handicap": 0})
+    canon = np.arange(6 * 18, dtype=float).reshape(6, 18)
+    monkeypatch.setattr(played, "H_CACHE", [])
+    monkeypatch.setattr(played, "ProcessPoolExecutor", lambda workers, **_: ThreadPoolExecutor(workers))
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    old = tmp_path / "h_backfill_06"
+    old.mkdir()
+    np.savez(old / "part_000000.npz", games=[70, 98], raw=canon[[0, 3]], offsets=[[70, -70], [98, -98]])
+    np.savez(old / "part_002048.partial.npz", games=[24], raw=canon[[1]], offsets=[[0, 0]])
+    seen = []
+
+    def part(table, raw, path):
+        seen.append(table.game_index.tolist())
+        if 33 in table.game_index.tolist():
+            raise ValueError("boom")
+        np.savez(path, games=table.game_index, raw=raw, offsets=np.column_stack((table.game_index, -table.game_index)))
+
+    monkeypatch.setattr(played, "_h_part", part)
+    try:
+        played.h_offsets(games, canon, tmp_path)
+        raise AssertionError("expected failure")
+    except RuntimeError as error:
+        assert "boom" in str(error)
+    assert sorted(seen) == [[12, 33], [24, 51]]
+    assert len(list(tmp_path.glob("h_backfill_*_01/part_000000.error.json"))) == 1
+    monkeypatch.setattr(played, "_h_part", lambda table, raw, path: np.savez(
+        path, games=table.game_index, raw=raw, offsets=np.column_stack((table.game_index, -table.game_index))))
+    (next(tmp_path.glob("h_backfill_*_01/part_000000.error.json"))).unlink()
+    offsets, error, reused = played.h_offsets(games, canon, tmp_path)
+    np.testing.assert_array_equal(offsets[:, 0], games.game_index)
+    assert error == 0 and reused == 0
+
+
 def test_export_test_offsets_align_shards_with_release_rows(monkeypatch, tmp_path):
     import json
     from go_aicup.features import humansl as hfeat

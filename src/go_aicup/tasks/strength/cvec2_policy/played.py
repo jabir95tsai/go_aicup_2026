@@ -1,6 +1,7 @@
 """Reuse cvec2 played-move caches and fold missing H9 directly into normalization offsets."""
 from concurrent.futures import ProcessPoolExecutor
 from itertools import product
+import hashlib
 import json
 import multiprocessing as mp
 import os
@@ -105,33 +106,53 @@ def c_offsets(games, canon):
     return offsets, max_error
 
 
+def _h_part(table, canon, path):
+    # KataGo's existing extraction API writes raw arrays. Keep them on local scratch only.
+    with TemporaryDirectory(prefix="cvec2-h9-") as scratch:
+        scratch = Path(scratch)
+        try:
+            humansl.run(humansl.cache_games(table.game_index), PROFILES, scratch,
+                        komi=6.5, overrides=f'numAnalysisThreads=64,logFile={scratch / "katago.log"}')
+        except Exception:
+            stderr = scratch / "katago_stderr.log"
+            if stderr.is_file():
+                shutil.copyfile(stderr, path.with_suffix(".stderr.log"))
+            raise
+        mean, offsets = h_means(scratch, table)
+    gap = np.abs(mean - canon)
+    error = float(gap.max())
+    if not np.isfinite(error) or error > H_MEAN_TOLERANCE:
+        worst = np.nanmax(gap, axis=1)
+        write_json(path.with_suffix(".error.json"), {
+            "kind": "mean_tolerance", "max_error": error, "tolerance": H_MEAN_TOLERANCE,
+            "games": len(table), "games_over_tolerance": int((~(worst <= H_MEAN_TOLERANCE)).sum()),
+            "worst_games": table.game_index.to_numpy()[np.argsort(-np.nan_to_num(worst, nan=np.inf))[:20]].tolist(),
+            "worst_errors": np.sort(np.nan_to_num(worst, nan=np.inf))[::-1][:20].tolist()})
+        raise ValueError(f"H played-move means differ from cvec2 in {path}: {error:.6g}")
+    partial = path.with_suffix(".partial.npz")
+    np.savez(partial, games=table.game_index, raw=mean, offsets=offsets)
+    partial.replace(path)
+
+
 def _h_worker(device, games, canon, out):
+    """Backfill one GPU's slice in 2,048-game parts; a failed part is logged and skipped, then reported."""
     os.environ["CUDA_VISIBLE_DEVICES"] = device
     out.mkdir(parents=True, exist_ok=True)
-    files = []
+    files, errors = [], []
     for start in range(0, len(games), 2048):
-        table = games.iloc[start:start + 2048]
         path = out / f"part_{start:06d}.npz"
         if not path.exists():
-            # KataGo's existing extraction API writes raw arrays. Keep them on local scratch only.
-            with TemporaryDirectory(prefix="cvec2-h9-") as scratch:
-                scratch = Path(scratch)
-                try:
-                    humansl.run(humansl.cache_games(table.game_index), PROFILES, scratch,
-                                komi=6.5, overrides=f'numAnalysisThreads=64,logFile={scratch / "katago.log"}')
-                except Exception:
-                    stderr = scratch / "katago_stderr.log"
-                    if stderr.is_file():
-                        shutil.copyfile(stderr, path.with_suffix(".stderr.log"))
-                    raise
-                mean, offsets = h_means(scratch, table)
-                error = float(np.abs(mean - canon[start:start + len(table)]).max())
-                if not np.isfinite(error) or error > H_MEAN_TOLERANCE:
-                    raise ValueError(f"H played-move means differ from cvec2 in {path}: {error:.6g}")
-                partial = path.with_suffix(".partial.npz")
-                np.savez(partial, games=table.game_index, raw=mean, offsets=offsets)
-                partial.replace(path)
+            try:
+                _h_part(games.iloc[start:start + 2048], canon[start:start + 2048], path)
+            except Exception as error:
+                if not path.with_suffix(".error.json").exists():
+                    write_json(path.with_suffix(".error.json"), {"kind": type(error).__name__, "error": repr(error)})
+                print(json.dumps({"h_backfill_error": str(path), "error": repr(error)}), flush=True)
+                errors.append(f"{path}: {error!r}")
+                continue
         files.append(path)
+    if errors:
+        raise RuntimeError("H backfill parts failed: " + "; ".join(errors))
     return files
 
 
@@ -167,23 +188,38 @@ def h_offsets(games, canon, out):
             raw, norm = h_means(shard, games.iloc[rows])
             ingest(table.game_index, raw, norm, shard)
 
+    reused = int(np.isfinite(offsets).all(axis=1).sum())
+    # Parts from earlier attempts are reused whatever slice they came from, so a resume splits
+    # only the remaining games evenly over the GPUs it has.
+    for path in sorted(Path(out).glob("h_backfill_*/part_*.npz")):
+        if path.name.count(".") == 1:
+            with np.load(path, allow_pickle=False) as data:
+                ingest(data["games"], data["raw"], data["offsets"], path)
     missing_rows = np.flatnonzero(~np.isfinite(offsets).all(axis=1))
     missing = games.iloc[missing_rows]
     if missing.handicap.eq(1).any():
         raise ValueError("missing original HD1 H played-move coverage")
-    reused = len(games) - len(missing)
     devices = os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",")
     if len(missing) and (any(not name for name in devices) or len(set(devices)) != len(devices)):
         raise ValueError("set CUDA_VISIBLE_DEVICES to distinct allocated GPUs for H backfill")
     if len(missing):
+        tag = hashlib.sha256(np.ascontiguousarray(missing.game_index.to_numpy(np.int64)).tobytes()).hexdigest()[:8]
+        failures = []
         with ProcessPoolExecutor(len(devices), mp_context=mp.get_context("spawn")) as pool:
             tasks = [pool.submit(_h_worker, device, missing.iloc[i::len(devices)],
-                                 canon[missing_rows[i::len(devices)]], out / f"h_backfill_{i:02d}")
+                                 canon[missing_rows[i::len(devices)]], out / f"h_backfill_{tag}_{i:02d}")
                      for i, device in enumerate(devices) if i < len(missing)]
             for task in tasks:
-                for path in task.result():
+                try:
+                    paths = task.result()
+                except Exception as error:
+                    failures.append(repr(error))
+                    continue
+                for path in paths:
                     with np.load(path, allow_pickle=False) as data:
                         ingest(data["games"], data["raw"], data["offsets"], path)
+        if failures:
+            raise RuntimeError("H backfill failed; finished parts are kept for resume: " + " | ".join(failures))
     if not np.isfinite(offsets).all():
         raise ValueError("missing H played-move offsets")
     return offsets, max_error, reused
