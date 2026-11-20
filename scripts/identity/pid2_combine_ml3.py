@@ -6,6 +6,8 @@ with only the added-set style term changed, matching the sealed arms of pid2_ml_
   ml14400  style = 0.5 seqB + 0.5 E2E14400
   ogsmix   style = 0.5 seqB + 0.5 A1 (E2E-scratch 9,600 steps on Yugen+OGS)
   ogsw     style = 1.5 (0.25 seqB + 0.75 A1) (pid2_ogs_weight_sweep, job 811134)
+  ogsa2w   style = 1.5 (0.25 seqB + 0.75 A2) (A2w of pid2_ogs_a2_eval, job 811844; LB probe, gate not passed)
+  ogsa12w  style = 1.5 (0.25 seqB + 0.75 mean(A1, A2)) (A12w, same job; LB probe, gate not passed)
 Original test-set rows copied from 772748-hung.csv. Checks that the current base file is reproduced first.
 Refuses to overwrite.
 
@@ -30,7 +32,9 @@ COLS = [f"top_{i}" for i in range(1, 6)]
 STYLE = {"mix3ml": {"_seqB": 0.5, "_e2e9600": 0.25, "_e2e14400": 0.25},
          "ml14400": {"_seqB": 0.5, "_e2e14400": 0.5},
          "ogsmix": {"_seqB": 0.5, "_e2eogs9600": 0.5},
-         "ogsw": {"_seqB": 0.375, "_e2eogs9600": 1.125}}  # m 1.5 x (0.25 seqB + 0.75 A1), weight sweep 811134
+         "ogsw": {"_seqB": 0.375, "_e2eogs9600": 1.125},  # m 1.5 x (0.25 seqB + 0.75 A1), weight sweep 811134
+         "ogsa2w": {"_seqB": 0.375, "_e2eogsA2": 1.125},
+         "ogsa12w": {"_seqB": 0.375, "_e2eogs9600": 0.5625, "_e2eogsA2": 0.5625}}
 
 
 def main() -> None:
