@@ -9,7 +9,7 @@
 | 資源 | 版本 | 來源 | 授權 | 用途 | 狀態 | 實際貢獻 |
 |---|---|---|---|---|---|---|
 | KataGo Human SL 網路 | `b18c384nbt-humanv0.bin.gz`（2024-07；sha256 `637746e4…4ab5`） | [KataGo v1.15.0 release](https://github.com/lightvector/KataGo/releases/tag/v1.15.0) | KataGo Neural Network License（MIT 式，須保留版權聲明）—[已驗證](https://katagotraining.org/network_license/) | 競賽二：15 個 `rank_*` profile 下實際著手的 log-likelihood，本人／對手各取每盤平均（A-039～A-047） | **使用中**（2026-10-24 起；正式候選模型的特徵） | Valid-U 1,000 題：A-024＋C2 0.5532 → A-024＋HumanSL＋B2 0.6833（+0.130，A-044）；單用 HumanSL 0.657（A-045） |
-| KataGo Human SL 網路（PyTorch checkpoint） | `b18c384nbt-humanv0.ckpt`（sha256 `84b23476…c8b27`；使用一般權重，非 SWA） | [KataGo v1.15.0 release](https://github.com/lightvector/KataGo/releases/tag/v1.15.0) | 同上 | PyTorch 重現引擎 policy（A-050）、主幹表示（A-051、A-052） | 使用中（實驗；未進正式模型） | 主幹表示加入主線後 S-select −0.035（A-052）；未用於提交 |
+| KataGo Human SL 網路（PyTorch checkpoint） | `b18c384nbt-humanv0.ckpt`（sha256 `84b23476…c8b27`；使用一般權重，非 SWA） | [KataGo v1.15.0 release](https://github.com/lightvector/KataGo/releases/tag/v1.15.0) | 同上 | PyTorch 重現引擎 policy（A-050）、主幹表示（A-051、A-052）。**競賽一（2026-11-20 起）**：凍結網路，metadata 換成我方自行學得的 C v2 幽玄級別向量（C／A／2D／5D 四個條件），取每個本人落子位置的前 32 名 policy 當玩家條件走子似然的基底（`scripts/identity/pid2_likelihood.py`）；只用於特徵抽取，不微調 | **使用中**：競賽一最終提交 `submissions/pid/817757-lik2lk.csv` 的新增集似然項 | 競賽一驗證台封存 pool 1：ogsa12w 0.7114 → 加似然項 0.7418（+0.030，z 17.6）→ 再加逐 k 倍率 0.7459；Public 0.8388310 → `817714-lik.csv` 0.8464716 → `817757-lik2lk.csv` 0.8461584（`RESULTS.md` 11/20）。競賽二主幹表示加入主線後 S-select −0.035（A-052），未用於競賽二提交 |
 | KataGo 強網路 | `kata1-b18c384nbt-s9996604416-d4316597426.bin.gz`（sha256 `9d7a6afe…a51f1d`） | [katagotraining.org/networks](https://katagotraining.org/networks/) | KataGo Neural Network License（同上） | 競賽二：每手目數／勝率損失等著手品質特徵（A-048） | 使用中（實驗；未進正式模型，D-003 保留待 LB） | 加入主線後 S-select −0.0024（A-048） |
 
 ## 開源程式
@@ -27,7 +27,7 @@
 
 | 資源 | 來源 | 授權 | 用途 | 狀態 |
 |---|---|---|---|---|
-| OGS（Online-Go.com）棋譜合集 2013–2025-05，by-username SGF（`sgfs-by-username.tar.gz`，16.2 GB） | [za3k.com/ogs](https://za3k.com/ogs/ogs_games_2013_to_2025-05/sgfs-by-username.tar.gz)（za3k 整理） | 發布頁載明經 OGS 同意重散布，README 記載 OGS 同意研究使用；**用於本競賽與得獎交付已於 2026-11-20 經使用者確認** | 競賽一：只用於訓練風格編碼器。過濾條件為 19 路、ranked、HA≤1、無擺子、已完成、≥60 手、對手是真人。A1 用 40,000 人×20 盤，A2 用全部 82,481 人×10 盤，幽玄抽樣比例 0.5。不參與推論、候選庫或測試題 | 使用中：最終提交 `submissions/pid/ogsa12w.csv`（新增集風格項 1.5×(0.25 seqB＋0.75·mean(A1, A2))）；Public 0.8388310，對不用 OGS 的 `hung-seqB-e2emix-ml.csv`（0.8245254）+0.0143（`RESULTS.md` 11/18–11/20、D-008） |
+| OGS（Online-Go.com）棋譜合集 2013–2025-05，by-username SGF（`sgfs-by-username.tar.gz`，16.2 GB） | [za3k.com/ogs](https://za3k.com/ogs/ogs_games_2013_to_2025-05/sgfs-by-username.tar.gz)（za3k 整理） | 發布頁載明經 OGS 同意重散布，README 記載 OGS 同意研究使用；**用於本競賽與得獎交付已於 2026-11-20 經使用者確認** | 競賽一：只用於訓練風格編碼器。過濾條件為 19 路、ranked、HA≤1、無擺子、已完成、≥60 手、對手是真人。A1 用 40,000 人×20 盤，A2 用全部 82,481 人×10 盤，幽玄抽樣比例 0.5。不參與推論、候選庫或測試題 | 使用中：最終提交 `submissions/pid/817757-lik2lk.csv`，A1／A2 仍為新增集風格項的一部分（2026-11-20 前的最終檔為 `ogsa12w.csv`：新增集風格項 1.5×(0.25 seqB＋0.75·mean(A1, A2))）；Public 0.8388310，對不用 OGS 的 `hung-seqB-e2emix-ml.csv`（0.8245254）+0.0143（`RESULTS.md` 11/18–11/20、D-008） |
 
 ## 方法參考（引用，不含程式碼）
 
