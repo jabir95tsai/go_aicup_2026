@@ -4032,6 +4032,7 @@ A0/R10改動與既有cv2-l10完全相同；CNN-Z32多改2題來自原模型預�
   - `submissions/pid/ogsa2w.csv`（sha256 `66761424`，1,600 列）：新增集風格項＝1.5×(0.25 seqB＋0.75 A2)。改 top-1 對 ogsw：pub2 44、priv2 41；原測試集 0。
   - `submissions/pid/ogsa12w.csv`（sha256 `bb3be137`）：1.5×(0.25 seqB＋0.75·mean(A1, A2))。改 top-1 對 ogsw：pub2 22、priv2 16；原測試集 0。
   - 預期 Public 對 ogsw（0.8340）：A2w 約 +0.001、A12w 約 +0.0016（pool 1 Δ×新增集占 Public 一半），都遠小於標準誤 0.02 → **LB 升降都不改基底**，維持 ogsw；OGS 授權確認前最終提交仍用 `hung-seqB-e2emix-ml.csv`。
+  - **LB（2026-11-20）：** `ogsa2w.csv` 12:39 Public **0.8368601**（對 ogsw 0.8340333 **+0.0028**；預期 +0.001）；`ogsa12w.csv` 12:40 Public **0.8388310**（28/117，**+0.0048**；預期 +0.0016）。兩者方向與本地一致，但都遠小於標準誤 0.02；依事前規則基底維持 ogsw。A12w 本地 pool 1 +0.0033（z 2.57、各 k 皆正、pool 0 +0.0040），只差 Δ 門檻。
 
 ### 2026-11-19：cvec2 逐手正規化與全盤 policy（只提交第一階段）
 
@@ -4058,4 +4059,4 @@ GPU 效能與正式分數尚未驗證。第二階段獨立手動提交，沒有 
 
 **812279 失敗原因與續跑（2026-11-20）：** 補抽 KataGo 本身正常（每程序約 6,200 位置／秒）；失敗在第一個 2,048 盤分片的對照檢查：重抽的 H9 每盤平均值與原 cvec2 特徵最大差 **0.0157**，只略高於容忍值 0.015，屬 GPU 批次的數值雜訊（人對手互換、貼目錯或 profile 錯都會造成 ≥0.1 的差）。容忍值改為 0.03。已存 12 個分片（約 24,600／148,719 盤）會被重用。
 - **新增提交步驟** `src/go_aicup/tasks/strength/cvec2_policy/export.py`（`export.slurm`，只用 CPU）：A／B／C 三臂各以 751959-cvec2 相同的設定擬合（seed 2027、Valid-S＋train20＋Valid-U HD≤1、相同先驗）。**A 須與 751959-cvec2 800 題逐題一致**，通過才寫 B、C。測試集 normalizer 取自既有逐手快取（C：`permove/c_test_*`；H9：release HumanSL shard，HD1 改用 `p3_komi/h_test_*`）。作業 815007 對照 release 特徵：H 最大差 1.5e-6、C 3.0e-4（Public／Private 皆通過）。CPU 測試新增 1 項；`test_cvec2_policy_encoder` 的 R10 梯度測試時好時壞（不改程式時也是），與本次修改無關。
-- **已送：** 815009（stage 1 續跑，OUT＝812279 目錄，8 卡、上限 5 小時；預估剩約 2.5–3 小時）→ 815010（export，afterok，1 卡）。輸出 `submissions/rank/815010-cv2s1-b.csv`、`815010-cv2s1-c.csv`；選哪個看 `result.json` 的 suggested_anchor（E2 C−B＞0、E1≥0、E2 各 k≥−0.005 選 C，否則 B）。
+- **815009／815010 於 12:10 被本帳號取消（非本 session）；重送 815092（stage 1 續跑）→ 815093（export，afterok）。** 原送出紀錄：815009（stage 1 續跑，OUT＝812279 目錄，8 卡、上限 5 小時；預估剩約 2.5–3 小時）→ 815010（export，afterok，1 卡）。輸出 `submissions/rank/815010-cv2s1-b.csv`、`815010-cv2s1-c.csv`；選哪個看 `result.json` 的 suggested_anchor（E2 C−B＞0、E1≥0、E2 各 k≥−0.005 選 C，否則 B）。
