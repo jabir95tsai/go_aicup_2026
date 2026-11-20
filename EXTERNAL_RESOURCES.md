@@ -27,7 +27,7 @@
 
 | 資源 | 來源 | 授權 | 用途 | 狀態 |
 |---|---|---|---|---|
-| （尚無；目前只用官方資料） | | | | |
+| OGS（Online-Go.com）棋譜合集 2013–2025-05，by-username SGF（`sgfs-by-username.tar.gz`，16.2 GB） | [za3k.com/ogs](https://za3k.com/ogs/ogs_games_2013_to_2025-05/sgfs-by-username.tar.gz)（za3k 整理） | 發布頁載明經 OGS 同意重散布，README 記載 OGS 同意研究使用；**用於本競賽與得獎交付已於 2026-11-20 經使用者確認** | 競賽一：只用於訓練風格編碼器。過濾條件為 19 路、ranked、HA≤1、無擺子、已完成、≥60 手、對手是真人。A1 用 40,000 人×20 盤，A2 用全部 82,481 人×10 盤，幽玄抽樣比例 0.5。不參與推論、候選庫或測試題 | 使用中：最終提交 `submissions/pid/ogsa12w.csv`（新增集風格項 1.5×(0.25 seqB＋0.75·mean(A1, A2))）；Public 0.8388310，對不用 OGS 的 `hung-seqB-e2emix-ml.csv`（0.8245254）+0.0143（`RESULTS.md` 11/18–11/20、D-008） |
 
 ## 方法參考（引用，不含程式碼）
 
