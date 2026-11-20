@@ -34,6 +34,7 @@ from go_aicup.paths import ROOT
 DATA = ROOT / "data" / "processed" / "identity" / "likelihood"
 OUT = ROOT / "outputs" / "pid" / "likelihood"
 GAMES = DATA / "games.parquet"
+RICH = DATA / "rich"
 VECTORS = ROOT / "data" / "processed" / "strength_features" / "humansl" / "cvec_v2" / "learn" / "vectors.pt"
 RANK_IDX = (1, 3, 5, 8)            # C, A, 2D, 5D in D..6D = 0..9
 TOP = 32
@@ -240,9 +241,17 @@ def _bucket_dist(d: np.ndarray) -> np.ndarray:
     return out
 
 
-def features(top: np.ndarray, lp: np.ndarray, ply: np.ndarray, last_opp: np.ndarray, last_own: np.ndarray):
+DIM_RICH = 50
+GROUPS = {"G1": list(range(27, 29)), "G2": list(range(29, 37)), "G3": list(range(37, 47)), "G4": list(range(47, 50))}
+
+
+def features(top: np.ndarray, lp: np.ndarray, ply: np.ndarray, last_opp: np.ndarray, last_own: np.ndarray,
+             rich: np.ndarray | None = None):
     """top int [N, 32], lp float [N, 4, 33] (conditions C, A, 2D, 5D), ply [N], last moves [N]
-    (-1 = none) -> (b [N, 33] float32, phi [N, 33, 27] float16)."""
+    (-1 = none) -> (b [N, 33] float32, phi [N, 33, 27] float16). With rich (uint8 [N, 32, 8] from
+    likelihood_rich) phi has 50 dims: the 27 above, then G1 log b and log b x late (27-28), G2 absolute
+    3x3 zone without the centre (29-36), G3 contact / solid / diagonal / jump / knight and x late (37-46),
+    G4 capture / atari / rescue (47-49)."""
     n = len(top)
     lp = lp.astype(np.float32)
     b = np.logaddexp.reduce(lp, axis=1) - math.log(4.0)
@@ -270,22 +279,37 @@ def features(top: np.ndarray, lp: np.ndarray, ply: np.ndarray, last_opp: np.ndar
     late = (ply >= LATE_PLY).astype(np.float32)[:, None, None]
     phi[:, :, 19:23] = phi[:, :, 3:7] * late
     phi[:, :, 23:27] = phi[:, :, 15:19] * late
-    return b.astype(np.float32), phi.astype(np.float16)
+    if rich is None:
+        return b.astype(np.float32), phi.astype(np.float16)
+    assert rich.shape == (n, TOP, 8), rich.shape
+    ext = np.zeros((n, OPTIONS, DIM_RICH - DIM), np.float32)
+    ext[:, :, 0] = b
+    ext[:, :, 1] = b * late[:, :, 0]
+    zone = np.where(r <= 5, 0, np.where(r >= 13, 2, 1)) * 3 + np.where(c <= 5, 0, np.where(c >= 13, 2, 1))
+    for i, z in enumerate((0, 1, 2, 3, 5, 6, 7, 8)):
+        ext[:, :TOP, 2 + i] = on_board & (zone == z)
+    shape = rich[:, :, :5].astype(np.float32)
+    ext[:, :TOP, 10:15] = shape
+    ext[:, :TOP, 15:20] = shape * late
+    ext[:, :TOP, 20:23] = rich[:, :, 5:8]
+    return b.astype(np.float32), np.concatenate([phi, ext], axis=2).astype(np.float16)
 
 
 # ---------------------------------------------------------------- MAP fit and scores (torch)
-def fit(phi, b, slot, pos, owner, n_owner, prior, sigma, iters=25, chunk=40_000, max_step=1.0):
-    """batched Newton MAP of theta [n_owner, D] for positions pos (owner[i] = owner of pos[i])."""
+def fit(phi, b, slot, pos, owner, n_owner, prior, sigma, iters=25, chunk=40_000, max_step=1.0, mask=None):
+    """batched Newton MAP of theta [n_owner, D] for positions pos (owner[i] = owner of pos[i]);
+    mask [D] zeroes features (their theta stays at the prior)."""
     import torch
     device = phi.device
+    d = phi.shape[2]
     theta = prior[None].repeat(n_owner, 1).clone()
-    eye = torch.eye(DIM, device=device, dtype=torch.float64)
+    eye = torch.eye(d, device=device, dtype=torch.float64)
     for _ in range(iters):
-        grad = torch.zeros(n_owner, DIM, device=device, dtype=torch.float64)
-        hess = torch.zeros(n_owner, DIM, DIM, device=device, dtype=torch.float64)
+        grad = torch.zeros(n_owner, d, device=device, dtype=torch.float64)
+        hess = torch.zeros(n_owner, d, d, device=device, dtype=torch.float64)
         for s in range(0, len(pos), chunk):
             p, o = pos[s:s + chunk], owner[s:s + chunk]
-            f = phi[p].float()
+            f = phi[p].float() if mask is None else phi[p].float() * mask
             z = b[p] + torch.einsum("pjd,pd->pj", f, theta[o].float())
             pi = torch.softmax(z, dim=1)
             mean = torch.einsum("pj,pjd->pd", pi, f)
@@ -304,7 +328,7 @@ def fit(phi, b, slot, pos, owner, n_owner, prior, sigma, iters=25, chunk=40_000,
     return theta
 
 
-def played_logp(phi, b, slot, pos, theta, chunk=2_000):
+def played_logp(phi, b, slot, pos, theta, chunk=2_000, mask=None):
     """[len(pos), n_theta] log p(played option) under every theta row."""
     import torch
     device = phi.device
@@ -312,7 +336,7 @@ def played_logp(phi, b, slot, pos, theta, chunk=2_000):
     t = theta.float()
     for s in range(0, len(pos), chunk):
         p = pos[s:s + chunk]
-        f = phi[p].float()
+        f = phi[p].float() if mask is None else phi[p].float() * mask
         z = b[p][:, :, None] + torch.einsum("pjd,cd->pjc", f, t)              # [p, 33, C]
         lse = torch.logsumexp(z, dim=1)
         pick = z[torch.arange(len(p), device=device), slot[p]]
@@ -321,8 +345,9 @@ def played_logp(phi, b, slot, pos, theta, chunk=2_000):
 
 
 # ---------------------------------------------------------------- evaluation
-def _context(theta_fixed=None) -> dict:
-    """shared evaluation setup: bench positions and features, theta_pop, base fusion, draw and LLR."""
+def _context(theta_fixed=None, rich: bool = False) -> dict:
+    """shared evaluation setup: bench positions and features, theta_pop, base fusion, draw and LLR.
+    rich=True builds the 50-dim features (likelihood_rich, PID_LIKELIHOOD_RICH_PLAN.md)."""
     import torch
 
     from go_aicup.data import cv
@@ -363,10 +388,16 @@ def _context(theta_fixed=None) -> dict:
         last_opp[s:e] = np.where(ply >= 1, moves[np.maximum(ply - 1, 0)], -1)
         last_own[s:e] = np.where(ply >= 2, moves[np.maximum(ply - 2, 0)], -1)
         first_pos[g], end_pos[g] = s, e
+    rich_arr = None
+    if rich:
+        rf = np.load(RICH / "bench.npz")
+        assert np.array_equal(rf["game"], arr["game"]) and np.array_equal(rf["ply"], arr["ply"]), "rich order"
+        rich_arr = rf["rich"]
     b_all, phi_all = [], []
     for s in range(0, len(order), 500_000):
         b, phi = features(arr["top"][s:s + 500_000], arr["lp"][s:s + 500_000], arr["ply"][s:s + 500_000],
-                          last_opp[s:s + 500_000], last_own[s:s + 500_000])
+                          last_opp[s:s + 500_000], last_own[s:s + 500_000],
+                          None if rich_arr is None else rich_arr[s:s + 500_000])
         b_all.append(torch.from_numpy(b))
         phi_all.append(torch.from_numpy(phi))
     B = torch.cat(b_all).to(device)
@@ -390,8 +421,17 @@ def _context(theta_fixed=None) -> dict:
     # ---- population theta
     pop = table[table["role"] == "pop"]
     pos_p, own_p = positions_of([pop["game_index"].to_numpy()])
-    zero = torch.zeros(DIM, device=device, dtype=torch.float64)
-    theta_pop = fit(PHI, B, SLOT, pos_p, own_p, 1, zero, 10.0)[0]
+    dims = PHI.shape[2]
+    zero = torch.zeros(dims, device=device, dtype=torch.float64)
+    base_mask = torch.zeros(dims, device=device)
+    base_mask[:DIM] = 1
+
+    def fit_pop(mask):
+        return fit(PHI, B, SLOT, pos_p, own_p, 1, zero, 10.0, mask=mask)[0] * (mask > 0)
+
+    theta_pop = fit_pop(base_mask)
+    if theta_fixed is not None and len(theta_fixed) < dims:
+        theta_fixed = list(theta_fixed) + [0.0] * (dims - len(theta_fixed))
     if theta_fixed is not None:            # later rounds reuse the stage-0 value (as the export does)
         fixed = torch.tensor(theta_fixed, device=device, dtype=torch.float64)
         report["theta_pop_refit_max_diff"] = float((theta_pop - fixed).abs().max())
@@ -445,14 +485,16 @@ def _context(theta_fixed=None) -> dict:
     print(f"reproduction max diff {report['reproduction_max_diff']:.2e}", flush=True)
     assert report["reproduction_max_diff"] <= 1e-9
 
-    def llr(x, sigma, mask=None):
+    def llr(x, sigma, mask=None, prior=None):
         """[Q, C] LLR with candidate thetas fitted on the draw's reference games; mask zeroes the
-        features outside the kept dims (ablation)."""
-        phi = PHI if mask is None else PHI * mask
+        features outside the kept dims; prior = that mask's population theta (default theta_pop)."""
+        if mask is None and dims > DIM:
+            mask = base_mask
+        prior = theta_pop if prior is None else prior
         pos_g, own_g = positions_of(x["gallery"])
-        th = fit(phi, B, SLOT, pos_g, own_g, len(x["gallery"]), theta_pop, sigma)
+        th = fit(PHI, B, SLOT, pos_g, own_g, len(x["gallery"]), prior, sigma, mask=mask)
         pos_q, own_q = positions_of(x["query"])
-        lp = played_logp(phi, B, SLOT, pos_q, torch.cat([th, theta_pop[None]]))
+        lp = played_logp(PHI, B, SLOT, pos_q, torch.cat([th, prior[None]]), mask=mask)
         diff = lp[:, :-1] - lp[:, -1:]
         out = torch.zeros(len(x["query"]), len(x["gallery"]), device=device, dtype=torch.float64)
         out.index_add_(0, own_q, diff)
@@ -465,7 +507,8 @@ def _context(theta_fixed=None) -> dict:
     assert report["zero_check"] < 1e-9
 
     return dict(report=report, device=device, draw=draw, llr=llr, theta_pop=theta_pop, scale=scale,
-                env=env, PHI=PHI, B=B, SLOT=SLOT, positions_of=positions_of)
+                env=env, PHI=PHI, B=B, SLOT=SLOT, positions_of=positions_of, fit_pop=fit_pop,
+                base_mask=base_mask)
 
 
 def evaluate(args) -> None:
@@ -676,13 +719,272 @@ def evaluate2(_args) -> None:
     (R2 / "report.json").write_text(json.dumps(report, indent=1, default=float))
 
 
+# ---------------------------------------------------------------- rich features (PID_LIKELIHOOD_RICH_PLAN.md)
+RICH_OUT = OUT / "rich"
+R3_DEV = [(0, d) for d in range(3000, 3020)]
+R3_SEALED = [(0, d) for d in range(3100, 3120)] + [(1, d) for d in range(3100, 3130)]
+LK = {"sigma": 3.0, "lambda": 3.0, "m_k": {1: 0.75, 2: 1.25, 3: 2.0, 5: 3.0}}
+R3_SIGMAS = (3.0, 10.0)
+R3_LAMBDAS = (2.0, 3.0, 4.0)
+
+
+def _official_moves() -> dict:
+    """game id (part * 1e6 + row; pool rows first, then question rows) -> int64 moves, as export."""
+    from go_aicup.data.preprocess import load_store
+    from scripts.identity.pid2_style_export import STORE
+    games = {}
+    for p_i, part in enumerate(("public", "private")):
+        pool_m, _, pool_meta = load_store(f"pool2_{part}", STORE, mmap=False)
+        q_m, _, q_meta = load_store(f"pid2_{part}", STORE, mmap=False)
+        for base_row, (m, meta) in ((0, (pool_m, pool_meta)), (len(pool_meta), (q_m, q_meta))):
+            for r, (off, length) in enumerate(zip(meta["offset"], meta["length"])):
+                games[p_i * 1_000_000 + base_row + r] = np.asarray(m[off:off + length], np.int64)
+    return games
+
+
+def _sorted_positions(arr: dict) -> dict:
+    order = np.lexsort((arr["ply"], arr["game"]))
+    return {k: v[order] for k, v in arr.items()}
+
+
+def _rich_for(arr: dict, moves_of, budget_games: int, started: float) -> np.ndarray:
+    """G3/G4 raw features for sorted positions; aborts if the first 1,000 games extrapolate to > 1 h
+    for `budget_games` games in total."""
+    from go_aicup.tasks.identity import likelihood_rich as lr
+    starts = np.flatnonzero(np.r_[True, arr["game"][1:] != arr["game"][:-1]])
+    ends = np.r_[starts[1:], len(arr["game"])]
+    out = np.zeros((len(arr["game"]), TOP, lr.N_RICH), np.uint8)
+    lr.compute([moves_of(int(arr["game"][0]))], [arr["ply"][starts[0]:ends[0]].astype(np.int64)],
+               arr["top"][starts[0]:ends[0]])                     # numba compile outside the timing
+    t0 = time.monotonic()
+    step = 1000
+    for a in range(0, len(starts), step):
+        sl = range(a, min(a + step, len(starts)))
+        gm = [moves_of(int(arr["game"][starts[i]])) for i in sl]
+        gp = [arr["ply"][starts[i]:ends[i]].astype(np.int64) for i in sl]
+        lo, hi = starts[sl[0]], ends[sl[-1]]
+        out[lo:hi] = lr.compute(gm, gp, arr["top"][lo:hi])
+        if a == 0:
+            rate = (time.monotonic() - t0) / len(sl)
+            estimate = rate * budget_games
+            print(json.dumps({"seconds_per_game": round(rate, 5), "estimate_total_seconds": round(estimate)}), flush=True)
+            if estimate > 3600:
+                raise SystemExit(f"replay estimate {estimate:.0f} s > 1 h: stop and report (plan section 4)")
+    print(f"rich features: {len(starts)} games in {time.monotonic() - t0:.0f} s", flush=True)
+    return out
+
+
+def _replay_check(game_moves, game_index, cache) -> int:
+    """boards before every ply 1..n-1 equal the cache's after-move boards of ply - 1; ply 0 is empty."""
+    from go_aicup.tasks.identity import likelihood_rich as lr
+    checked = 0
+    for m, g in zip(game_moves, game_index):
+        n = len(m)
+        boards = lr.replay_boards([m], [np.arange(n)])
+        assert not boards[0].any()
+        h, _ = cache.history_batch(np.full(n - 1, g), np.arange(n - 1), steps=1)
+        ref = (h[:, 0, 0].reshape(-1, 361) + 2 * h[:, 0, 1].reshape(-1, 361)).astype(np.int8)
+        assert np.array_equal(boards[1:], ref), f"replay mismatch in cache game {g}"
+        checked += n
+    return checked
+
+
+def rich_features_cmd(_args) -> None:
+    from go_aicup.data.board_cache import BoardCache
+    from go_aicup.data.preprocess import load_store
+    from go_aicup.features.humansl import CACHE, cache_games
+    from scripts.identity.pid2_qmerge_export import DAY0
+    from scripts.identity.pid2_style_export import STORE
+
+    RICH.mkdir(parents=True, exist_ok=True)
+    started = time.monotonic()
+    table = pd.read_parquet(GAMES)
+    off = np.load(OUT / "official" / "positions.npz")
+    budget = len(table) + len(np.unique(off["game"]))
+    report = {}
+    # replay correctness against the board caches: 200 bench games, 50 official games per part
+    bench_games = table["game_index"].to_numpy()
+    rng = np.random.default_rng(0)
+    sample = np.sort(rng.choice(bench_games, 200, replace=False))
+    report["bench_replay_positions_checked"] = _replay_check([m for m, _ in cache_games(sample, CACHE)], sample,
+                                                             BoardCache(CACHE))
+    report["official_replay_positions_checked"] = 0
+    for part in ("public", "private"):
+        for name in (f"pool2_{part}", f"pid2_{part}"):
+            m, _, meta = load_store(name, STORE, mmap=False)
+            cache_dir = DAY0 / f"{part}2_d4_9600" / name / "cache"
+            cg = pd.read_parquet(cache_dir / "games.parquet").iloc[:25]
+            moves = [np.asarray(m[int(meta["offset"].iloc[r]):int(meta["offset"].iloc[r] + meta["length"].iloc[r])],
+                                np.int64) for r in cg["store_row"]]
+            report["official_replay_positions_checked"] += _replay_check(moves, cg["game_index"].to_numpy(),
+                                                                         BoardCache(cache_dir))
+    print(json.dumps(report), flush=True)
+    # bench positions, in the order _context uses
+    shards = sorted(p for p in DATA.glob("shard_*") if (p / "meta.json").exists())
+    arr = _sorted_positions({k: np.concatenate([np.load(sh / f"{k}.npy") for sh in shards])
+                             for k in ("game", "ply", "top")})
+    played = dict(zip(table["game_index"], (m for m, _ in cache_games(table["game_index"], CACHE))))
+    rich = _rich_for(arr, lambda g: played[g].astype(np.int64), budget, started)
+    np.savez(RICH / "bench.npz", game=arr["game"], ply=arr["ply"], rich=rich)
+    # official positions, in the order position_tensors uses
+    oarr = _sorted_positions({k: off[k] for k in ("game", "ply", "top")})
+    omoves = _official_moves()
+    orich = _rich_for(oarr, omoves.__getitem__, budget, started)
+    np.savez(RICH / "official.npz", game=oarr["game"], ply=oarr["ply"], rich=orich)
+    report.update(seconds=round(time.monotonic() - started, 1), bench_positions=int(len(rich)),
+                  official_positions=int(len(orich)),
+                  bench_rates=rich.reshape(-1, 8)[arr["top"].reshape(-1) < 361].mean(0).round(4).tolist())
+    (RICH / "meta.json").write_text(json.dumps(report, indent=1))
+    print(json.dumps(report), flush=True)
+
+
+def evaluate3(_args) -> None:
+    """single-group screen, union grid and sealed test of the 50-dim features against LK."""
+    import torch
+
+    from scripts.identity.pid2_cheap import COLS, buckets, normalise, official, paired, verdict
+
+    RICH_OUT.mkdir(parents=True, exist_ok=True)
+    stage0 = json.loads((OUT / "report.json").read_text())
+    ctx = _context(stage0["theta_pop"], rich=True)
+    report, draw, llr, scale = ctx["report"], ctx["draw"], ctx["llr"], ctx["scale"]
+    PHI, B, SLOT, positions_of, device = ctx["PHI"], ctx["B"], ctx["SLOT"], ctx["positions_of"], ctx["device"]
+    base_mask, theta_pop, fit_pop = ctx["base_mask"], ctx["theta_pop"], ctx["fit_pop"]
+    assert PHI.shape[2] == DIM_RICH
+    mk = LK["m_k"]
+
+    def fused(x, l, lam, m=mk):
+        f = np.array([m[int(k)] for k in x["ks"]])[:, None]
+        return x["rest"] + scale * f * x["style"] + lam * l
+
+    def mask_of(groups):
+        m = base_mask.clone()
+        for g in groups:
+            m[GROUPS[g]] = 1
+        return m
+
+    masks = {g: mask_of([g]) for g in GROUPS}
+    priors = {g: fit_pop(masks[g]) for g in GROUPS}
+    report["theta_pop_new_dims"] = {g: priors[g][GROUPS[g]].cpu().round(decimals=3).tolist() for g in GROUPS}
+    print("theta_pop new dims:", report["theta_pop_new_dims"], flush=True)
+
+    # engineering: the base-27 mask on the 50-dim tensor reproduces the 27-dim LK
+    x = draw(*R3_DEV[0])
+    l50 = llr(x, LK["sigma"])[0]
+    pos_g, own_g = positions_of(x["gallery"])
+    phi27 = PHI[:, :, :DIM]
+    th = fit(phi27, B, SLOT, pos_g, own_g, len(x["gallery"]), theta_pop[:DIM], LK["sigma"])
+    pos_q, own_q = positions_of(x["query"])
+    lp = played_logp(phi27, B, SLOT, pos_q, torch.cat([th, theta_pop[None, :DIM]]))
+    l27 = torch.zeros(len(x["query"]), len(x["gallery"]), device=device, dtype=torch.float64)
+    l27.index_add_(0, own_q, lp[:, :-1] - lp[:, -1:])
+    l27 = l27.cpu().numpy()
+    a = buckets(official(fused(x, l50, LK["lambda"]), x["owner"]), x["ks"])
+    b_ = buckets(official(fused(x, l27, LK["lambda"]), x["owner"]), x["ks"])
+    report["base_reproduction"] = {"llr_max_abs_diff": float(np.abs(l50 - l27).max()),
+                                   "points_max_diff": max(abs(a[c] - b_[c]) for c in COLS)}
+    print("base reproduction:", report["base_reproduction"], flush=True)
+    assert report["base_reproduction"]["points_max_diff"] == 0.0 and report["base_reproduction"]["llr_max_abs_diff"] < 1e-3
+
+    # ---- step 1: one group at a time (sigma 3, lambda 3, LK multipliers)
+    cache, rows = {}, []
+    for pool, d in R3_DEV:
+        x = draw(pool, d)
+        l_lk = llr(x, LK["sigma"])[0]
+        cache[d] = (x, l_lk)
+        rows.append({"draw": d, "arm": "LK", **buckets(official(fused(x, l_lk, LK["lambda"]), x["owner"]), x["ks"])})
+        for g in GROUPS:
+            lg = llr(x, LK["sigma"], masks[g], priors[g])[0]
+            rows.append({"draw": d, "arm": g, **buckets(official(fused(x, lg, LK["lambda"]), x["owner"]), x["ks"])})
+        print(f"step1 draw {d}", flush=True)
+    s1 = paired(pd.DataFrame(rows), "LK").set_index("arm")
+    kept = [g for g in GROUPS if s1.loc[g, "d_all"] >= 0.002]
+    report["step1"] = s1[["d_1", "d_2", "d_3", "d_5", "d_all", "se_all", "pos"]].to_dict(orient="index")
+    report["kept"] = kept
+    print("step 1 (vs LK):\n", s1[["d_1", "d_2", "d_3", "d_5", "d_all", "se_all"]].round(4).to_string(),
+          "\nkept:", kept, flush=True)
+    (RICH_OUT / "report.json").write_text(json.dumps(report, indent=1, default=float))
+    if not kept:
+        report["stopped"] = "no group gained >= +0.002 on the development draws; sealed draws not opened"
+        (RICH_OUT / "report.json").write_text(json.dumps(report, indent=1, default=float))
+        print(report["stopped"], flush=True)
+        return
+
+    # ---- step 2: union, sigma x lambda
+    union = mask_of(kept)
+    prior_u = fit_pop(union)
+    rows = []
+    for d, (x, l_lk) in cache.items():
+        rows.append({"draw": d, "arm": "LK", **buckets(official(fused(x, l_lk, LK["lambda"]), x["owner"]), x["ks"])})
+        for sg in R3_SIGMAS:
+            lu = llr(x, sg, union, prior_u)[0]
+            for lam in R3_LAMBDAS:
+                rows.append({"draw": d, "arm": f"s{sg:g}_l{lam:g}",
+                             **buckets(official(fused(x, lu, lam), x["owner"]), x["ks"])})
+            if sg == R3_SIGMAS[0]:
+                rows.append({"draw": d, "arm": "union_alone", **buckets(official(lu, x["owner"]), x["ks"])})
+        print(f"step2 draw {d}", flush=True)
+    s2 = paired(pd.DataFrame(rows), "LK").set_index("arm")
+    grid = s2.drop(index=["LK", "union_alone"])
+    best = grid["d_all"].idxmax()
+    sigma, lam = float(best.split("_")[0][1:]), float(best.split("_")[1][1:])
+    report["step2"] = s2[["1", "2", "3", "5", "all", "d_all", "se_all"]].to_dict(orient="index")
+    report["chosen"] = {"groups": kept, "sigma": sigma, "lambda": lam, "dev_delta": float(grid.loc[best, "d_all"]),
+                        "grid_edge": bool(sigma == R3_SIGMAS[-1] or lam == R3_LAMBDAS[-1])}
+    print("step 2 (vs LK):\n", s2[["all", "d_1", "d_2", "d_3", "d_5", "d_all", "se_all"]].round(4).to_string(),
+          "\nchosen:", report["chosen"], flush=True)
+    del cache
+    # stability (pool 0 bank, games 1-10 vs 11-20), base-27 and union at their sigmas
+    bank = ctx["env"]["bank"]
+    sets_a, sets_b = [], []
+    for _, grp in bank[bank["pool"] == 0].groupby("player_id"):
+        gm = grp.sort_values("order")["game"].to_numpy()
+        sets_a.append(gm[:10])
+        sets_b.append(gm[10:20])
+    pa, oa = positions_of(sets_a)
+    pb, ob = positions_of(sets_b)
+    stab = {}
+    for name, m, pr, sg in (("base27", base_mask, theta_pop, LK["sigma"]), ("union", union, prior_u, sigma)):
+        ta = (fit(PHI, B, SLOT, pa, oa, len(sets_a), pr, sg, mask=m) - pr).cpu().numpy()
+        tb = (fit(PHI, B, SLOT, pb, ob, len(sets_b), pr, sg, mask=m) - pr).cpu().numpy()
+        stab[name] = {"same_player_cos": float((normalise(ta) * normalise(tb)).sum(1).mean()),
+                      "shifted_player_cos": float((normalise(ta) * normalise(np.roll(tb, 1, 0))).sum(1).mean())}
+    report["stability"] = stab
+    report["final_params"] = {"groups": kept, "mask": union.cpu().tolist(), "sigma": sigma, "lambda": lam,
+                              "m_k": mk, "theta_pop": prior_u.cpu().tolist()}
+    print("stability:", stab, flush=True)
+    (RICH_OUT / "report.json").write_text(json.dumps(report, indent=1, default=float))
+
+    # ---- sealed
+    out = []
+    for pool, d in R3_SEALED:
+        x = draw(pool, d)
+        l_lk = llr(x, LK["sigma"])[0]
+        lu = llr(x, sigma, union, prior_u)[0]
+        for name, sc in (("LK", fused(x, l_lk, LK["lambda"])), ("RICH", fused(x, lu, lam)),
+                         ("rich_alone", lu), ("lk_alone", l_lk)):
+            out.append({"pool": pool, "draw": d, "arm": name, **buckets(official(sc, x["owner"]), x["ks"])})
+        print(f"sealed pool {pool} draw {d}", flush=True)
+    frame = pd.DataFrame(out)
+    frame.to_csv(RICH_OUT / "sealed_per_draw.csv", index=False)
+    t1, t0 = paired(frame[frame.pool == 1], "LK"), paired(frame[frame.pool == 0], "LK")
+    report["sealed"] = {"pool1": t1.to_dict(orient="records"), "pool0": t0.to_dict(orient="records"),
+                        "verdict": verdict(t1, t0, "RICH")}
+    print("sealed pool 1 vs LK:\n", t1.round(4).to_string(index=False), "\nsealed pool 0 vs LK:\n",
+          t0.round(4).to_string(index=False), "\nverdict:", json.dumps(report["sealed"]["verdict"]), flush=True)
+    (RICH_OUT / "report.json").write_text(json.dumps(report, indent=1, default=float))
+
+
 # ---------------------------------------------------------------- official export
-def position_tensors(arr: dict, moves_of, device):
-    """sorted positions -> (B, PHI, SLOT tensors, first / end position per game id)."""
+def position_tensors(arr: dict, moves_of, device, rich: dict | None = None):
+    """sorted positions -> (B, PHI, SLOT tensors, first / end position per game id); rich = the
+    likelihood_rich arrays (game, ply, rich) in the same sorted order -> 50-dim features."""
     import torch
     order = np.lexsort((arr["ply"], arr["game"]))
     arr = {k: v[order] for k, v in arr.items()}
     n = len(order)
+    if rich is not None:
+        assert np.array_equal(rich["game"], arr["game"]) and np.array_equal(rich["ply"], arr["ply"]), "rich order"
     last_opp = np.full(n, -1, np.int64)
     last_own = np.full(n, -1, np.int64)
     starts = np.flatnonzero(np.r_[True, arr["game"][1:] != arr["game"][:-1]])
@@ -698,7 +1000,8 @@ def position_tensors(arr: dict, moves_of, device):
     bs, ps = [], []
     for s in range(0, n, 500_000):
         b, phi = features(arr["top"][s:s + 500_000], arr["lp"][s:s + 500_000], arr["ply"][s:s + 500_000],
-                          last_opp[s:s + 500_000], last_own[s:s + 500_000])
+                          last_opp[s:s + 500_000], last_own[s:s + 500_000],
+                          None if rich is None else rich["rich"][s:s + 500_000])
         bs.append(torch.from_numpy(b))
         ps.append(torch.from_numpy(phi))
     return (torch.cat(bs).to(device), torch.cat(ps).to(device),
@@ -730,10 +1033,20 @@ def export(args) -> None:
         fp = r2["final_params"]
         sigma, lam, mk = fp["sigma"], fp["lambda"], {int(k): float(v) for k, v in fp["m_k"].items()}
         tag = f"lik2{r2['final'].lower()}"
+    rich_mask = None
+    if args.rich:                          # rich-feature choice (PID_LIKELIHOOD_RICH_PLAN.md), only if it passed
+        r3 = json.loads((RICH_OUT / "report.json").read_text())
+        assert r3["sealed"]["verdict"]["pass"], "rich features did not pass the switch rule"
+        fp = r3["final_params"]
+        sigma, lam, mk = fp["sigma"], fp["lambda"], {int(k): float(v) for k, v in fp["m_k"].items()}
+        tag = "likrich"
     target = SUB / f"{job}-{tag}.csv"
     assert not target.exists(), target
     device = torch.device("cuda")
     theta_pop = torch.tensor(rep["theta_pop"], device=device, dtype=torch.float64)
+    if args.rich:
+        theta_pop = torch.tensor(fp["theta_pop"], device=device, dtype=torch.float64)
+        rich_mask = torch.tensor(fp["mask"], device=device, dtype=torch.float32)
     official = OUT / "official"
     official.mkdir(parents=True, exist_ok=True)
 
@@ -763,7 +1076,8 @@ def export(args) -> None:
         np.savez(cache, **arr)
         (official / "policy_meta.json").write_text(json.dumps(meta, indent=1))
     all_games = {g: m for _, _, gm in stores.values() for g, m in gm.items()}
-    B, PHI, SLOT, span = position_tensors(arr, all_games.__getitem__, device)
+    B, PHI, SLOT, span = position_tensors(arr, all_games.__getitem__, device,
+                                          dict(np.load(RICH / "official.npz")) if args.rich else None)
     print(f"official positions {len(SLOT)}, outside top-32 {float((SLOT == TOP).float().mean()):.4f}", flush=True)
 
     def positions_of(game_lists):
@@ -802,9 +1116,9 @@ def export(args) -> None:
         query = [p_i * 1_000_000 + len(pool_meta) + np.sort(rows[q]) for q in qids]
         ks = q_meta.groupby("question_id", sort=False)["num_games"].first().loc[qids].to_numpy().astype(int)
         pos_g, own_g = positions_of(gallery)
-        th = fit(PHI, B, SLOT, pos_g, own_g, len(gallery), theta_pop, sigma)
+        th = fit(PHI, B, SLOT, pos_g, own_g, len(gallery), theta_pop, sigma, mask=rich_mask)
         pos_q, own_q = positions_of(query)
-        lp = played_logp(PHI, B, SLOT, pos_q, torch.cat([th, theta_pop[None]]))
+        lp = played_logp(PHI, B, SLOT, pos_q, torch.cat([th, theta_pop[None]]), mask=rich_mask)
         llr = torch.zeros(len(query), len(gallery), device=device, dtype=torch.float64)
         llr.index_add_(0, own_q, lp[:, :-1] - lp[:, -1:])
         llr = llr.cpu().numpy()
@@ -870,6 +1184,42 @@ def selfcheck(_args) -> None:
     # strong prior pins theta to the prior mean
     pinned = fit(PHI, B, slot, pos, owner, 2, torch.ones(DIM, dtype=torch.float64), 1e-4)
     assert (pinned - 1).abs().max() < 1e-3
+    # rich (50-dim) layout, mask equivalence and recovery of planted new-dim parameters
+    rich = (rng.random((n, TOP, 8)) < 0.15).astype(np.uint8)
+    b50, phi50 = features(top, lp, ply, last, np.roll(last, 1), rich)
+    assert phi50.shape == (n, OPTIONS, DIM_RICH) and np.array_equal(phi50[:, :, :DIM], phi) and np.allclose(b50, b)
+    assert np.allclose(phi50[:, :, 27], b, atol=2e-2) and (phi50[:, TOP, 29:] == 0).all()
+    assert np.array_equal(phi50[:, :TOP, 37:42], rich[:, :, :5]) and np.array_equal(phi50[:, :TOP, 47:50], rich[:, :, 5:])
+    zone_sum = phi50[:, :TOP, 29:37].astype(np.float32).sum(2)
+    assert zone_sum.max() <= 1
+    P50 = torch.from_numpy(phi50)
+    base = torch.zeros(DIM_RICH)
+    base[:DIM] = 1
+    t27 = fit(PHI, B, slot, pos, owner, 2, torch.zeros(DIM, dtype=torch.float64), 3.0)
+    t50 = fit(P50, B, slot, pos, owner, 2, torch.zeros(DIM_RICH, dtype=torch.float64), 3.0, mask=base)
+    assert (t50[:, :DIM] - t27).abs().max() < 1e-4 and t50[:, DIM:].abs().max() == 0
+    m = 30000                                   # one owner, enough positions for the early / late pairs
+    top_m = np.stack([rng.permutation(361)[:TOP] for _ in range(m)])
+    raw_m = rng.normal(size=(m, 4, 362))
+    lpa = raw_m - np.logaddexp.reduce(raw_m, axis=2, keepdims=True)
+    lpt = np.take_along_axis(lpa, top_m[:, None, :].repeat(4, 1), axis=2)
+    lp_m = np.concatenate([lpt, np.log1p(-np.exp(np.logaddexp.reduce(lpt, axis=2)))[..., None]], axis=2)
+    ply_m = rng.integers(0, 250, size=m)
+    last_m = rng.integers(-1, 361, size=m)
+    b_m, phi_m = features(top_m, lp_m, ply_m, last_m, np.roll(last_m, 1), (rng.random((m, TOP, 8)) < 0.15).astype(np.uint8))
+    Pm, Bm = torch.from_numpy(phi_m), torch.from_numpy(b_m)
+    true50 = torch.zeros(DIM_RICH, dtype=torch.float64)
+    true50[37:42] = torch.tensor([1.0, -0.8, 0.6, 0.0, 0.5])
+    true50[47:50] = torch.tensor([1.5, -1.0, 0.7])
+    true50[27] = 0.3
+    z = Bm + torch.einsum("pjd,d->pj", Pm.float(), true50.float())
+    slot50 = torch.distributions.Categorical(logits=z).sample()
+    own_m = torch.zeros(m, dtype=torch.long)
+    est50 = fit(Pm, Bm, slot50, torch.arange(m), own_m, 1, torch.zeros(DIM_RICH, dtype=torch.float64), 10.0)[0]
+    early = est50[37:42] - true50[37:42]
+    late = est50[37:42] + est50[42:47] - true50[37:42]
+    err = max(float(early.abs().max()), float(late.abs().max()), float((est50[47:50] - true50[47:50]).abs().max()))
+    assert err < 0.3, (err, est50[27:50])
     print("selfcheck ok", flush=True)
 
 
@@ -884,13 +1234,16 @@ def main() -> None:
     p.add_argument("--workers", type=int, default=11)
     sub.add_parser("evaluate")
     sub.add_parser("evaluate2")
+    sub.add_parser("rich-features")
+    sub.add_parser("evaluate3")
     e = sub.add_parser("export")
     e.add_argument("--workers", type=int, default=11)
     e.add_argument("--round2", action="store_true", help="use the round-2 choice (refuses if it kept B0)")
+    e.add_argument("--rich", action="store_true", help="use the rich-feature choice (refuses unless it passed)")
     sub.add_parser("selfcheck")
     args = parser.parse_args()
     {"games": games, "policy": policy, "evaluate": evaluate, "evaluate2": evaluate2, "export": export,
-     "selfcheck": selfcheck}[args.cmd](args)
+     "rich-features": rich_features_cmd, "evaluate3": evaluate3, "selfcheck": selfcheck}[args.cmd](args)
 
 
 if __name__ == "__main__":
