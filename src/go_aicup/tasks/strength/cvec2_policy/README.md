@@ -32,3 +32,44 @@ under `outputs/rank/humansl/cvec2_policy/stage2/<job_id>/`. Full-board caches ar
 volatile. An explicit restart with the same `OUT` and unchanged settings rebuilds
 the volatile cache and resumes the encoder checkpoints saved every 500 updates.
 The two stages report local validation; they do not publish submissions.
+
+## Locked A/H15 eight-arm experiment
+
+[PLAN.md](PLAN.md) defines the split, 52-column A anchor, five learned arms, two
+normalization controls, and E2 thresholds. Use the `go` environment with
+`PYTHONPATH="$PWD/src:$PWD"` from the repository root.
+
+```bash
+MODULE=go_aicup.tasks.strength.cvec2_policy.run
+OUT=outputs/rank/humansl/cvec2_policy/all/<run_id>
+python -m "$MODULE" all --phase preflight
+python -m "$MODULE" all --phase prepare --out "$OUT"
+OUT="$OUT" sbatch src/go_aicup/tasks/strength/cvec2_policy/all.slurm
+# Run on CPU after the GPU job succeeds.
+python -m "$MODULE" all --phase score --out "$OUT"
+```
+
+Run full preparation on CPU compute resources. It publishes shared zstd shards
+under `data/processed/strength_features/humansl/cvec2_policy/input_planes/` and
+locks the CPU artifacts in `$OUT/cpu/`. The eight-card GPU job uses H15 on cards
+0–3 and C10 on cards 4–7. The four joint arms train on cards 4–7. The weighted arm
+starts as soon as its CNN mother arm finishes. GPU output includes raw teacher
+parity, per-side offsets, final checkpoints, game features and `gpu_complete.json`.
+Resubmit with the same `OUT` to resume completed updates and reuse validated features.
+
+CPU scoring fits both normalization controls from the saved offsets and fixed
+draws. It writes `question_scores.parquet`, `question_predictions.parquet`,
+`result.json` and `complete.json`. Every arm supplies its 52-column fitting
+features and a 40-column compatibility projection.
+
+```bash
+SMOKE_STEPS=3 sbatch --partition=dev --time=00:15:00 \
+  src/go_aicup/tasks/strength/cvec2_policy/all.slurm
+```
+
+The short run keeps whole optimizer batches and uses the full-pool initial A head.
+It exercises the nominal full-cache allocation on every GPU, fits the controls
+on smaller draws from the fixed question tables and scores one E2 question per k.
+Use the short run for engineering metrics. It has no candidate selection.
+The per-arm peer byte count measures payload gathered across GPUs, and
+`gpu_samples.csv` records device memory usage.

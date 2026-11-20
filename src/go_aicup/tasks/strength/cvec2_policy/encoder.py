@@ -16,26 +16,29 @@ INITIALIZATION_LOCK = Lock()
 
 
 class JointEncoder(nn.Module):
-    def __init__(self, architecture: str, full_policy: bool):
+    def __init__(self, architecture: str, full_policy: bool, raw_a: bool = False):
         super().__init__()
         self.architecture = architecture
         self.full_policy = full_policy
+        self.raw_a = raw_a
+        self.h_profiles = 15 if raw_a else H
+        profiles = self.h_profiles + C
         if architecture == 'R10':
-            self.phi = nn.Sequential(nn.Linear(2 * PROFILES + 2, 32), nn.ReLU(),
+            self.phi = nn.Sequential(nn.Linear(2 * profiles + 2, 32), nn.ReLU(),
                                      nn.Linear(32, 32), nn.ReLU(), nn.Linear(32, 32))
-            self.scorer = nn.Sequential(nn.Linear(64 + PROFILES, 32), nn.ReLU(), nn.Linear(32, 1))
+            self.scorer = nn.Sequential(nn.Linear(64 + profiles, 32), nn.ReLU(), nn.Linear(32, 1))
             nn.init.zeros_(self.scorer[-1].weight)
             nn.init.zeros_(self.scorer[-1].bias)
-            width = PROFILES + 65
+            width = profiles + 65
         elif architecture == 'CNN-R10':
-            self.conv = nn.Sequential(nn.Conv2d(3 * PROFILES, 32, 5), nn.ReLU(),
+            self.conv = nn.Sequential(nn.Conv2d(3 * profiles, 32, 5), nn.ReLU(),
                                       nn.Conv2d(32, 32, 5), nn.ReLU(),
                                       nn.Conv2d(32, 32, 5), nn.ReLU())
-            width = 32 + 3 * PROFILES + 2
+            width = 32 + 3 * profiles + 2
         else:
             raise ValueError(f'unknown policy architecture: {architecture}')
         self.hidden = nn.Sequential(nn.Linear(width, 64), nn.ReLU())
-        self.h = nn.Linear(64, H)
+        self.h = nn.Linear(64, self.h_profiles)
         self.c = nn.Linear(64, C)
         for head in (self.h, self.c):
             nn.init.zeros_(head.weight)
@@ -43,8 +46,13 @@ class JointEncoder(nn.Module):
 
     def policy_inputs(self, logp, target, q):
         if self.full_policy:
-            p, lp, legal = probabilities(logp)
-            at = target[:, None, None].expand(-1, PROFILES, 1)
+            if self.raw_a:
+                legal = torch.isfinite(logp[:, 0])
+                lp = logp.float()
+                p, lp = lp.exp(), lp.masked_fill(~legal[:, None], 0)
+            else:
+                p, lp, legal = probabilities(logp)
+            at = target[:, None, None].expand(-1, q.shape[1], 1)
             return p.scatter(2, at, q.exp()[..., None]), lp.scatter(2, at, q[..., None]), legal
         # Broadcast the exact played feature after normalization. Hidden scores cannot affect it.
         legal = torch.isfinite(logp[:, 0])
@@ -52,8 +60,8 @@ class JointEncoder(nn.Module):
         p = q.exp()[..., None].masked_fill(~legal[:, None], 0)
         return p, lp, legal
 
-    def delta(self, logp, target, q):
-        p, lp, legal = self.policy_inputs(logp, target, q)
+    def delta(self, logp, target, q, inputs=None):
+        p, lp, legal = self.policy_inputs(logp, target, q) if inputs is None else inputs
         log_count = legal.sum(-1).float().log()[:, None]
         if self.architecture == 'R10':
             v = self.phi(candidate_inputs(p, lp, legal, target))
@@ -64,56 +72,73 @@ class JointEncoder(nn.Module):
             summary = (weights[..., None] * v).sum(1)
             features = torch.cat((q, chosen, summary, log_count), 1)
         else:
-            marker = F.one_hot(target, num_classes=POINTS)[:, None, :361].expand(-1, PROFILES, -1)
-            image = torch.cat((p[..., :361], lp[..., :361], marker), 1).reshape(-1, 3 * PROFILES, 19, 19)
+            marker = F.one_hot(target, num_classes=POINTS)[:, None, :361].expand(-1, q.shape[1], -1)
+            image = torch.cat((p[..., :361], lp[..., :361], marker), 1).reshape(-1, 3 * q.shape[1], 19, 19)
             board = self.conv(image.contiguous(memory_format=torch.channels_last)).mean((-2, -1))
             features = torch.cat((board, q, q.exp(), lp[..., -1], target.eq(361).float()[:, None], log_count), 1)
         hidden = self.hidden(features)
         return self.h(hidden).float(), self.c(hidden).float()
 
-    def forward(self, logp, target, q):
+    def forward(self, logp, target, q, inputs=None):
         """Change relative to the selected baseline, in H9/C10 order."""
-        delta = self.delta(logp, target, q)
-        # Any retained baseline logsumexp cancels from this difference.
-        return torch.cat([F.log_softmax(values + shift, -1) - F.log_softmax(values, -1)
-                          for values, shift in zip(q.split((H, C), -1), delta)], -1)
+        shift_h, shift_c = self.delta(logp, target, q, inputs)
+        h, c = q.split((self.h_profiles, C), -1)
+        residual_h = F.log_softmax(h + shift_h, -1) - F.log_softmax(h, -1)
+        residual_c = shift_c if self.raw_a else F.log_softmax(c + shift_c, -1) - F.log_softmax(c, -1)
+        return torch.cat((residual_h, residual_c), -1)
 
 
-def build(architecture: str, full_policy: bool, seed: int) -> JointEncoder:
+def build(architecture: str, full_policy: bool, seed: int, *, raw_a: bool = False) -> JointEncoder:
     with INITIALIZATION_LOCK, torch.random.fork_rng(devices=[]):
         torch.random.default_generator.manual_seed(seed)
-        return JointEncoder(architecture, full_policy)
+        return JointEncoder(architecture, full_policy, raw_a)
+
+
+def add_side_features(base, residual):
+    h_profiles = residual.shape[1] - C
+    h, c = residual.split((h_profiles, C), dim=1)
+    c_start, flags = 2 * h_profiles, 2 * residual.shape[1]
+    return torch.cat((base[:, :c_start] + h.reshape(-1, c_start),
+                      base[:, c_start:flags] + c.reshape(-1, 2 * C),
+                      base[:, flags:]), dim=1)
 
 
 @torch.no_grad()
 def game_features(model, cache, raw, rows, chunk):
     features = torch.as_tensor(raw[rows], dtype=torch.float32, device=cache.device)
-    sums = features.new_zeros((len(rows) * 2, PROFILES))
+    sums = features.new_zeros((len(rows) * 2, model.h_profiles + C))
     for policy, target, q, slot in cache.chunks(rows, chunk):
         with torch.autocast('cuda', dtype=torch.bfloat16, enabled=cache.device.type == 'cuda'):
             sums.index_add_(0, slot, model(policy, target, q))
-    means = sums / cache.counts(rows)[:, None]
-    h, c = means.split((H, C), dim=1)
-    return torch.cat((features[:, :2 * H] + h.reshape(-1, 2 * H),
-                      features[:, 2 * H:2 * PROFILES] + c.reshape(-1, 2 * C),
-                      features[:, 2 * PROFILES:]), dim=1)
+    return add_side_features(features, sums / cache.counts(rows)[:, None])
 
 
-def backward_questions(model, cache, raw, questions, labels, k, head, chunk):
-    """Apply the question loss across full games while retaining one move chunk at a time."""
+def question_indices(questions):
     unique, inverse = np.unique(np.concatenate(questions), return_inverse=True)
     bounds = np.r_[0, np.cumsum([len(rows) for rows in questions])]
-    local = [inverse[a:b] for a, b in zip(bounds[:-1], bounds[1:])]
+    return unique, [inverse[a:b] for a, b in zip(bounds[:-1], bounds[1:])]
+
+
+def question_ce(features, questions, labels, k, head):
+    targets = torch.as_tensor(labels, device=features.device, dtype=torch.long)
+    return F.cross_entropy(head(question_mean(features, questions), k), targets)
+
+
+def backward_questions(model, cache, raw, questions, labels, k, head, chunk, penalty=None):
+    """Apply CE and optional head regularization with bounded move activations."""
+    unique, local = question_indices(questions)
     features = game_features(model, cache, raw, unique, chunk).requires_grad_()
-    targets = torch.as_tensor(labels, device=cache.device, dtype=torch.long)
-    loss = F.cross_entropy(head(question_mean(features, local), k), targets)
+    ce = question_ce(features, local, labels, k, head)
+    loss = ce if penalty is None else ce + penalty
     if not torch.isfinite(loss):
         raise ValueError('nonfinite policy question loss')
-    (grad,) = torch.autograd.grad(loss, features)
-    side_grad = torch.cat((grad[:, :2 * H].reshape(-1, H),
-                           grad[:, 2 * H:2 * PROFILES].reshape(-1, C)), 1) / cache.counts(unique)[:, None]
+    loss.backward()
+    grad = features.grad
+    c_start = 2 * model.h_profiles
+    side_grad = torch.cat((grad[:, :c_start].reshape(-1, model.h_profiles),
+                           grad[:, c_start:-2].reshape(-1, C)), 1) / cache.counts(unique)[:, None]
     for policy, target, q, slot in cache.chunks(unique, chunk):
         with torch.autocast('cuda', dtype=torch.bfloat16, enabled=cache.device.type == 'cuda'):
             correction = model(policy, target, q)
         correction.backward(side_grad[slot])
-    return float(loss.detach())
+    return float(ce.detach())

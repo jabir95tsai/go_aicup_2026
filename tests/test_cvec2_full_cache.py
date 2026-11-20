@@ -3,8 +3,8 @@ import pandas as pd
 import pytest
 import torch
 
-from go_aicup.tasks.strength.cvec2_policy.full_cache import JointCache
-from go_aicup.tasks.strength.policy_large.cache import PolicyCache, Shard
+from go_aicup.tasks.strength.cvec2_policy.full_cache import JointCache, a_config
+from go_aicup.tasks.strength.policy_large.cache import PolicyCache, Shard, profile_offsets
 
 
 def cache(profiles, shift=0):
@@ -35,3 +35,37 @@ def test_joint_cache_rejects_misaligned_played_moves():
     c.shards[0].target[1] = 9
     with pytest.raises(ValueError, match="played moves differ"):
         JointCache(cache(9), c)
+
+
+
+def test_a_teacher_uses_raw_profile_order_microbatches_and_side_offsets():
+    from go_aicup.features.humansl import PROFILES
+
+    config = a_config()
+    assert tuple(config["profiles_H"]) == PROFILES
+    assert config["inference_positions"] == {"H": 128, "C": 256}
+    assert config["cache_fraction"] == .85
+
+    q = torch.randn(7, 25)
+    side = torch.tensor([0, 1, 0, 1, 1, 0, 1])
+    for family in (q[:, :15], q[:, 15:]):
+        direct = family - family.log_softmax(-1)
+        reference = torch.stack([direct[side == player_side, 0].mean() for player_side in (0, 1)])
+        torch.testing.assert_close(profile_offsets(family, side), reference)
+
+
+def test_h15_joint_view_keeps_board_and_legal_masks_aligned():
+    h, c = cache(15), cache(10)
+    h.offsets = c.offsets = np.zeros((2, 2), dtype=np.float32)
+    for shard in h.shards:
+        shard.board = shard.target[:, None].expand(-1, 91).byte().clone()
+    joint = JointCache(h, c).for_device("cpu")
+    lp, target, q, slot, board = (torch.cat(parts) for parts in zip(*joint.chunks([1, 0], 3, board=True)))
+    assert lp.shape == (5, 25, 362)
+    assert q.shape == (5, 25)
+    assert slot.tolist() == [0, 1, 0, 2, 3]
+    assert board.shape == (5, 91)
+    torch.testing.assert_close(board[:, 0], target.byte())
+    c.shards[0].logp[0, 0, 9] = -torch.inf
+    with pytest.raises(ValueError, match="legal move masks differ"):
+        JointCache(h, c)

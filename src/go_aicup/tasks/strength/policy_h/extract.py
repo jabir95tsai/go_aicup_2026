@@ -40,30 +40,30 @@ CONFIG = ROOT / 'configs/strength/policy_h_cache.json'
 assert set(PROFILES) <= set(ALL_PROFILES)
 
 
-def profile_rows():
+def profile_rows(profiles=PROFILES):
     """Metadata rows [2 colours (black, white), P, 192] for the colour to move."""
     from go_aicup.features.humansl_torch import _katago, profile_metadata
     board, _, _, _ = _katago()
     return np.asarray([[profile_metadata(name).get_metadata_row(nextPlayer=pla, boardArea=361)
-                        for name in PROFILES] for pla in (board.Board.BLACK, board.Board.WHITE)],
+                        for name in profiles] for pla in (board.Board.BLACK, board.Board.WHITE)],
                       dtype=np.float32)
 
 
 class ProfilePolicy(torch.nn.Module):
     """Frozen HumanSL whose metadata-encoder output is the encoded profile row [colour, profile]."""
 
-    def __init__(self, device):
+    def __init__(self, device, profiles=PROFILES):
         super().__init__()
         from go_aicup.features.humansl_rankvec import load_frozen
         self.net, _ = load_frozen(device)   # instance encoder replaced by the identity
-        self.register_buffer('vectors', self.encode(device))
+        self.register_buffer('vectors', self.encode(device, profiles))
 
-    def encode(self, device):
+    def encode(self, device, profiles=PROFILES):
         """Original metadata encoder (class forward; the instance one is the identity) on the profile rows."""
         encoder = self.net.metadata_encoder
-        rows = torch.as_tensor(profile_rows(), device=device)
+        rows = torch.as_tensor(profile_rows(profiles), device=device)
         with torch.no_grad():
-            return type(encoder).forward(encoder, rows.reshape(-1, rows.shape[-1]), None).reshape(2, P, -1).float()
+            return type(encoder).forward(encoder, rows.reshape(-1, rows.shape[-1]), None).reshape(2, len(profiles), -1).float()
 
     def forward(self, x, g, profile, colour):
         return self.net(x, g, input_meta=self.vectors[colour, profile])[0][0][:, 0, :].float()

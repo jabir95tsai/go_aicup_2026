@@ -1,4 +1,4 @@
-"""Fit the three played-policy arms; run the four learned arms only when explicitly invoked."""
+"""Run historical controls or the locked full cvec2 policy experiment."""
 
 import argparse
 from contextlib import contextmanager
@@ -15,7 +15,7 @@ import pandas as pd
 
 from go_aicup.artifacts import file_hash, write_json
 from go_aicup.metrics import K_BUCKETS, score_rank
-from go_aicup.paths import ROOT
+from go_aicup.paths import PROCESSED, ROOT
 from go_aicup.tasks.strength.v2.aggregate import official_scores
 from scripts.strength import humansl_hd_filter as hf, rank_prod_a0_fusion as prod
 from scripts.strength.rank_more_players import player_prior
@@ -187,12 +187,25 @@ def main():
     for command in (first, second):
         command.add_argument("--out", type=Path, required=True)
         command.add_argument("--workers", type=int, default=8)
+    full = tasks.add_parser("all")
+    full.add_argument("--phase", choices=("preflight", "prepare", "train", "score"), required=True)
+    full.add_argument("--out", type=Path)
+    full.add_argument("--stage1-out", type=Path,
+                      default=ROOT / "outputs/rank/humansl/cvec2_policy/stage1/812279")
+    full.add_argument("--folds", type=Path, default=PROCESSED / "cv/strength_folds_seed2027.parquet")
+    full.add_argument("--planes", type=Path,
+                      default=PROCESSED / "strength_features/humansl/cvec2_policy/input_planes")
+    full.add_argument("--workers", type=int, default=88)
+    full.add_argument("--smoke-steps", type=int, choices=range(2, 6), metavar="2..5")
     args = parser.parse_args()
     if args.stage == "stage1":
         stage1(args)
-    else:
+    elif args.stage == "stage2":
         from .train import stage2
         stage2(args)
+    else:
+        from .all_run import execute
+        execute(args)
 
 
 if __name__ == "__main__":

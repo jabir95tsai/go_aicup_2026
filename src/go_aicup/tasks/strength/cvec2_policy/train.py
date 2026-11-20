@@ -27,24 +27,40 @@ CASES = (("R10-C", "R10", False), ("R10-D", "R10", True),
          ("CNN-R10-C", "CNN-R10", False), ("CNN-R10-D", "CNN-R10", True))
 
 
-class FrozenB2(nn.Module):
-    def __init__(self, fitted):
+class B2(nn.Module):
+    def __init__(self, initial, trainable=False):
         super().__init__()
-        values = [fitted.per_k[k] for k in K_BUCKETS]
-        for name, data in (
-            ("means", [scaler.mean_ for scaler, _ in values]),
-            ("scales", [scaler.scale_ for scaler, _ in values]),
-            ("weights", [model.coef_ for _, model in values]),
-            ("biases", [model.intercept_ for _, model in values]),
-        ):
-            self.register_buffer(name, torch.as_tensor(np.stack(data), dtype=torch.float32))
-        for _, model in values:
-            np.testing.assert_array_equal(model.classes_, np.arange(10))
+        width = torch.as_tensor(initial["means"]).shape[-1]
+        buckets = len(K_BUCKETS)
+        for name, shape in (("means", (buckets, width)), ("scales", (buckets, width)),
+                            ("weights", (buckets, 10, width)), ("biases", (buckets, 10))):
+            tensor = torch.as_tensor(initial[name], dtype=torch.float32).clone()
+            if tensor.shape != shape or not torch.isfinite(tensor).all():
+                raise ValueError(f"invalid B2 {name}")
+            if name == "scales" and not (tensor > 0).all():
+                raise ValueError("nonpositive B2 scale")
+            if trainable and name in ("weights", "biases"):
+                self.register_parameter(name, nn.Parameter(tensor))
+            else:
+                self.register_buffer(name, tensor)
 
     def forward(self, features, k):
         slots = torch.as_tensor(np.searchsorted(K_BUCKETS, k), device=features.device)
         x = (features - self.means[slots]) / self.scales[slots]
         return torch.bmm(self.weights[slots], x.unsqueeze(-1)).squeeze(-1) + self.biases[slots]
+
+
+class FrozenB2(B2):
+    def __init__(self, fitted):
+        values = [fitted.per_k[k] for k in K_BUCKETS]
+        for _, model in values:
+            np.testing.assert_array_equal(model.classes_, np.arange(10))
+        super().__init__({
+            "means": np.stack([scaler.mean_ for scaler, _ in values]),
+            "scales": np.stack([scaler.scale_ for scaler, _ in values]),
+            "weights": np.stack([model.coef_ for _, model in values]),
+            "biases": np.stack([model.intercept_ for _, model in values]),
+        })
 
 
 def train_arm(case, cache, raw, indices, labels, k, batches, fitted, device, output):
