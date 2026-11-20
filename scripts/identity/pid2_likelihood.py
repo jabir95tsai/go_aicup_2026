@@ -92,21 +92,14 @@ def games(_args) -> None:
 
 
 # ---------------------------------------------------------------- GPU stage 1: policy top-32
-def policy(args) -> None:
+def extract_positions(groups, workers: int) -> dict:
+    """groups = [(hd, items, ids)], items = [(moves, colors, keep)], ids = int id per item. Returns the
+    top-32 arrays (game id, ply, top, lp, slot) of every kept ply, plus timing and the path check."""
     import torch
 
-    from go_aicup.features.humansl import CACHE, cache_games
     from go_aicup.features.humansl_rankvec import game_logp, load_frozen
     from go_aicup.features.humansl_torch import _init_worker, encode_game
 
-    out = DATA / ("smoke" if args.limit else f"shard_{args.shard:02d}")
-    if (out / "meta.json").exists() and not args.limit:
-        print(f"{out} done", flush=True)
-        return
-    out.mkdir(parents=True, exist_ok=True)
-    table = pd.read_parquet(GAMES).iloc[args.shard::args.num_shards]
-    if args.limit:
-        table = table.iloc[:args.limit]
     device = torch.device("cuda")
     model, _ = load_frozen(device)
     vectors = torch.load(VECTORS, map_location=device)["vectors"]                  # [10, 2, 384]
@@ -169,21 +162,19 @@ def policy(args) -> None:
 
     started = last = time.monotonic()
     positions = 0
-    for hd, komi in ((0, None), (1, 0.5)):
-        sub = table[table["hd"] == hd]
-        if not len(sub):
+    for hd, items, ids in groups:
+        if not len(items):
             continue
-        played_games = cache_games(sub["game_index"], CACHE)
-        items = [(m, c, c == pc) for (m, c), pc in zip(played_games, sub["player_color"])]
+        komi = None if hd == 0 else 0.5
         pending = []
-        with mp.get_context("spawn").Pool(args.workers, initializer=_init_worker,
+        with mp.get_context("spawn").Pool(workers, initializer=_init_worker,
                                           initargs=(model.config, komi)) as pool:
             for i, (bins, globals_, played) in enumerate(pool.imap(encode_game, items, chunksize=4)):
                 moves, colors, keep = items[i]
                 plies = np.flatnonzero(keep)
                 if not np.array_equal(played, moves[plies].astype(np.int64)):
-                    raise ValueError(f"game {sub['game_index'].iloc[i]}: tensor positions differ from moves")
-                pending.append((bins, globals_, played, np.full(len(plies), sub["game_index"].iloc[i]), plies))
+                    raise ValueError(f"game {ids[i]}: tensor positions differ from moves")
+                pending.append((bins, globals_, played, np.full(len(plies), ids[i]), plies))
                 positions += len(plies)
                 while sum(len(p[2]) for p in pending) >= BATCH:
                     cat = [np.concatenate(a) for a in zip(*pending)]
@@ -202,14 +193,37 @@ def policy(args) -> None:
             for s in range(0, len(cat[2]), BATCH):
                 run(*(a[s:s + BATCH] for a in cat))
     seconds = time.monotonic() - started
-    for name, value in parts.items():
-        np.save(out / f"{name}.npy", np.concatenate(value))
-    meta = {"games": int(len(table)), "positions": int(positions), "seconds": round(seconds, 1),
+    result = {name: np.concatenate(value) for name, value in parts.items()}
+    meta = {"positions": int(positions), "seconds": round(seconds, 1),
             "positions_per_second": round(positions / seconds, 1), "path_check": check,
             "rank_idx": RANK_IDX, "top": TOP}
     if steady:
         meta["steady_positions_per_second"] = round((positions - steady["n"]) / (time.monotonic() - steady["t"]), 1)
     print(json.dumps(meta), flush=True)
+    return result, meta
+
+
+def policy(args) -> None:
+    from go_aicup.features.humansl import CACHE, cache_games
+
+    out = DATA / ("smoke" if args.limit else f"shard_{args.shard:02d}")
+    if (out / "meta.json").exists() and not args.limit:
+        print(f"{out} done", flush=True)
+        return
+    out.mkdir(parents=True, exist_ok=True)
+    table = pd.read_parquet(GAMES).iloc[args.shard::args.num_shards]
+    if args.limit:
+        table = table.iloc[:args.limit]
+    groups = []
+    for hd in (0, 1):
+        sub = table[table["hd"] == hd]
+        played_games = cache_games(sub["game_index"], CACHE) if len(sub) else []
+        items = [(m, c, c == pc) for (m, c), pc in zip(played_games, sub["player_color"])]
+        groups.append((hd, items, sub["game_index"].to_numpy()))
+    result, meta = extract_positions(groups, args.workers)
+    for name, value in result.items():
+        np.save(out / f"{name}.npy", value)
+    meta["games"] = int(len(table))
     (out / "meta.json").write_text(json.dumps(meta, indent=1))
 
 
@@ -527,11 +541,159 @@ def evaluate(args) -> None:
     (OUT / "report.json").write_text(json.dumps(report, indent=1, default=float))
 
 
+# ---------------------------------------------------------------- official export
+def position_tensors(arr: dict, moves_of, device):
+    """sorted positions -> (B, PHI, SLOT tensors, first / end position per game id)."""
+    import torch
+    order = np.lexsort((arr["ply"], arr["game"]))
+    arr = {k: v[order] for k, v in arr.items()}
+    n = len(order)
+    last_opp = np.full(n, -1, np.int64)
+    last_own = np.full(n, -1, np.int64)
+    starts = np.flatnonzero(np.r_[True, arr["game"][1:] != arr["game"][:-1]])
+    ends = np.r_[starts[1:], n]
+    span = {}
+    for s, e in zip(starts, ends):
+        g = int(arr["game"][s])
+        moves = moves_of(g).astype(np.int64)
+        ply = arr["ply"][s:e].astype(np.int64)
+        last_opp[s:e] = np.where(ply >= 1, moves[np.maximum(ply - 1, 0)], -1)
+        last_own[s:e] = np.where(ply >= 2, moves[np.maximum(ply - 2, 0)], -1)
+        span[g] = (s, e)
+    bs, ps = [], []
+    for s in range(0, n, 500_000):
+        b, phi = features(arr["top"][s:s + 500_000], arr["lp"][s:s + 500_000], arr["ply"][s:s + 500_000],
+                          last_opp[s:s + 500_000], last_own[s:s + 500_000])
+        bs.append(torch.from_numpy(b))
+        ps.append(torch.from_numpy(phi))
+    return (torch.cat(bs).to(device), torch.cat(ps).to(device),
+            torch.from_numpy(arr["slot"].astype(np.int64)).to(device), span)
+
+
+def export(args) -> None:
+    """official added set: S(ogsa12w) + lambda * LLR with the sealed-chosen sigma / lambda."""
+    import hashlib
+    import os
+
+    import torch
+
+    from go_aicup.data.preprocess import load_store
+    from go_aicup.tasks.identity.assign import top5
+    from scripts.identity.pid2_multilevel_fuse import OUT as STAGE1
+    from scripts.identity.pid2_qmerge_export import BASE, COLS, DAY0, ENC, SUB
+    from scripts.identity.pid2_style_export import STORE
+
+    job = os.environ.get("SLURM_JOB_ID", "local")
+    target = SUB / f"{job}-lik.csv"
+    assert not target.exists(), target
+    rep = json.loads((OUT / "report.json").read_text())
+    assert rep["sealed"]["verdict"]["pass"], "stage 0 did not pass the switch rule"
+    sigma, lam = rep["dev"]["chosen"]["sigma"], rep["dev"]["chosen"]["lambda"]
+    device = torch.device("cuda")
+    theta_pop = torch.tensor(rep["theta_pop"], device=device, dtype=torch.float64)
+    official = OUT / "official"
+    official.mkdir(parents=True, exist_ok=True)
+
+    # 1. positions of both parts (ids: part * 1e6 + row; pool rows first, then question rows)
+    stores, groups = {}, {0: ([], []), 1: ([], [])}
+    for p_i, part in enumerate(("public", "private")):
+        pool_m, pool_c, pool_meta = load_store(f"pool2_{part}", STORE, mmap=False)
+        q_m, q_c, q_meta = load_store(f"pid2_{part}", STORE, mmap=False)
+        games = {}
+        for base_row, (m, c, meta) in ((0, (pool_m, pool_c, pool_meta)), (len(pool_meta), (q_m, q_c, q_meta))):
+            for r, (off, length, col, hd) in enumerate(zip(meta["offset"], meta["length"],
+                                                          meta["color"].astype(str), meta["hd"])):
+                gid = p_i * 1_000_000 + base_row + r
+                moves = np.asarray(m[off:off + length], np.int64)
+                colors = np.asarray(c[off:off + length], np.int64)
+                assert int(hd) <= 1, "official added set has HD 0/1 only"
+                games[gid] = moves
+                groups[int(hd)][0].append((moves, colors, colors == int(col == "W")))
+                groups[int(hd)][1].append(gid)
+        stores[part] = (pool_meta, q_meta, games)
+    cache = official / "positions.npz"
+    if cache.exists():
+        arr = dict(np.load(cache))
+    else:
+        arr, meta = extract_positions([(hd, groups[hd][0], np.array(groups[hd][1])) for hd in (0, 1)],
+                                      args.workers)
+        np.savez(cache, **arr)
+        (official / "policy_meta.json").write_text(json.dumps(meta, indent=1))
+    all_games = {g: m for _, _, gm in stores.values() for g, m in gm.items()}
+    B, PHI, SLOT, span = position_tensors(arr, all_games.__getitem__, device)
+    print(f"official positions {len(SLOT)}, outside top-32 {float((SLOT == TOP).float().mean()):.4f}", flush=True)
+
+    def positions_of(game_lists):
+        pos, own = [], []
+        for i, gl in enumerate(game_lists):
+            for g in gl:
+                s_, e_ = span[int(g)]
+                pos.append(np.arange(s_, e_))
+                own.append(np.full(e_ - s_, i))
+        return (torch.from_numpy(np.concatenate(pos)).to(device), torch.from_numpy(np.concatenate(own)).to(device))
+
+    # 2. per part: base S (= ogsa12w, verified), candidate thetas, LLR, fused top-5
+    choice = json.loads((STAGE1 / "dev_choice.json").read_text())["chosen"]
+    base = pd.read_csv(BASE, dtype=str).set_index("question_id")
+    out = base.copy()
+    report = {"sigma": sigma, "lambda": lam, "base": str(BASE.relative_to(ROOT)), "parts": {}}
+    for p_i, (part, prefix) in enumerate((("public", "pub2"), ("private", "priv2"))):
+        pool_meta, q_meta, _ = stores[part]
+        parts = {}
+        for name, (suffix, _) in ENC.items():
+            d = DAY0 / f"{part}2_d4_9600{suffix}"
+            parts[name] = dict(np.load(d / "parts.npz"))
+            if name == "B":
+                cand = np.load(d / "candidates.npy", allow_pickle=True).astype(str)
+                qids = pd.read_parquet(d / "predictions.parquet").question_id.astype(str).tolist()
+        ml = dict(np.load(DAY0 / f"{part}2_d4_9600_seqB_ml" / "parts.npz"))
+        s_base = (parts["B"]["opening"] + parts["B"]["category"]
+                  + choice["lambda1"] * ml["ml_L1"] + choice["lambda2"] * ml["ml_L2"]
+                  + 16 * sum(w * parts[n]["style"] for n, (_, w) in ENC.items()))
+        np.testing.assert_array_equal(cand[top5(s_base)], base.loc[qids, COLS].to_numpy())
+        players = pool_meta["player_id"].astype(str).to_numpy()
+        assert np.array_equal(np.array(sorted(set(players))), cand)
+        gallery = [p_i * 1_000_000 + np.flatnonzero(players == c) for c in cand]
+        rows = q_meta.groupby("question_id", sort=False).indices
+        query = [p_i * 1_000_000 + len(pool_meta) + np.sort(rows[q]) for q in qids]
+        ks = q_meta.groupby("question_id", sort=False)["num_games"].first().loc[qids].to_numpy().astype(int)
+        pos_g, own_g = positions_of(gallery)
+        th = fit(PHI, B, SLOT, pos_g, own_g, len(gallery), theta_pop, sigma)
+        pos_q, own_q = positions_of(query)
+        lp = played_logp(PHI, B, SLOT, pos_q, torch.cat([th, theta_pop[None]]))
+        llr = torch.zeros(len(query), len(gallery), device=device, dtype=torch.float64)
+        llr.index_add_(0, own_q, lp[:, :-1] - lp[:, -1:])
+        llr = llr.cpu().numpy()
+        np.savez(official / f"{prefix}.npz", llr=llr, theta=th.cpu().numpy(), base=s_base, k=ks,
+                 candidates=cand, qids=np.array(qids))
+        ranked = cand[top5(s_base + lam * llr)]
+        out.loc[qids, COLS] = ranked
+        ch = ranked[:, 0] != base.loc[qids, "top_1"].to_numpy()
+        alone_top1 = cand[llr.argmax(1)] == base.loc[qids, "top_1"].to_numpy()
+        report["parts"][prefix] = {"top1_changed": int(ch.sum()),
+                                   "by_k": {int(k): int(ch[ks == k].sum()) for k in (1, 2, 3, 5)},
+                                   "llr_alone_agrees_with_base_top1": float(alone_top1.mean()),
+                                   "theta_mean_norm": float((th - theta_pop).norm(dim=1).mean())}
+        print(prefix, json.dumps(report["parts"][prefix]), flush=True)
+    orig = base.index[base.index.str.startswith(("pub_", "priv_"))]
+    pd.testing.assert_frame_equal(out.loc[orig], base.loc[orig])
+    assert len(out) == 1600
+    for q, row in out.iterrows():
+        assert len(set(row)) == 5 and all(v.split("_")[0] == q.split("_")[0] for v in row)
+    out.to_csv(target)
+    pd.testing.assert_frame_equal(pd.read_csv(target, dtype=str).set_index("question_id"), out)
+    report["path"] = str(target.relative_to(ROOT))
+    report["sha256"] = hashlib.sha256(target.read_bytes()).hexdigest()
+    (official / f"report_{job}.json").write_text(json.dumps(report, indent=2))
+    print(json.dumps(report, indent=2), flush=True)
+
+
 # ---------------------------------------------------------------- CPU self-checks
 def selfcheck(_args) -> None:
     import torch
     rng = np.random.default_rng(0)
-    n = 3000
+    torch.manual_seed(0)
+    n = 12000
     top = np.stack([rng.permutation(361)[:TOP] for _ in range(n)])
     raw = rng.normal(size=(n, 4, 362))
     lp_all = raw - np.logaddexp.reduce(raw, axis=2, keepdims=True)
@@ -576,9 +738,11 @@ def main() -> None:
     p.add_argument("--limit", type=int, default=0)
     p.add_argument("--workers", type=int, default=11)
     sub.add_parser("evaluate")
+    e = sub.add_parser("export")
+    e.add_argument("--workers", type=int, default=11)
     sub.add_parser("selfcheck")
     args = parser.parse_args()
-    {"games": games, "policy": policy, "evaluate": evaluate, "selfcheck": selfcheck}[args.cmd](args)
+    {"games": games, "policy": policy, "evaluate": evaluate, "export": export, "selfcheck": selfcheck}[args.cmd](args)
 
 
 if __name__ == "__main__":
