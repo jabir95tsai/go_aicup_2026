@@ -1385,6 +1385,71 @@ def combiner_selfcheck() -> None:
     print("combiner selfcheck ok", {"full": np.round(w, 2).tolist(), "small": np.round(ws, 2).tolist()}, flush=True)
 
 
+# ---------------------------------------------------------------- EB lambda grid widened (2026-11-21, after plan 1 chose the edge lambda 4)
+EB2_OUT = OUT / "eb_lambda"
+R6_DEV = [(0, d) for d in range(3600, 3620)]
+R6_SEALED = [(0, d) for d in range(3700, 3720)] + [(1, d) for d in range(3700, 3730)]
+EB2_LAMBDAS = (4.0, 5.0, 6.0, 8.0)
+
+
+def evaluate6(_args) -> None:
+    """EB50 / c 1 fixed; lambda in {4, 5, 6, 8} on fresh dev draws; sealed test of the chosen lambda vs lambda 4."""
+    import torch
+
+    from scripts.identity.pid2_cheap import buckets, official, paired, verdict
+
+    EB2_OUT.mkdir(parents=True, exist_ok=True)
+    stage0 = json.loads((OUT / "report.json").read_text())
+    fp = json.loads((EB_OUT / "report.json").read_text())["final_params"]
+    assert fp["lambda"] == EB2_LAMBDAS[0]
+    ctx = _context(stage0["theta_pop"], rich=True)
+    report, draw, llr, scale, device = ctx["report"], ctx["draw"], ctx["llr"], ctx["scale"], ctx["device"]
+    mask = torch.tensor(fp["mask"], device=device, dtype=torch.float32)
+    prior = torch.tensor(fp["theta_pop"], device=device, dtype=torch.float64)
+    P = torch.from_numpy(np.load(EB_OUT / "precision.npy")).to(device)
+    mk = {int(k): float(v) for k, v in fp["m_k"].items()}
+
+    def get(pool, d):
+        x = draw(pool, d)
+        le = llr(x, 1.0, mask, prior, P)[0]
+        f = np.array([mk[int(k)] for k in x["ks"]])[:, None]
+        return x["rest"] + scale * f * x["style"], le, x
+
+    rows = []
+    for pool, d in R6_DEV:
+        s0, le, x = get(pool, d)
+        for lam in EB2_LAMBDAS:
+            rows.append({"draw": d, "arm": f"l{lam:g}", **buckets(official(s0 + lam * le, x["owner"]), x["ks"])})
+        print(f"dev draw {d}", flush=True)
+    s1 = paired(pd.DataFrame(rows), "l4").set_index("arm")
+    best = s1["d_all"].idxmax()
+    lam = float(best[1:])
+    report["dev"] = s1[["1", "2", "3", "5", "all", "d_1", "d_2", "d_3", "d_5", "d_all", "se_all", "pos"]].to_dict(orient="index")
+    report["chosen"] = {"lambda": lam, "dev_delta": float(s1.loc[best, "d_all"]), "grid_edge": lam == EB2_LAMBDAS[-1]}
+    print("dev (vs lambda 4):\n", s1[["all", "d_1", "d_2", "d_3", "d_5", "d_all", "se_all"]].round(4).to_string(),
+          "\nchosen:", report["chosen"], flush=True)
+    (EB2_OUT / "report.json").write_text(json.dumps(report, indent=1, default=float))
+    if lam == EB2_LAMBDAS[0]:
+        report["stopped"] = "lambda 4 won on the dev draws; sealed draws not opened"
+        (EB2_OUT / "report.json").write_text(json.dumps(report, indent=1, default=float))
+        print(report["stopped"], flush=True)
+        return
+    out = []
+    for pool, d in R6_SEALED:
+        s0, le, x = get(pool, d)
+        for arm, l_ in (("EB", 4.0), ("EBL", lam)):
+            out.append({"pool": pool, "draw": d, "arm": arm, **buckets(official(s0 + l_ * le, x["owner"]), x["ks"])})
+        print(f"sealed pool {pool} draw {d}", flush=True)
+    frame = pd.DataFrame(out)
+    frame.to_csv(EB2_OUT / "sealed_per_draw.csv", index=False)
+    t1, t0 = paired(frame[frame.pool == 1], "EB"), paired(frame[frame.pool == 0], "EB")
+    report["sealed"] = {"pool1": t1.to_dict(orient="records"), "pool0": t0.to_dict(orient="records"),
+                        "verdict": verdict(t1, t0, "EBL")}
+    print("sealed pool 1 vs EB:\n", t1.round(4).to_string(index=False), "\nsealed pool 0 vs EB:\n",
+          t0.round(4).to_string(index=False), "\nverdict:", json.dumps(report["sealed"]["verdict"]), flush=True)
+    (EB2_OUT / "report.json").write_text(json.dumps(report, indent=1, default=float))
+
+
 # ---------------------------------------------------------------- official export
 def position_tensors(arr: dict, moves_of, device, rich: dict | None = None):
     """sorted positions -> (B, PHI, SLOT tensors, first / end position per game id); rich = the
@@ -1457,13 +1522,18 @@ def export(args) -> None:
         fp = r4["final_params"]
         sigma, lam, mk = 1.0, fp["lambda"], {int(k): float(v) for k, v in fp["m_k"].items()}
         tag = "likeb"
+        if args.eb_lambda:                 # widened lambda grid (evaluate6), only if it passed
+            r6 = json.loads((EB2_OUT / "report.json").read_text())
+            assert r6["sealed"]["verdict"]["pass"], "the widened lambda did not pass the switch rule"
+            lam = float(r6["chosen"]["lambda"])
+            tag = f"likeb-l{lam:g}"
     comb = None
     if args.combine:                       # per-k learned fusion on top of EB (plan 2), only if it passed
         assert args.eb, "--combine stacks on --eb"
         r5 = json.loads((COMB_OUT / "report.json").read_text())
-        assert r5["sealed"]["verdict"]["pass"], "the learned fusion did not pass the switch rule"
+        assert args.probe or r5["sealed"]["verdict"]["pass"], "the learned fusion did not pass the switch rule"
         comb = {int(k): np.array(v, np.float64) for k, v in r5["chosen"]["weights"].items()}
-        tag = "comb"
+        tag = "comb-probe" if args.probe else "comb"
     target = SUB / f"{job}-{tag}.csv"
     assert not target.exists(), target
     device = torch.device("cuda")
@@ -1680,16 +1750,19 @@ def main() -> None:
     sub.add_parser("evaluate3")
     sub.add_parser("evaluate4")
     sub.add_parser("evaluate5")
+    sub.add_parser("evaluate6")
     e = sub.add_parser("export")
     e.add_argument("--workers", type=int, default=11)
     e.add_argument("--round2", action="store_true", help="use the round-2 choice (refuses if it kept B0)")
     e.add_argument("--rich", action="store_true", help="use the rich-feature choice (refuses unless it passed)")
     e.add_argument("--eb", action="store_true", help="use the empirical-Bayes prior (refuses unless it passed)")
     e.add_argument("--combine", action="store_true", help="per-k learned fusion on top of --eb (refuses unless it passed)")
+    e.add_argument("--probe", action="store_true", help="with --combine: LB probe even though the gate failed")
+    e.add_argument("--eb-lambda", action="store_true", help="with --eb: the widened-grid lambda (refuses unless it passed)")
     sub.add_parser("selfcheck")
     args = parser.parse_args()
     {"games": games, "policy": policy, "evaluate": evaluate, "evaluate2": evaluate2, "export": export,
-     "rich-features": rich_features_cmd, "evaluate3": evaluate3, "evaluate4": evaluate4, "evaluate5": evaluate5,
+     "rich-features": rich_features_cmd, "evaluate3": evaluate3, "evaluate4": evaluate4, "evaluate5": evaluate5, "evaluate6": evaluate6,
      "selfcheck": selfcheck}[args.cmd](args)
 
 

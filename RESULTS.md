@@ -4410,3 +4410,15 @@ GPU 效能與正式分數尚未驗證。第二階段獨立手動提交，沒有 
     - 現行手調權重已接近 conditional logit 能找到的最佳；剩餘增益約 +0.002，與過去兩次逐 k 加權的量級（約 +0.003）相同。
     - k＝1 沒有改善。
   - **基底維持 `820880-likeb.csv`。**
+
+### 2026-11-21：競賽一——FULL 融合 LB 探針＋EB λ 網格擴大（使用者「產生提交檔 並擴大 λ 網格再測一次」；事前登記，看結果前寫定）
+
+- **探針檔：** 計畫二 FULL 權重（未過 gate），`export --eb --combine --probe`，輸出 `<job>-comb-probe.csv`（`likelihood_export_combprobe.slurm`）。
+  - **預期 Public（對 `820880-likeb.csv`）：** +0.0019 × 一半 ≈ +0.001，遠在雜訊內。
+  - **保留規則：** 本地未過換檔規則，**不論升降都不升為基底**，只作方向參考。
+- **λ 網格：** EB50、c＝1、m_k 不變，λ ∈ {4, 5, 6, 8}。
+  - λ 只縮放 LLR，不需重擬合。
+  - draws：全新開發 pool 0 3600–3619；封存 pool 0 3700–3719、pool 1 3700–3729。
+  - **判定：** 開發選 λ。選到 4 → 停止，不開封存題組。否則封存以 11/20 規則對 λ＝4（現基底）判定；選到 8 記為邊界風險。
+  - **通過：** 匯出 `<job>-likeb-l<λ>.csv`（`likelihood_export_eblam.slurm`，`export --eb --eb-lambda`）。Public 對現基底 ≥ −0.005 → 成為基底；降超過 0.005 → 維持 `820880-likeb.csv`。
+- **程式：** `pid2_likelihood.py` 新增 `evaluate6`、export 旗標 `--probe`（只允許與 `--combine` 一起用）與 `--eb-lambda`。
