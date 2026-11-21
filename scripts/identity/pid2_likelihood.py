@@ -296,9 +296,11 @@ def features(top: np.ndarray, lp: np.ndarray, ply: np.ndarray, last_opp: np.ndar
 
 
 # ---------------------------------------------------------------- MAP fit and scores (torch)
-def fit(phi, b, slot, pos, owner, n_owner, prior, sigma, iters=25, chunk=40_000, max_step=1.0, mask=None):
+def fit(phi, b, slot, pos, owner, n_owner, prior, sigma, iters=25, chunk=40_000, max_step=1.0, mask=None,
+        precision=None):
     """batched Newton MAP of theta [n_owner, D] for positions pos (owner[i] = owner of pos[i]);
-    mask [D] zeroes features (their theta stays at the prior)."""
+    mask [D] zeroes features (their theta stays at the prior). precision [D, D] (float64) replaces
+    the isotropic prior I / sigma^2 by N(prior, precision^-1) (PID_EB_COMBINER_PLAN.md)."""
     import torch
     device = phi.device
     d = phi.shape[2]
@@ -317,8 +319,12 @@ def fit(phi, b, slot, pos, owner, n_owner, prior, sigma, iters=25, chunk=40_000,
             h = torch.einsum("pj,pjd,pje->pde", pi, f, f) - mean[:, :, None] * mean[:, None, :]
             grad.index_add_(0, o, g.double())
             hess.index_add_(0, o, h.double())
-        grad -= (theta - prior[None]) / sigma ** 2
-        hess += eye / sigma ** 2
+        if precision is None:
+            grad -= (theta - prior[None]) / sigma ** 2
+            hess += eye / sigma ** 2
+        else:
+            grad -= (theta - prior[None]) @ precision
+            hess += precision[None]
         step = torch.linalg.solve(hess, grad[..., None])[..., 0]
         size = step.abs().max(dim=1, keepdim=True).values
         step = step * torch.clamp(max_step / size.clamp(min=1e-12), max=1.0)   # damped Newton
@@ -485,14 +491,15 @@ def _context(theta_fixed=None, rich: bool = False) -> dict:
     print(f"reproduction max diff {report['reproduction_max_diff']:.2e}", flush=True)
     assert report["reproduction_max_diff"] <= 1e-9
 
-    def llr(x, sigma, mask=None, prior=None):
+    def llr(x, sigma, mask=None, prior=None, precision=None):
         """[Q, C] LLR with candidate thetas fitted on the draw's reference games; mask zeroes the
-        features outside the kept dims; prior = that mask's population theta (default theta_pop)."""
+        features outside the kept dims; prior = that mask's population theta (default theta_pop);
+        precision = full prior precision (replaces sigma)."""
         if mask is None and dims > DIM:
             mask = base_mask
         prior = theta_pop if prior is None else prior
         pos_g, own_g = positions_of(x["gallery"])
-        th = fit(PHI, B, SLOT, pos_g, own_g, len(x["gallery"]), prior, sigma, mask=mask)
+        th = fit(PHI, B, SLOT, pos_g, own_g, len(x["gallery"]), prior, sigma, mask=mask, precision=precision)
         pos_q, own_q = positions_of(x["query"])
         lp = played_logp(PHI, B, SLOT, pos_q, torch.cat([th, prior[None]]), mask=mask)
         diff = lp[:, :-1] - lp[:, -1:]
@@ -975,6 +982,224 @@ def evaluate3(_args) -> None:
     (RICH_OUT / "report.json").write_text(json.dumps(report, indent=1, default=float))
 
 
+# ---------------------------------------------------------------- empirical-Bayes prior (PID_EB_COMBINER_PLAN.md, plan 1)
+EB_OUT = OUT / "eb"
+R4_DEV = [(0, d) for d in range(3200, 3220)]
+R4_SEALED = [(0, d) for d in range(3300, 3320)] + [(1, d) for d in range(3300, 3330)]
+EB_CS = (0.5, 1.0, 2.0)
+EB_LAMBDAS = (2.0, 3.0, 4.0)
+EB_FLOOR = 0.01                    # eigenvalue floor (sd 0.1)
+EB_BLOCKS = 4                      # 4 x 10 games per pool-0 player
+EB_BLOCK_GAMES = 10
+EB_FIT_SIGMA = 10.0                # weak prior for the block fits (as fit_pop)
+
+
+def cross_cov(thetas: np.ndarray) -> np.ndarray:
+    """thetas [blocks, players, d] fitted on disjoint game sets of the same players -> between-player
+    covariance: the mean over block pairs of the cross-covariance, symmetrised (noise is independent
+    across blocks, so it drops out of the expectation)."""
+    t = thetas - thetas.mean(axis=1, keepdims=True)
+    n = t.shape[1]
+    pairs = [(a, b) for a in range(len(t)) for b in range(a + 1, len(t))]
+    c = sum(t[a].T @ t[b] for a, b in pairs) / (len(pairs) * (n - 1))
+    return (c + c.T) / 2
+
+
+def regularise(cov: np.ndarray, floor: float = EB_FLOOR) -> tuple[np.ndarray, dict]:
+    w, v = np.linalg.eigh(cov)
+    info = {"eig_raw": np.round(w[::-1], 5).tolist(), "clipped": int((w < floor).sum()),
+            "negative": int((w < 0).sum())}
+    w = np.maximum(w, floor)
+    return (v * w) @ v.T, info
+
+
+def precision_of(cov_kept: np.ndarray, kept: np.ndarray, d: int, c: float) -> np.ndarray:
+    """[d, d] prior precision: inv(c * cov) on the kept dims, 1 on the masked dims (theta stays at the prior)."""
+    p = np.eye(d)
+    p[np.ix_(kept, kept)] = np.linalg.inv(c * cov_kept)
+    return p
+
+
+def evaluate4(_args) -> None:
+    """empirical-Bayes prior: Sigma from pool-0 block fits, selection on dev draws, sealed test vs RICH."""
+    import torch
+
+    from scripts.identity.pid2_cheap import COLS, buckets, normalise, official, paired, verdict
+
+    EB_OUT.mkdir(parents=True, exist_ok=True)
+    stage0 = json.loads((OUT / "report.json").read_text())
+    r3 = json.loads((RICH_OUT / "report.json").read_text())
+    fp3 = r3["final_params"]
+    assert fp3["groups"] == ["G3"] and fp3["sigma"] == 3.0 and fp3["lambda"] == 3.0, fp3
+    ctx = _context(stage0["theta_pop"], rich=True)
+    report, draw, llr, scale, device = ctx["report"], ctx["draw"], ctx["llr"], ctx["scale"], ctx["device"]
+    PHI, B, SLOT, positions_of, fit_pop = ctx["PHI"], ctx["B"], ctx["SLOT"], ctx["positions_of"], ctx["fit_pop"]
+    assert PHI.shape[2] == DIM_RICH
+    mk = {int(k): float(v) for k, v in fp3["m_k"].items()}
+    m37 = torch.tensor(fp3["mask"], device=device, dtype=torch.float32)
+    prior37 = torch.tensor(fp3["theta_pop"], device=device, dtype=torch.float64)
+    report["rich_prior_refit_max_diff"] = float((fit_pop(m37) - prior37).abs().max())
+    m50 = torch.ones(DIM_RICH, device=device)
+    prior50 = fit_pop(m50)
+    arms = {"eb37": (m37, prior37), "eb50": (m50, prior50)}
+
+    def fused(x, l, lam):
+        f = np.array([mk[int(k)] for k in x["ks"]])[:, None]
+        return x["rest"] + scale * f * x["style"] + lam * l
+
+    def rich_llr(x):
+        return llr(x, fp3["sigma"], m37, prior37)[0]
+
+    # ---- engineering: precision = I / sigma^2 reproduces RICH point for point
+    x = draw(*R4_DEV[0])
+    iso = torch.eye(DIM_RICH, device=device, dtype=torch.float64) / fp3["sigma"] ** 2
+    a = buckets(official(fused(x, rich_llr(x), 3.0), x["owner"]), x["ks"])
+    b_ = buckets(official(fused(x, llr(x, 1.0, m37, prior37, iso)[0], 3.0), x["owner"]), x["ks"])
+    report["iso_reproduction"] = max(abs(a[c] - b_[c]) for c in COLS)
+    print("iso reproduction:", report["iso_reproduction"], flush=True)
+    assert report["iso_reproduction"] == 0.0
+
+    # ---- Sigma: pool-0 players, 4 disjoint blocks of 10 games, weak-prior fits, cross-covariance
+    bank = ctx["env"]["bank"]
+    blocks = [[] for _ in range(EB_BLOCKS)]
+    for _, grp in bank[bank["pool"] == 0].groupby("player_id"):
+        gm = grp.sort_values("order")["game"].to_numpy()
+        assert len(gm) >= EB_BLOCKS * EB_BLOCK_GAMES, len(gm)
+        for i in range(EB_BLOCKS):
+            blocks[i].append(gm[i * EB_BLOCK_GAMES:(i + 1) * EB_BLOCK_GAMES])
+    n_players = len(blocks[0])
+    covs, prec = {}, {}
+    report["sigma"] = {}
+    for name, (m, pr) in arms.items():
+        kept = np.flatnonzero(m.cpu().numpy() > 0)
+        th = []
+        for bl in blocks:
+            p_, o_ = positions_of(bl)
+            th.append(fit(PHI, B, SLOT, p_, o_, n_players, pr, EB_FIT_SIGMA, mask=m).cpu().numpy()[:, kept])
+        raw = cross_cov(np.stack(th))
+        cov, info = regularise(raw)
+        covs[name] = cov
+        np.save(EB_OUT / f"sigma_{name}.npy", cov)
+        w, v = np.linalg.eigh(cov)
+        top = [{"eig": float(w[-i]), "dims": [int(kept[j]) for j in np.argsort(-np.abs(v[:, -i]))[:4]]}
+               for i in range(1, 6)]
+        noise = float(np.mean([np.diag(np.cov(t.T)).mean() for t in th]) - np.diag(raw).mean())
+        report["sigma"][name] = {**info, "players": n_players, "kept_dims": kept.tolist(),
+                                 "between_sd_raw": np.round(np.sqrt(np.maximum(np.diag(raw), 0)), 3).tolist(),
+                                 "mean_noise_var": noise, "top_eigvecs": top}
+        print(name, "between-player sd:", report["sigma"][name]["between_sd_raw"], "clipped",
+              info["clipped"], "of", len(kept), "negative", info["negative"], flush=True)
+        for c in EB_CS:
+            prec[(name, c)] = torch.tensor(precision_of(cov, kept, DIM_RICH, c), device=device, dtype=torch.float64)
+    (EB_OUT / "report.json").write_text(json.dumps(report, indent=1, default=float))
+
+    # ---- selection (dev draws)
+    rows = []
+    for pool, d in R4_DEV:
+        x = draw(pool, d)
+        rows.append({"draw": d, "arm": "RICH", **buckets(official(fused(x, rich_llr(x), 3.0), x["owner"]), x["ks"])})
+        for name, (m, pr) in arms.items():
+            for c in EB_CS:
+                le = llr(x, 1.0, m, pr, prec[(name, c)])[0]
+                for lam in EB_LAMBDAS:
+                    rows.append({"draw": d, "arm": f"{name}_c{c:g}_l{lam:g}",
+                                 **buckets(official(fused(x, le, lam), x["owner"]), x["ks"])})
+        print(f"dev draw {d}", flush=True)
+    s1 = paired(pd.DataFrame(rows), "RICH").set_index("arm")
+    grid = s1.drop(index="RICH")
+    best = grid["d_all"].idxmax()
+    name, c_s, l_s = best.split("_")
+    c, lam = float(c_s[1:]), float(l_s[1:])
+    report["dev"] = s1[["1", "2", "3", "5", "all", "d_1", "d_2", "d_3", "d_5", "d_all", "se_all"]].to_dict(orient="index")
+    report["chosen"] = {"arm": name, "c": c, "lambda": lam, "dev_delta": float(grid.loc[best, "d_all"]),
+                        "grid_edge": bool(c == EB_CS[-1] or lam == EB_LAMBDAS[-1])}
+    print("dev (vs RICH):\n", s1[["all", "d_1", "d_2", "d_3", "d_5", "d_all", "se_all"]].round(4).to_string(),
+          "\nchosen:", report["chosen"], flush=True)
+    m, pr = arms[name]
+    P = prec[(name, c)]
+    report["final_params"] = {"arm": name, "mask": m.cpu().tolist(), "c": c, "lambda": lam, "m_k": mk,
+                              "theta_pop": pr.cpu().tolist(), "sigma_file": f"sigma_{name}.npy"}
+    np.save(EB_OUT / "precision.npy", P.cpu().numpy())
+    (EB_OUT / "report.json").write_text(json.dumps(report, indent=1, default=float))
+
+    # ---- stability on pool 1 (pool-0 games were used for Sigma)
+    sets_a, sets_b = [], []
+    for _, grp in bank[bank["pool"] == 1].groupby("player_id"):
+        gm = grp.sort_values("order")["game"].to_numpy()
+        sets_a.append(gm[:10])
+        sets_b.append(gm[10:20])
+    pa, oa = positions_of(sets_a)
+    pb, ob = positions_of(sets_b)
+    stab = {}
+    for label, mm, pp, sg, pc in (("rich", m37, prior37, fp3["sigma"], None), ("eb", m, pr, 1.0, P)):
+        ta = (fit(PHI, B, SLOT, pa, oa, len(sets_a), pp, sg, mask=mm, precision=pc) - pp).cpu().numpy()
+        tb = (fit(PHI, B, SLOT, pb, ob, len(sets_b), pp, sg, mask=mm, precision=pc) - pp).cpu().numpy()
+        stab[label] = {"same_player_cos": float((normalise(ta) * normalise(tb)).sum(1).mean()),
+                       "shifted_player_cos": float((normalise(ta) * normalise(np.roll(tb, 1, 0))).sum(1).mean())}
+    report["stability_pool1"] = stab
+    print("stability (pool 1):", stab, flush=True)
+    (EB_OUT / "report.json").write_text(json.dumps(report, indent=1, default=float))
+
+    # ---- sealed
+    out = []
+    for pool, d in R4_SEALED:
+        x = draw(pool, d)
+        lr = rich_llr(x)
+        le = llr(x, 1.0, m, pr, P)[0]
+        for arm, sc in (("RICH", fused(x, lr, 3.0)), ("EB", fused(x, le, lam)), ("eb_alone", le), ("rich_alone", lr)):
+            out.append({"pool": pool, "draw": d, "arm": arm, **buckets(official(sc, x["owner"]), x["ks"])})
+        print(f"sealed pool {pool} draw {d}", flush=True)
+    frame = pd.DataFrame(out)
+    frame.to_csv(EB_OUT / "sealed_per_draw.csv", index=False)
+    t1, t0 = paired(frame[frame.pool == 1], "RICH"), paired(frame[frame.pool == 0], "RICH")
+    report["sealed"] = {"pool1": t1.to_dict(orient="records"), "pool0": t0.to_dict(orient="records"),
+                        "verdict": verdict(t1, t0, "EB")}
+    print("sealed pool 1 vs RICH:\n", t1.round(4).to_string(index=False), "\nsealed pool 0 vs RICH:\n",
+          t0.round(4).to_string(index=False), "\nverdict:", json.dumps(report["sealed"]["verdict"]), flush=True)
+    (EB_OUT / "report.json").write_text(json.dumps(report, indent=1, default=float))
+
+
+def eb_selfcheck() -> None:
+    """synthetic: planted anisotropic Sigma is recovered from 4 disjoint blocks, and the full-Sigma
+    MAP beats every isotropic sigma on theta MSE."""
+    import torch
+    rng = np.random.default_rng(1)
+    torch.manual_seed(1)
+    n_p, per, d, J = 300, 300, 6, 8
+    sd = np.array([1.0, 1.0, 1.0, 0.2, 0.2, 0.2])
+    corr = np.eye(d)
+    corr[0, 1] = corr[1, 0] = 0.6
+    cov_true = corr * np.outer(sd, sd)
+    theta = rng.multivariate_normal(np.zeros(d), cov_true, size=n_p)
+
+    def sample(n_pos):
+        n = n_p * n_pos
+        phi = torch.from_numpy(rng.normal(size=(n, J, d)).astype(np.float32) * 0.7)
+        b = torch.log_softmax(torch.from_numpy(rng.normal(size=(n, J)).astype(np.float32)), dim=1)
+        owner = torch.from_numpy(np.repeat(np.arange(n_p), n_pos))
+        z = b + torch.einsum("pjd,pd->pj", phi.float(), torch.from_numpy(theta).float()[owner])
+        slot = torch.distributions.Categorical(logits=z).sample()
+        return phi, b, slot, torch.arange(n), owner
+
+    zero = torch.zeros(d, dtype=torch.float64)
+    ths = []
+    for _ in range(EB_BLOCKS):
+        phi, b, slot, pos, owner = sample(per)
+        ths.append(fit(phi, b, slot, pos, owner, n_p, zero, EB_FIT_SIGMA).numpy())
+    cov, _ = regularise(cross_cov(np.stack(ths)))
+    rel = np.abs(np.diag(cov) - np.diag(cov_true)) / np.diag(cov_true)
+    assert rel.max() < 0.25, (np.diag(cov), rel)
+    assert abs(cov[0, 1] / np.sqrt(cov[0, 0] * cov[1, 1]) - 0.6) < 0.15, cov[0, 1]
+    phi, b, slot, pos, owner = sample(60)              # a small fresh block: the prior matters
+    P = torch.from_numpy(precision_of(cov, np.arange(d), d, 1.0))
+    mse_eb = float(((fit(phi, b, slot, pos, owner, n_p, zero, 1.0, precision=P).numpy() - theta) ** 2).mean())
+    mse_iso = {s: float(((fit(phi, b, slot, pos, owner, n_p, zero, s).numpy() - theta) ** 2).mean())
+               for s in (0.3, 0.5, 1.0, 3.0, 10.0)}
+    assert mse_eb < min(mse_iso.values()), (mse_eb, mse_iso)
+    print("eb selfcheck ok", {"diag_rel_err": np.round(rel, 3).tolist(), "mse_eb": round(mse_eb, 4),
+                              "mse_iso": {k: round(v, 4) for k, v in mse_iso.items()}}, flush=True)
+
+
 # ---------------------------------------------------------------- official export
 def position_tensors(arr: dict, moves_of, device, rich: dict | None = None):
     """sorted positions -> (B, PHI, SLOT tensors, first / end position per game id); rich = the
@@ -1040,13 +1265,22 @@ def export(args) -> None:
         fp = r3["final_params"]
         sigma, lam, mk = fp["sigma"], fp["lambda"], {int(k): float(v) for k, v in fp["m_k"].items()}
         tag = "likrich"
+    precision = None
+    if args.eb:                            # empirical-Bayes prior (PID_EB_COMBINER_PLAN.md), only if it passed
+        r4 = json.loads((EB_OUT / "report.json").read_text())
+        assert r4["sealed"]["verdict"]["pass"], "the empirical-Bayes prior did not pass the switch rule"
+        fp = r4["final_params"]
+        sigma, lam, mk = 1.0, fp["lambda"], {int(k): float(v) for k, v in fp["m_k"].items()}
+        tag = "likeb"
     target = SUB / f"{job}-{tag}.csv"
     assert not target.exists(), target
     device = torch.device("cuda")
     theta_pop = torch.tensor(rep["theta_pop"], device=device, dtype=torch.float64)
-    if args.rich:
+    if args.rich or args.eb:
         theta_pop = torch.tensor(fp["theta_pop"], device=device, dtype=torch.float64)
         rich_mask = torch.tensor(fp["mask"], device=device, dtype=torch.float32)
+    if args.eb:
+        precision = torch.from_numpy(np.load(EB_OUT / "precision.npy")).to(device)
     official = OUT / "official"
     official.mkdir(parents=True, exist_ok=True)
 
@@ -1077,7 +1311,7 @@ def export(args) -> None:
         (official / "policy_meta.json").write_text(json.dumps(meta, indent=1))
     all_games = {g: m for _, _, gm in stores.values() for g, m in gm.items()}
     B, PHI, SLOT, span = position_tensors(arr, all_games.__getitem__, device,
-                                          dict(np.load(RICH / "official.npz")) if args.rich else None)
+                                          dict(np.load(RICH / "official.npz")) if args.rich or args.eb else None)
     print(f"official positions {len(SLOT)}, outside top-32 {float((SLOT == TOP).float().mean()):.4f}", flush=True)
 
     def positions_of(game_lists):
@@ -1093,7 +1327,7 @@ def export(args) -> None:
     choice = json.loads((STAGE1 / "dev_choice.json").read_text())["chosen"]
     base = pd.read_csv(BASE, dtype=str).set_index("question_id")
     out = base.copy()
-    report = {"sigma": sigma, "lambda": lam, "m_k": mk, "base": str(BASE.relative_to(ROOT)), "parts": {}}
+    report = {"sigma": sigma, "lambda": lam, "m_k": mk, "eb": bool(args.eb), "base": str(BASE.relative_to(ROOT)), "parts": {}}
     for p_i, (part, prefix) in enumerate((("public", "pub2"), ("private", "priv2"))):
         pool_meta, q_meta, _ = stores[part]
         parts = {}
@@ -1116,7 +1350,7 @@ def export(args) -> None:
         query = [p_i * 1_000_000 + len(pool_meta) + np.sort(rows[q]) for q in qids]
         ks = q_meta.groupby("question_id", sort=False)["num_games"].first().loc[qids].to_numpy().astype(int)
         pos_g, own_g = positions_of(gallery)
-        th = fit(PHI, B, SLOT, pos_g, own_g, len(gallery), theta_pop, sigma, mask=rich_mask)
+        th = fit(PHI, B, SLOT, pos_g, own_g, len(gallery), theta_pop, sigma, mask=rich_mask, precision=precision)
         pos_q, own_q = positions_of(query)
         lp = played_logp(PHI, B, SLOT, pos_q, torch.cat([th, theta_pop[None]]), mask=rich_mask)
         llr = torch.zeros(len(query), len(gallery), device=device, dtype=torch.float64)
@@ -1220,6 +1454,11 @@ def selfcheck(_args) -> None:
     late = est50[37:42] + est50[42:47] - true50[37:42]
     err = max(float(early.abs().max()), float(late.abs().max()), float((est50[47:50] - true50[47:50]).abs().max()))
     assert err < 0.3, (err, est50[27:50])
+    # full prior precision = I / sigma^2 is the isotropic fit
+    iso = fit(PHI, B, slot, pos, owner, 2, torch.zeros(DIM, dtype=torch.float64), 1.0,
+              precision=torch.eye(DIM, dtype=torch.float64) / 9.0)
+    assert (iso - t27).abs().max() < 1e-9
+    eb_selfcheck()
     print("selfcheck ok", flush=True)
 
 
@@ -1236,14 +1475,17 @@ def main() -> None:
     sub.add_parser("evaluate2")
     sub.add_parser("rich-features")
     sub.add_parser("evaluate3")
+    sub.add_parser("evaluate4")
     e = sub.add_parser("export")
     e.add_argument("--workers", type=int, default=11)
     e.add_argument("--round2", action="store_true", help="use the round-2 choice (refuses if it kept B0)")
     e.add_argument("--rich", action="store_true", help="use the rich-feature choice (refuses unless it passed)")
+    e.add_argument("--eb", action="store_true", help="use the empirical-Bayes prior (refuses unless it passed)")
     sub.add_parser("selfcheck")
     args = parser.parse_args()
     {"games": games, "policy": policy, "evaluate": evaluate, "evaluate2": evaluate2, "export": export,
-     "rich-features": rich_features_cmd, "evaluate3": evaluate3, "selfcheck": selfcheck}[args.cmd](args)
+     "rich-features": rich_features_cmd, "evaluate3": evaluate3, "evaluate4": evaluate4,
+     "selfcheck": selfcheck}[args.cmd](args)
 
 
 if __name__ == "__main__":
