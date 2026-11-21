@@ -28,8 +28,9 @@ CASES = (("R10-C", "R10", False), ("R10-D", "R10", True),
 
 
 class B2(nn.Module):
-    def __init__(self, initial, trainable=False):
+    def __init__(self, initial, trainable=False, *, exact_dot=False):
         super().__init__()
+        self.exact_dot = exact_dot
         width = torch.as_tensor(initial["means"]).shape[-1]
         buckets = len(K_BUCKETS)
         for name, shape in (("means", (buckets, width)), ("scales", (buckets, width)),
@@ -47,6 +48,9 @@ class B2(nn.Module):
     def forward(self, features, k):
         slots = torch.as_tensor(np.searchsorted(K_BUCKETS, k), device=features.device)
         x = (features - self.means[slots]) / self.scales[slots]
+        if self.exact_dot:
+            # The overlapping teacher enables TF32 globally. Keep this small FP32 head independent of that flag.
+            return (self.weights[slots] * x.unsqueeze(1)).sum(-1) + self.biases[slots]
         return torch.bmm(self.weights[slots], x.unsqueeze(-1)).squeeze(-1) + self.biases[slots]
 
 

@@ -81,13 +81,15 @@
 
 從同一輪顯存的完整 H15 與 C10 `Shard.q` 各自算 `offset = mean_t(logsumexp_profile(q_t))`，每盤本人、對手各一個 offset。從原版 A 對應組別的 raw 平均 log 機率減去該組 offset，沿用原先逐手正規化定義。GPU 產生的各 profile raw q 均值用於 parity。只持久化兩組每盤各側 offset（合計約 **2.5 MiB**）、來源、profile 順序及 raw 均值誤差。 [正規化與側別聚合](played.py)
 
-- `A/C10-logsoftmax` 只套用 C10 offset。C10 offset 落盤即可在 CPU 擬合此 52 維 B2。有排程收益時可和仍在執行的 H teacher 重疊。四個聯合臂以 CPU 前置的 A B2 與對齊完成的 H/C 快取啟動。
+- `A/C10-logsoftmax` 只套用 C10 offset。C10 offset 落盤即可在 CPU 擬合此 52 維 B2。有排程收益時可和仍在執行的 H teacher 重疊。四個聯合臂以 CPU 前置的 A B2 與對齊完成的擬合盤 H/C 快取啟動。
 - `A/H15-C10-logsoftmax` 套用 H15 和同一份 C10 offset，在 CPU 以相同題目重擬合 B2。和 `A/C10-logsoftmax` 的差值量 H15 正規化增加了什麼，和原版 A 比較兩者合計影響。
 - 確認所有 165,075 盤的兩側 offsets 完整且有限，H 與 C 分開做 profile normalizer。以小批次 CPU 直接 `log_softmax` 核對逐手歸約。新的 H teacher 已做完整 15 profiles，本對照只需重用 q，額外工作是逐盤歸約及 CPU 擬合。
 
 ## 7 排程 成本與續跑
 
-CPU 前置建立或驗證 input planes、固定抽題、擬合 A B2 並驗證原 A parity。八卡一次建立 H15／C10 快取和兩組 offsets，快取對齊後用 A B2 啟動四聯合臂。四臂各一 GPU 並行，短測優先量使用快取較小的 C 卡跑訓練時的工作空間與跨卡吞吐。全盤母臂完成即排加權臂，空出的卡抽已完訓臂的擬合盤和 E2 特徵。GPU 產物核對完成即釋放八卡，最終 B2 對照、E2 評分與 bootstrap 由 CPU 完成。
+CPU 前置建立或驗證 input planes、固定抽題、擬合 A B2 並驗證原 A parity。GPU 按擬合盤與 E2 分開平衡手數，維持原盤序，各自分配四個對齊的 H／C 常駐分片。四張 H 卡先算擬合盤。C 卡各自完成 C10 擬合盤及 E2 後，保留原 C10 快取，從未領取的 H15 擬合盤範圍取整盤工作，將 policy、q、落點、側別及棋子圖寫回原 H 分片。各範圍只處理一次，發布前同步跨卡寫入並檢查覆蓋。
+
+擬合盤對齊並通過 raw parity 後，四張 C 卡以 A B2 和原固定批次開訓，四張 H 卡同時算剩餘的 E2。全盤母臂完成即排加權臂。兩個 split 皆對齊並通過 raw parity 後，空出的 C 卡抽已完訓臂的擬合盤和 E2 特徵。GPU 產物核對完成即釋放八卡，最終 B2 對照、E2 評分與 bootstrap 由 CPU 完成。
 
 | 段落 | 成本估計 |
 | --- | --- |
@@ -96,7 +98,7 @@ CPU 前置建立或驗證 input planes、固定抽題、擬合 A B2 並驗證原
 | 模型更新 | 四個聯合臂和一個加權臂各 2,500 步，共 **12,500 updates**。 |
 | 八卡正式段 | 粗估 **6–9 小時、48–72 GPU-h**，初步上限 12 小時，另計 CPU 打包和評分。 |
 
-八卡短測先量完整 H15 的顯存峰值、微批、編譯啟動與多批穩定性，再量四臂並行和加權／特徵抽取速度。H teacher 成本是對歷史用量外推，H15 的實際吞吐未建立。落點臂可用 compact q、合法遮罩與索引降低跨卡搬運，必須和全讀路徑做前向與梯度 parity。 [歷史成本](../../../../../RESULTS.md)
+八卡短測量完整 H15 的顯存峰值、微批與編譯啟動，並核對 C 卡協助的棋局、跨卡寫入、首個 optimizer step 與 H15 E2 的重疊時間，以及特徵抽取的就緒順序。短測固定保留少量 H15 擬合盤給 C 卡以覆蓋接手路徑，正式作業依未領取的範圍動態分派。H teacher 成本是對歷史用量外推，H15 的實際吞吐未建立。落點臂可用 compact q、合法遮罩與索引降低跨卡搬運，必須和全讀路徑做前向與梯度 parity。 [歷史成本](../../../../../RESULTS.md)
 
 每 500 步存最近 optimizer、模型權重、B2 scaler／W／b、抽題身分、步數和 loss。加權臂綁定母臂 checkpoint。重跑按新 A 版身分重用已完成的模型、特徵和 offsets；逐手訓練及補特徵使用 input planes 重建顯存 policy。`run all`、`all.slurm` 沿用 CPU 前置、GPU 段、CPU 評分分工。主要調整點為 `all_data.py`、`all_run.py`、`joint.py`、`all_report.py`、`full_cache.py`、`encoder.py` 及 H teacher 的 profile 介接，歷史入口走既有 profile 設置。
 

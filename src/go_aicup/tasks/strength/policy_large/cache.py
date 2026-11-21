@@ -189,233 +189,317 @@ def encode(item):
     return bits,glob,target.astype(np.int16),(np.asarray(colors,dtype=np.uint8)^player_color)
 
 
-def infer_family(family,games,config,out,cancel=None,plane_batches=None,nominal_lengths=None):
-    from go_aicup.features.humansl_torch import CKPT
-    from go_aicup.features.humansl_rankvec import unpack
-    from go_aicup.tasks.strength.policy_h.extract import PROFILES, ProfilePolicy
-    from go_aicup.tasks.strength.humansl_finetune import RankPolicy
-    devices = [torch.device('cuda',i) for i in config['family_devices'][family]]
-    if len(devices) != 4:
-        raise ValueError('each teacher family requires four VRAM shards')
-    for device in devices:
-        for other in devices:
-            if device != other and not torch.cuda.can_device_access_peer(device,other):
-                raise ValueError('NVLink peer access is required for policy shards')
-    profiles = tuple(config.get('profiles_H',PROFILES)) if family == 'H' else tuple(range(10))
-    p = len(profiles)
-    size = config['inference_positions']
-    if isinstance(size,dict):
-        size = size[family]
-    keep_stones = plane_batches is not None and family == 'H' and p == 15
-    bytes_per_position = p * (362 * 2 + 4) + 3 + BOARD_BYTES * keep_stones
-    bounds = np.r_[0,np.cumsum(games.length.to_numpy(dtype=np.int64))]
-    ranges = split_games(games.length,4)
-    nominal = np.asarray(nominal_lengths,dtype=np.int64) if nominal_lengths is not None else games.length.to_numpy(dtype=np.int64)
-    full_bounds = np.r_[0,np.cumsum(nominal)]
-    full_ranges = split_games(nominal,4)
-    means,counts = np.zeros((len(games),2*p),np.float32),np.zeros((len(games),2),np.int64)
-    offsets = np.full((len(games),2),np.nan,np.float32) if plane_batches is not None else None
-    seen = np.zeros(len(games),np.uint8)
-    if plane_batches is None:
-        with _INIT_LOCK:
-            checkpoint = torch.load(CKPT,map_location='cpu',weights_only=False)
-            net_config = checkpoint['config']
-            del checkpoint
-    started = time.monotonic()
-    shards = []
-    for device,(first,last),(full_first,full_last) in zip(devices,ranges,full_ranges,strict=True):
-        with torch.cuda.device(device):
-            if plane_batches is not None:
-                torch.cuda.reset_peak_memory_stats(device)
-            n = int(bounds[last]-bounds[first])
-            full_n = int(full_bounds[full_last]-full_bounds[full_first])
-            if n > full_n:
-                raise ValueError(f'{family}/{device}: sampled shard exceeds its nominal size')
-            needed = full_n * bytes_per_position
-            free,total = torch.cuda.mem_get_info(device)
-            if needed+16*2**30 > min(free,total*config['cache_fraction']):
-                raise ValueError(f'{family}/{device}: insufficient VRAM, cache={needed} free={free} total={total}')
-            reservation_bytes = (full_n-n) * bytes_per_position
-            board = torch.empty(n,BOARD_BYTES,device=device,dtype=torch.uint8) if keep_stones else None
-            reservation = torch.zeros(reservation_bytes,device=device,dtype=torch.uint8) if reservation_bytes else None
-            shards.append(Shard(first,last,torch.empty(n,p,362,device=device,dtype=torch.float16),
-                torch.empty(n,p,device=device,dtype=torch.float32),torch.empty(n,device=device,dtype=torch.int16),
-                torch.empty(n,device=device,dtype=torch.uint8),board,reservation))
-            if plane_batches is not None:
-                print({'stage':'teacher_cache','family':family,'device':str(device),'positions':n,
-                       'nominal_positions':full_n,'reserved_padding_bytes':reservation_bytes,
-                       'device_free_bytes':free,'device_total_bytes':total},flush=True)
-    stop = cancel if cancel is not None else threading.Event()
-    workers = max(1,config['encoder_workers']//2)
-    context = mp.get_context('spawn')
+def teacher_profiles(family, config):
+    from go_aicup.tasks.strength.policy_h.extract import PROFILES
 
-    def replay_batches(shard,pool):
-        indices = iter(range(shard.first,shard.last))
-        pending = deque()
+    return tuple(config.get('profiles_H', PROFILES)) if family == 'H' else tuple(range(10))
 
-        def submit():
-            i = next(indices,None)
-            if i is not None:
-                row = games.iloc[i]
-                pending.append((i,pool.submit(encode,(int(row.game_index),int(row.handicap),int(row.player_color),int(row.length)))))
 
-        for _ in range(max(2*config['games_per_batch'],workers)):
-            submit()
-        while pending:
-            rows,parts = [],[]
-            for _ in range(min(len(pending),config['games_per_batch'])):
-                i,future = pending.popleft()
-                rows.append(i)
-                parts.append(future.result())
-                submit()
-            yield rows,parts
+class TeacherWorker:
+    """Keep one teacher module on its execution GPU across whole-game work ranges."""
 
-    def worker(shard,pool):
-        device = shard.q.device
-        with torch.cuda.device(device),torch.inference_mode():
-            setup_started = time.monotonic()
-            with _INIT_LOCK:
-                if family == 'H':
-                    teacher = ProfilePolicy(device, profiles)
-                else:
-                    vectors = torch.load(ROOT/'outputs/rank/humansl/cvec_v2/learn/vectors.pt',map_location=device,weights_only=False)['vectors']
-                    teacher = RankPolicy(device,vectors)
-                teacher.eval().requires_grad_(False)
-                forward = torch.compile(teacher,dynamic=False) if config['compile_teacher'] else teacher
-            setup_seconds = time.monotonic() - setup_started
-            if plane_batches is None:
-                batches = replay_batches(shard,pool)
+    def __init__(self, family, config, device):
+        from go_aicup.tasks.strength.policy_h.extract import ProfilePolicy
+        from go_aicup.tasks.strength.humansl_finetune import RankPolicy
+
+        self.family, self.device = family, torch.device(device)
+        self.profiles = teacher_profiles(family, config)
+        self.first_forward = True
+        started = time.monotonic()
+        with torch.cuda.device(self.device), torch.inference_mode(), _INIT_LOCK:
+            if family == 'H':
+                teacher = ProfilePolicy(self.device, self.profiles)
             else:
-                batches = plane_batches(shard.first,shard.last,config['games_per_batch'])
-            maxima = np.zeros(3)
-            completed = compiled_count = eager_count = 0
-            input_seconds = inference_seconds = 0.
-            first_forward_seconds = None
+                arrays = torch.load(ROOT/'outputs/rank/humansl/cvec_v2/learn/vectors.pt',
+                                    map_location=self.device, weights_only=False)
+                teacher = RankPolicy(self.device, arrays['vectors'])
+            self.teacher = teacher.eval().requires_grad_(False)
+            self.compiled = torch.compile(teacher, dynamic=False) if config['compile_teacher'] else None
+        self.setup_seconds = time.monotonic() - started
+
+
+class TeacherStore:
+    """Own resident result shards while execution devices fill disjoint game ranges."""
+
+    def __init__(self, family, games, config, plane_batches, nominal_lengths=None, *,
+                 resident_bytes=None, reset_peaks=True):
+        self.family, self.games, self.plane_batches = family, games, plane_batches
+        self.started = time.monotonic()
+        self.devices = [torch.device('cuda', i) for i in config['family_devices'][family]]
+        if len(self.devices) != 4:
+            raise ValueError('each teacher family requires four VRAM shards')
+        for device in self.devices:
+            for other in self.devices:
+                if device != other and not torch.cuda.can_device_access_peer(device, other):
+                    raise ValueError('NVLink peer access is required for policy shards')
+        self.profiles = teacher_profiles(family, config)
+        p = len(self.profiles)
+        size = config['inference_positions']
+        self.size = size[family] if isinstance(size, dict) else size
+        self.games_per_batch = config['games_per_batch']
+        self.keep_stones = plane_batches is not None and family == 'H' and p == 15
+        self.bytes_per_position = p * (362 * 2 + 4) + 3 + BOARD_BYTES * self.keep_stones
+        lengths = games.length.to_numpy(dtype=np.int64)
+        self.bounds = np.r_[0, np.cumsum(lengths)]
+        self.ranges = split_games(lengths, len(self.devices))
+        nominal = lengths if nominal_lengths is None else np.asarray(nominal_lengths, dtype=np.int64)
+        full_bounds = np.r_[0, np.cumsum(nominal)]
+        full_ranges = split_games(nominal, len(self.devices))
+        self.nominal_card_bytes = tuple(
+            int(full_bounds[last] - full_bounds[first]) * self.bytes_per_position for first, last in full_ranges
+        )
+        self.means = np.zeros((len(games), 2 * p), np.float32)
+        self.counts = np.zeros((len(games), 2), np.int64)
+        self.offsets = np.full((len(games), 2), np.nan, np.float32) if plane_batches is not None else None
+        self.seen = np.zeros(len(games), np.uint8)
+        self.claim_lock = threading.Lock()
+        other_bytes = (0,) * len(self.devices) if resident_bytes is None else resident_bytes
+        self.shards = []
+        for device, (first, last), needed, existing in zip(
+            self.devices, self.ranges, self.nominal_card_bytes, other_bytes, strict=True,
+        ):
+            with torch.cuda.device(device):
+                if reset_peaks and plane_batches is not None:
+                    torch.cuda.reset_peak_memory_stats(device)
+                n = int(self.bounds[last] - self.bounds[first])
+                padding = needed - n * self.bytes_per_position
+                if padding < 0:
+                    raise ValueError(f'{family}/{device}: sampled shard exceeds its nominal size')
+                free, total = torch.cuda.mem_get_info(device)
+                workspace = 16 * 2**30
+                if needed + workspace > free or needed + existing + workspace > total * config['cache_fraction']:
+                    raise ValueError(f'{family}/{device}: insufficient VRAM, cache={needed + existing} free={free} total={total}')
+                board = torch.empty(n, BOARD_BYTES, device=device, dtype=torch.uint8) if self.keep_stones else None
+                reservation = torch.zeros(padding, device=device, dtype=torch.uint8) if padding else None
+                self.shards.append(Shard(first, last, torch.empty(n, p, 362, device=device, dtype=torch.float16),
+                    torch.empty(n, p, device=device, dtype=torch.float32), torch.empty(n, device=device, dtype=torch.int16),
+                    torch.empty(n, device=device, dtype=torch.uint8), board, reservation))
+                if plane_batches is not None:
+                    print({'stage':'teacher_cache','family':family,'device':str(device),'positions':n,
+                           'nominal_positions':needed // self.bytes_per_position,'reserved_padding_bytes':padding,
+                           'device_free_bytes':free,'device_total_bytes':total},flush=True)
+
+    def process(self, worker, shard_index, first, last, stop, *, batches=None):
+        """Compute a whole-game range and synchronize its resident writes before returning."""
+        from go_aicup.features.humansl_rankvec import unpack
+
+        shard = self.shards[shard_index]
+        if (worker.family != self.family or worker.profiles != self.profiles
+                or not shard.first <= first < last <= shard.last):
+            raise ValueError('teacher work range or profile order differs from its resident shard')
+        device = worker.device
+        remote = device != shard.q.device
+        if remote and not torch.cuda.can_device_access_peer(device, shard.q.device):
+            raise ValueError('NVLink peer access is required for helper writes')
+        with self.claim_lock:
+            if self.seen[first:last].any():
+                raise ValueError('teacher work range was already claimed')
+            self.seen[first:last] = 2
+        if batches is None:
+            batches = self.plane_batches(first, last, self.games_per_batch)
+        p, size = len(self.profiles), self.size
+        maxima = np.zeros(3)
+        cursor = first
+        compiled_count = eager_count = 0
+        input_seconds = inference_seconds = 0.
+        first_forward_seconds = None
+        with torch.cuda.device(device), torch.inference_mode():
             while not stop.is_set():
                 input_started = time.monotonic()
-                batch = next(batches,None)
+                batch = next(batches, None)
                 compute_started = time.monotonic()
                 input_seconds += compute_started - input_started
                 if batch is None:
                     break
-                rows,parts = batch
-                bits,glob,target,side = [np.concatenate([a[j] for a in parts]) for j in range(4)]
+                rows, parts = batch
+                end = cursor + len(rows)
+                if (not rows or end > last or list(rows) != list(range(cursor, end)) or len(parts) != len(rows)
+                        or any(len(a[2]) != self.bounds[i+1] - self.bounds[i] for i, a in zip(rows, parts))):
+                    raise ValueError('teacher input does not cover its whole-game range in order')
+                bits, glob, target, side = [np.concatenate([a[j] for a in parts]) for j in range(4)]
+
                 def upload(a):
-                    return torch.from_numpy(np.ascontiguousarray(a)).pin_memory().to(device,non_blocking=True)
-                x,g,t,s = unpack(upload(bits)),upload(glob),upload(target).long(),upload(side).long()
+                    return torch.from_numpy(np.ascontiguousarray(a)).pin_memory().to(device, non_blocking=True)
+
+                x, g, t, s = unpack(upload(bits)), upload(glob), upload(target).long(), upload(side).long()
                 n = len(target)
-                logp = torch.empty(n,p,362,device=device,dtype=torch.float16)
-                q = torch.empty(n,p,device=device,dtype=torch.float32)
-                error = torch.zeros(2,device=device)
-                packed_stones = pack_mover_stones(x) if keep_stones else None
-                for a in range(0,n,size):
-                    b = min(a+size,n)
-                    xb,gb = x[a:b],g[a:b]
-                    conditions = torch.arange(p,device=device).repeat(b-a)
-                    indices_side = s[a:b]
-                    if family == 'H':
-                        colors = np.concatenate([np.full(len(part[2]),int(games.iloc[i].player_color),np.int64) for i,part in zip(rows,parts)])
-                        indices_side = s[a:b] ^ torch.as_tensor(colors[a:b],device=device)
-                    use_compiled = config['compile_teacher'] and b-a == size
-                    fn = forward if use_compiled else teacher
+                logp = torch.empty(n, p, 362, device=device, dtype=torch.float16)
+                q = torch.empty(n, p, device=device, dtype=torch.float32)
+                error = torch.zeros(2, device=device)
+                packed_stones = pack_mover_stones(x) if self.keep_stones else None
+                profile_side = s
+                if self.family == 'H':
+                    colors = np.repeat(self.games.iloc[cursor:end].player_color.to_numpy(dtype=np.int64),
+                                       np.diff(self.bounds[cursor:end+1]))
+                    profile_side = s ^ torch.as_tensor(colors, device=device)
+                for a in range(0, n, size):
+                    b = min(a + size, n)
+                    xb, gb = x[a:b], g[a:b]
+                    conditions = torch.arange(p, device=device).repeat(b-a)
+                    use_compiled = worker.compiled is not None and b-a == size
+                    fn = worker.compiled if use_compiled else worker.teacher
                     call_started = time.monotonic()
-                    logits = teacher_forward(fn,xb.repeat_interleave(p,0),gb.repeat_interleave(p,0),conditions,
-                                             indices_side.repeat_interleave(p,0)).reshape(b-a,p,362)
+                    logits = teacher_forward(fn, xb.repeat_interleave(p, 0), gb.repeat_interleave(p, 0), conditions,
+                                             profile_side[a:b].repeat_interleave(p, 0)).reshape(b-a, p, 362)
                     if use_compiled:
-                        if compiled_count == 0:
+                        if worker.first_forward:
                             torch.cuda.synchronize(device)
                             first_forward_seconds = time.monotonic() - call_started
+                            worker.first_forward = False
                         compiled_count += 1
                     else:
                         eager_count += 1
-                    legal = (xb[:,0]*(1-xb[:,1])*(1-xb[:,2])*(1-xb[:,6])).flatten(1).gt(0)
-                    legal = torch.cat((legal,torch.ones_like(legal[:,:1])),1)
-                    if not legal.gather(1,t[a:b,None]).all():
+                    legal = (xb[:,0] * (1-xb[:,1]) * (1-xb[:,2]) * (1-xb[:,6])).flatten(1).gt(0)
+                    legal = torch.cat((legal, torch.ones_like(legal[:,:1])), 1)
+                    if not legal.gather(1, t[a:b,None]).all():
                         raise ValueError('actual move excluded by legal mask')
-                    lp = logits.float().masked_fill(~legal[:,None],-torch.inf).log_softmax(-1)
-                    exact = lp.gather(2,t[a:b,None,None].expand(-1,p,1)).squeeze(-1)
+                    lp = logits.float().masked_fill(~legal[:,None], -torch.inf).log_softmax(-1)
+                    exact = lp.gather(2, t[a:b,None,None].expand(-1,p,1)).squeeze(-1)
                     compressed = lp.half()
-                    if not torch.isfinite(exact).all() or not (torch.isfinite(compressed)|~legal[:,None]).all():
+                    if not torch.isfinite(exact).all() or not (torch.isfinite(compressed) | ~legal[:,None]).all():
                         raise ValueError('nonfinite teacher policy')
-                    recovered = compressed.float().gather(2,t[a:b,None,None].expand(-1,p,1)).squeeze(-1)
-                    error[0] = torch.maximum(error[0],(compressed.float().exp().sum(-1)-1).abs().max())
-                    error[1] = torch.maximum(error[1],(recovered-exact).abs().max())
-                    logp[a:b],q[a:b] = compressed,exact
+                    recovered = compressed.float().gather(2, t[a:b,None,None].expand(-1,p,1)).squeeze(-1)
+                    error[0] = torch.maximum(error[0], (compressed.float().exp().sum(-1)-1).abs().max())
+                    error[1] = torch.maximum(error[1], (recovered-exact).abs().max())
+                    logp[a:b], q[a:b] = compressed, exact
                 a = 0
                 mean_error = 0.
-                for i,part in zip(rows,parts):
-                    length = len(part[2]); b = a+length
-                    pair,recovered_pair,side_counts = [],[],[]
-                    rec = logp[a:b].float().gather(2,t[a:b,None,None].expand(-1,p,1)).squeeze(-1)
-                    for player_side in (0,1):
+                for i, part in zip(rows, parts):
+                    b = a + len(part[2])
+                    pair, recovered_pair, side_counts = [], [], []
+                    rec = logp[a:b].float().gather(2, t[a:b,None,None].expand(-1,p,1)).squeeze(-1)
+                    for player_side in (0, 1):
                         mask = s[a:b].eq(player_side)
                         if not mask.any():
                             raise ValueError('empty own/opponent side')
-                        pair.append(q[a:b][mask].mean(0)); recovered_pair.append(rec[mask].mean(0));side_counts.append(int(mask.sum()))
+                        pair.append(q[a:b][mask].mean(0))
+                        recovered_pair.append(rec[mask].mean(0))
+                        side_counts.append(int(mask.sum()))
                     average = torch.cat(pair)
-                    if offsets is None:
-                        means[i] = average.cpu().numpy()
+                    if self.offsets is None:
+                        self.means[i] = average.cpu().numpy()
                     else:
-                        reduced = torch.cat((average,profile_offsets(q[a:b],s[a:b]))).cpu().numpy()
-                        means[i],offsets[i] = reduced[:-2],reduced[-2:]
-                    counts[i] = side_counts
-                    mean_error = max(mean_error,float((average-torch.cat(recovered_pair)).abs().max()))
-                    dst = slice(int(bounds[i]-bounds[shard.first]),int(bounds[i+1]-bounds[shard.first]))
-                    shard.logp[dst].copy_(logp[a:b]);shard.q[dst].copy_(q[a:b]);shard.target[dst].copy_(t[a:b]);shard.side[dst].copy_(s[a:b])
-                    if keep_stones:
-                        shard.board[dst].copy_(packed_stones[a:b])
-                    seen[i] += 1
+                        reduced = torch.cat((average, profile_offsets(q[a:b], s[a:b]))).cpu().numpy()
+                        self.means[i], self.offsets[i] = reduced[:-2], reduced[-2:]
+                    self.counts[i] = side_counts
+                    mean_error = max(mean_error, float((average - torch.cat(recovered_pair)).abs().max()))
                     a = b
-                errors = [*error.cpu().tolist(),mean_error]
+                errors = [*error.cpu().tolist(), mean_error]
                 if errors[0] > .01 or errors[1] > .05 or errors[2] > .002:
                     raise ValueError(f'policy FP16 precision gate failed: {errors}')
-                maxima = np.maximum(maxima,errors)
+                dst = slice(int(self.bounds[cursor]-self.bounds[shard.first]),
+                            int(self.bounds[end]-self.bounds[shard.first]))
+                shard.logp[dst].copy_(logp, non_blocking=True)
+                shard.q[dst].copy_(q, non_blocking=True)
+                shard.target[dst].copy_(t, non_blocking=True)
+                shard.side[dst].copy_(s, non_blocking=True)
+                if self.keep_stones:
+                    shard.board[dst].copy_(packed_stones, non_blocking=True)
+                maxima = np.maximum(maxima, errors)
                 inference_seconds += time.monotonic() - compute_started
-                completed += len(rows)
+                cursor = end
+                completed = cursor - first
                 if completed == len(rows) or completed % 128 == 0:
-                    print({'stage':'teacher','family':family,'device':str(device),'games':completed,'seconds':time.monotonic()-started},flush=True)
+                    print({'stage':'teacher','family':self.family,'device':str(device),
+                           'owner':str(shard.q.device),'first':first,'games':completed,
+                           'seconds':time.monotonic()-self.started},flush=True)
             if stop.is_set():
                 raise RuntimeError('another teacher worker failed')
-            del teacher,forward
+            if cursor != last:
+                raise ValueError('teacher input ended before its work range')
+            # The peer copy is queued on the source stream. The fit barrier publishes only synchronized ranges.
             torch.cuda.synchronize(device)
-            return {
-                'device':str(device),'games':completed,'errors':maxima.tolist(),
-                'positions':int(bounds[shard.last]-bounds[shard.first]),
-                'resident_padding_bytes':shard.reservation.numel() if shard.reservation is not None else 0,
-                'nominal_cache_bytes':int(bounds[shard.last]-bounds[shard.first]) * bytes_per_position
-                    + (shard.reservation.numel() if shard.reservation is not None else 0),
-                'input_wait_seconds':input_seconds,'inference_seconds':inference_seconds,
-                'setup_seconds':setup_seconds,'first_compiled_call_seconds':first_forward_seconds,
-                'compiled_batches':compiled_count,'eager_batches':eager_count,
-                'peak_allocated_bytes':torch.cuda.max_memory_allocated(device),
-                'peak_reserved_bytes':torch.cuda.max_memory_reserved(device),
-            }
-    supply = nullcontext() if plane_batches is not None else ProcessPoolExecutor(
-        workers,mp_context=context,initializer=init_encoder,initargs=(net_config,config.get('board_root')))
-    with supply as pool:
-        with ThreadPoolExecutor(4) as threads:
-            futures = [threads.submit(worker,shard,pool) for shard in shards]
-            try:
-                reports = [f.result() for f in as_completed(futures)]
-            except BaseException:
-                stop.set()
-                raise
-    if not np.all(seen == 1) or counts.sum() != bounds[-1]:
-        raise ValueError('teacher must visit every selected position exactly once')
-    cache = PolicyCache(games,shards,means,counts,offsets)
-    report = {'family':family,'games':len(games),'positions':int(bounds[-1]),'seconds':time.monotonic()-started,
-        'teacher_passes_per_game':1,'workers':sorted(reports,key=lambda worker: worker['device']),
-        'cache_bytes':int(bounds[-1])*bytes_per_position,'profiles':list(profiles),'microbatch_positions':size,
-        'nominal_cache_bytes':int(full_bounds[-1])*bytes_per_position,
-        'max_nominal_card_cache_bytes':max(worker['nominal_cache_bytes'] for worker in reports),
-        'input':'zstd_planes' if plane_batches is not None else 'board_replay'}
-    if offsets is not None:
+            counters = {'peak_allocated_bytes':torch.cuda.max_memory_allocated(device),
+                        'peak_reserved_bytes':torch.cuda.max_memory_reserved(device)}
+        self.seen[first:last] = 1
+        positions = int(self.bounds[last] - self.bounds[first])
+        setup_seconds, worker.setup_seconds = worker.setup_seconds, 0.
+        return {
+            'device':str(device),'owner':str(shard.q.device),'first':first,'last':last,
+            'games':last-first,'errors':maxima.tolist(),'positions':positions,
+            'peer_bytes':positions * self.bytes_per_position if remote else 0,
+            'resident_padding_bytes':shard.reservation.numel() if shard.reservation is not None else 0,
+            'nominal_cache_bytes':self.nominal_card_bytes[shard_index],
+            'input_wait_seconds':input_seconds,'inference_seconds':inference_seconds,
+            'setup_seconds':setup_seconds,'first_compiled_call_seconds':first_forward_seconds,
+            'compiled_batches':compiled_count,'eager_batches':eager_count,**counters,
+        }
+
+    def finish(self):
+        if not np.all(self.seen == 1) or self.counts.sum() != self.bounds[-1]:
+            raise ValueError('teacher must visit every selected position exactly once')
+        return PolicyCache(self.games, self.shards, self.means, self.counts, self.offsets)
+
+
+def publish_teacher(out, family, policy_cache, report):
+    if policy_cache.offsets is not None:
         path = Path(out)/f'offset_{family}.npy'
         temporary = path.with_suffix('.npy.tmp')
         with temporary.open('wb') as stream:
-            np.save(stream,offsets,allow_pickle=False)
+            np.save(stream, policy_cache.offsets, allow_pickle=False)
         temporary.replace(path)
         report['profile_offsets'] = {'file':path.name,'sha256':file_hash(path),'sides':['own','opponent']}
-    write_json(Path(out)/f'teacher_{family}.json',report)
+    write_json(Path(out)/f'teacher_{family}.json', report)
+
+
+def infer_family(family, games, config, out, cancel=None, plane_batches=None, nominal_lengths=None):
+    from go_aicup.features.humansl_torch import CKPT
+
+    started = time.monotonic()
+    store = TeacherStore(family, games, config, plane_batches, nominal_lengths)
+    stop = cancel if cancel is not None else threading.Event()
+    workers = max(1, config['encoder_workers']//2)
+    if plane_batches is None:
+        with _INIT_LOCK:
+            checkpoint = torch.load(CKPT, map_location='cpu', weights_only=False)
+            net_config = checkpoint['config']
+            del checkpoint
+        supply = ProcessPoolExecutor(workers, mp_context=mp.get_context('spawn'),
+                                     initializer=init_encoder, initargs=(net_config, config.get('board_root')))
+    else:
+        supply = nullcontext()
+
+    def replay_batches(first, last, pool):
+        indices, pending = iter(range(first, last)), deque()
+
+        def submit():
+            i = next(indices, None)
+            if i is not None:
+                row = games.iloc[i]
+                pending.append((i, pool.submit(encode, (int(row.game_index), int(row.handicap),
+                                                        int(row.player_color), int(row.length)))))
+
+        for _ in range(max(2*store.games_per_batch, workers)):
+            submit()
+        while pending:
+            rows, parts = [], []
+            for _ in range(min(len(pending), store.games_per_batch)):
+                i, future = pending.popleft()
+                rows.append(i)
+                parts.append(future.result())
+                submit()
+            yield rows, parts
+
+    def work(index, pool):
+        first, last = store.ranges[index]
+        worker = TeacherWorker(family, config, store.devices[index])
+        batches = replay_batches(first, last, pool) if plane_batches is None else None
+        return store.process(worker, index, first, last, stop, batches=batches)
+
+    with supply as pool, ThreadPoolExecutor(len(store.devices)) as threads:
+        futures = [threads.submit(work, index, pool) for index in range(len(store.devices))]
+        try:
+            reports = [future.result() for future in as_completed(futures)]
+        except BaseException:
+            stop.set()
+            raise
+    policy_cache = store.finish()
+    report = {'family':family,'games':len(games),'positions':int(store.bounds[-1]),'seconds':time.monotonic()-started,
+        'teacher_passes_per_game':1,'workers':sorted(reports,key=lambda worker: worker['device']),
+        'cache_bytes':int(store.bounds[-1])*store.bytes_per_position,'profiles':list(store.profiles),
+        'microbatch_positions':store.size,'nominal_cache_bytes':sum(store.nominal_card_bytes),
+        'max_nominal_card_cache_bytes':max(store.nominal_card_bytes),
+        'input':'zstd_planes' if plane_batches is not None else 'board_replay'}
+    publish_teacher(out, family, policy_cache, report)
     gc.collect()
-    return cache,report
+    return policy_cache, report

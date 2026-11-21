@@ -1,5 +1,9 @@
-"""H9 and C10 full-board policy shards in the original cvec2 game order."""
+"""Read aligned cvec2 policy shards and overlap H15 inference with training."""
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import replace
 import json
+from threading import Event, Lock
 import time
 
 import numpy as np
@@ -12,7 +16,7 @@ from go_aicup.paths import ROOT
 from go_aicup.tasks.strength.policy_large import cache
 from go_aicup.tasks.strength.policy_large.run import parallel
 
-from .planes import PlaneReader
+from .planes import GAMES_PER_SHARD, PlaneReader
 
 
 def a_config():
@@ -84,8 +88,7 @@ class JointView:
             yield torch.cat((h, c), dim=1), target, torch.cat((qh, qc), dim=1), slot, *stones
 
 
-def infer(games, out, planes_dir=None, config=None, nominal_lengths=None):
-    """Stream each teacher into four GPU shards and join them as batches are read."""
+def _check_devices_and_games(games):
     if torch.cuda.device_count() != 8:
         raise ValueError("cvec2 full-policy training requires eight GPUs")
     for device in range(8):
@@ -96,6 +99,11 @@ def infer(games, out, planes_dir=None, config=None, nominal_lengths=None):
         raise ValueError("invalid cvec2 game ordering or player colors")
     if not games.handicap.isin(range(10)).all():
         raise ValueError("invalid cvec2 handicap metadata")
+
+
+def infer(games, out, planes_dir=None, config=None, nominal_lengths=None):
+    """Stream each teacher into four GPU shards and join them as batches are read."""
+    _check_devices_and_games(games)
     plane_batches = None
     if planes_dir is None:
         board = pd.read_parquet(ROOT / "data/processed/boards/strength_v1/games.parquet",
@@ -132,3 +140,192 @@ def infer(games, out, planes_dir=None, config=None, nominal_lengths=None):
                    "seconds": time.monotonic() - alignment_started, "legal_masks_equal": True})
     joint.games = games
     return joint
+
+
+class FitWork:
+    """Reserve disjoint H15 ranges while preferring the resident device."""
+    def __init__(self, store, helper_smoke_games=0):
+        self.bounds = store.bounds
+        self.queues = []
+        self.smoke = {}
+        self.lock = Lock()
+        for i, (first, last) in enumerate(store.ranges):
+            if helper_smoke_games:
+                if last - first <= helper_smoke_games:
+                    raise ValueError("the smoke needs H15 games for both owner and helper")
+                last -= helper_smoke_games
+                self.smoke[i] = (i, last, last + helper_smoke_games)
+            # Match disk shard cuts to minimize repeated decompression when sharing work.
+            cuts = [first, *range((first // GAMES_PER_SHARD + 1) * GAMES_PER_SHARD,
+                                  last, GAMES_PER_SHARD), last]
+            self.queues.append(deque((i, a, b) for a, b in zip(cuts[:-1], cuts[1:])))
+
+    def take(self, preferred, helper=False):
+        with self.lock:
+            if helper and preferred in self.smoke:
+                return self.smoke.pop(preferred)
+            if not helper and self.queues[preferred]:
+                return self.queues[preferred].popleft()
+            pending = [queue for queue in self.queues if queue]
+            if pending:
+                largest = max(pending, key=lambda q: self.bounds[q[-1][2]] - self.bounds[q[0][1]])
+                return largest.pop()
+        return None
+
+
+def _wait(futures, abort):
+    try:
+        for future in as_completed(futures):
+            yield futures[future], future.result()
+    except BaseException:
+        abort.set()
+        for future in futures:
+            future.cancel()
+        raise
+
+
+def _merge(fit, e2):
+    n = len(fit.games)
+    return cache.PolicyCache(pd.concat([fit.games, e2.games], ignore_index=True),
+        [*fit.shards, *(replace(shard, first=n + shard.first, last=n + shard.last) for shard in e2.shards)],
+        torch.cat([fit.arrays["c"], e2.arrays["c"]]), torch.cat([fit.arrays["counts"], e2.arrays["counts"]]),
+        np.concatenate([fit.offsets, e2.offsets]))
+
+
+def overlap(games, n_fit, out, planes_dir, config, nominal_fit, nominal_e2, on_fit, *, smoke=False, abort=None):
+    """Run both teachers, let C10 devices finish H15 fit work, then publish fit before H15 E2."""
+    _check_devices_and_games(games)
+    if tuple(config["profiles_H"]) != PROFILES:
+        raise ValueError("H15 teacher profiles must match the original A column order")
+    if not 0 < n_fit < len(games):
+        raise ValueError("fit and E2 require distinct nonempty game ranges")
+    if abort is None:
+        abort = Event()
+    started = time.monotonic()
+    fit, e2 = games.iloc[:n_fit].reset_index(drop=True), games.iloc[n_fit:].reset_index(drop=True)
+    readers = [PlaneReader(planes_dir, rows, groups=(group,)).batches
+               for group, rows in (("fit", fit), ("e2", e2))]
+    stores = {}
+    for family in ("H", "C"):
+        fit_store = cache.TeacherStore(family, fit, config, readers[0], nominal_fit)
+        e2_store = cache.TeacherStore(family, e2, config, readers[1], nominal_e2,
+                                      resident_bytes=fit_store.nominal_card_bytes, reset_peaks=False)
+        stores[family] = (fit_store, e2_store)
+    h_fit, h_e2 = stores["H"]
+    c_fit, c_e2 = stores["C"]
+    work = FitWork(h_fit, config["games_per_batch"] if smoke else 0)
+
+    def fit_h(worker, preferred, helper=False):
+        reports = []
+        while not abort.is_set() and (job := work.take(preferred, helper)) is not None:
+            reports.append(h_fit.process(worker, *job, abort))
+        return reports
+
+    def start_h(index):
+        worker = cache.TeacherWorker("H", config, h_fit.shards[index].q.device)
+        return worker, fit_h(worker, index)
+
+    def start_c(index):
+        device = c_fit.shards[index].q.device
+        worker = cache.TeacherWorker("C", config, device)
+        c_reports = [store.process(worker, index, *store.ranges[index], abort) for store in stores["C"]]
+        del worker
+        c_ready = time.monotonic() - started
+        helpers = []
+        task = work.take(index, helper=True) if not abort.is_set() else None
+        if task is not None:
+            worker = cache.TeacherWorker("H", config, device)
+            helpers.append(h_fit.process(worker, *task, abort))
+            helpers.extend(fit_h(worker, index, helper=True))
+        return c_reports, helpers, c_ready
+
+    matmul, cudnn = torch.backends.cuda.matmul, torch.backends.cudnn
+    flags = matmul.allow_tf32, cudnn.allow_tf32
+    try:
+        matmul.allow_tf32 = cudnn.allow_tf32 = True
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            h_results, c_results = {}, {}
+            futures = {pool.submit(fn, i): (family, i) for family, fn in (("H", start_h), ("C", start_c))
+                       for i in range(4)}
+            for (family, i), result in _wait(futures, abort):
+                (h_results if family == "H" else c_results)[i] = result
+            aligned = time.monotonic()
+            fit_joint = JointCache(h_fit.finish(), c_fit.finish())
+            fit_alignment_seconds = time.monotonic() - aligned
+            fit_ready = time.monotonic() - started
+            on_fit(fit_joint)
+            e2_start = time.monotonic() - started
+            futures = {pool.submit(h_e2.process, h_results[i][0], i, *h_e2.ranges[i], abort): i
+                       for i in range(4)}
+            e2_results = dict(_wait(futures, abort))
+            e2_end = time.monotonic() - started
+    except BaseException:
+        abort.set()
+        raise
+    finally:
+        matmul.allow_tf32, cudnn.allow_tf32 = flags
+
+    aligned = time.monotonic()
+    h_cache = _merge(fit_joint.h, h_e2.finish())
+    c_cache = _merge(fit_joint.c, c_e2.finish())
+    result = JointCache(h_cache, c_cache)
+    e2_alignment_seconds = time.monotonic() - aligned
+    helper_reports = [report for i in range(4) for report in c_results[i][1]]
+    h_workers = [h_results[i][1] + [e2_results[i]] for i in range(4)]
+    c_workers = [c_results[i][0] for i in range(4)]
+    _publish_overlap(out, stores, result, h_workers, c_workers, helper_reports,
+                     max(row[2] for row in c_results.values()), e2_end)
+    write_json(out / "teacher_alignment.json", {
+        "games": len(games), "positions": int(games.length.sum()), "legal_masks_equal": True,
+        "seconds": fit_alignment_seconds + e2_alignment_seconds,
+        "fit_alignment_seconds": fit_alignment_seconds, "e2_alignment_seconds": e2_alignment_seconds,
+    })
+    helpers = _worker_reports(helper_reports)
+    write_json(out / "teacher_overlap.json", {
+        "fit_ready_seconds": fit_ready, "e2_start_seconds": e2_start, "e2_end_seconds": e2_end,
+        "elapsed_seconds": time.monotonic() - started,
+        "c10_ready_seconds": max(row[2] for row in c_results.values()),
+        "h_helper_positions": sum(row["positions"] for row in helpers),
+        "h_helper_games": sum(row["games"] for row in helpers),
+        "h_helper_peer_bytes": sum(row["peer_bytes"] for row in helpers),
+        "h_helpers": helpers, "forced_helper_games_per_card": config["games_per_batch"] if smoke else 0,
+    })
+    return result
+
+
+def _worker_reports(chunks):
+    grouped = {}
+    for row in chunks:
+        grouped.setdefault(row["device"], []).append(row)
+    reports = []
+    for device, rows in sorted(grouped.items()):
+        values = {name: sum(row[name] for row in rows) for name in
+                  ("positions", "games", "inference_seconds", "input_wait_seconds",
+                   "compiled_batches", "eager_batches", "peer_bytes")}
+        values["first_compiled_call_seconds"] = next(
+            (r["first_compiled_call_seconds"] for r in rows if r["first_compiled_call_seconds"] is not None), None)
+        values.update({name: max(row[name] for row in rows) for name in
+                       ("peak_allocated_bytes", "peak_reserved_bytes", "setup_seconds")})
+        values["errors"] = np.max([row["errors"] for row in rows], axis=0).tolist()
+        reports.append(values | {"device": device})
+    return reports
+
+
+def _publish_overlap(out, stores, joint, h_workers, c_workers, helper_reports, c10_ready, e2_end):
+    for family, policy, reports, done in (("H", joint.h, h_workers, e2_end), ("C", joint.c, c_workers, c10_ready)):
+        fit_store, e2_store = stores[family]
+        native = _worker_reports([row for lane in reports for row in lane])
+        helpers = _worker_reports(helper_reports) if family == "H" else []
+        nominal = [a + b for a, b in zip(fit_store.nominal_card_bytes, e2_store.nominal_card_bytes, strict=True)]
+        positions = int(policy.bounds[-1])
+        if sum(row["positions"] for row in (*native, *helpers)) != positions:
+            raise ValueError(f"{family} teacher work accounting differs from the cache")
+        for i, worker in enumerate(native):
+            worker["nominal_cache_bytes"] = nominal[i]
+        cache.publish_teacher(out, family, policy, {
+            "family": family, "games": len(policy.games), "positions": positions, "seconds": done,
+            "teacher_passes_per_game": 1, "workers": native, "helpers": helpers,
+            "cache_bytes": positions * fit_store.bytes_per_position, "profiles": list(fit_store.profiles),
+            "microbatch_positions": fit_store.size, "nominal_cache_bytes": sum(nominal),
+            "max_nominal_card_cache_bytes": max(nominal), "input": "zstd_planes",
+        })

@@ -134,7 +134,7 @@ def arm_modules(arm, out, identity, initial):
     anchor, weighted, architecture, full = parse_arm(arm)
     model = encoder.build(architecture, full, SEED, raw_a=True)
     if not weighted:
-        return model, None, B2(initial, trainable=True), None
+        return model, None, B2(initial, trainable=True, exact_dot=True), None
     parent = out / anchor / MOTHER / "model.pt"
     digest = file_hash(parent)
     saved = load_checkpoint(parent, f"{anchor}/{MOTHER}", identity, None)
@@ -143,7 +143,7 @@ def arm_modules(arm, out, identity, initial):
     with encoder.INITIALIZATION_LOCK, torch.random.fork_rng(devices=[]):
         torch.random.default_generator.manual_seed(SEED)
         weight = MoveWeights()
-    return model, weight, B2(saved["head"]), digest
+    return model, weight, B2(saved["head"], exact_dot=True), digest
 
 
 def device_scope(device):
@@ -167,7 +167,8 @@ def check_abort(abort):
         raise RuntimeError("another experiment worker failed")
 
 
-def train_one(arm, cache, raw, indices, labels, k, batches, initial, device, out, identity, abort=None):
+def train_one(arm, cache, raw, indices, labels, k, batches, initial, device, out, identity,
+              abort=None, *, on_first_update=None):
     """Resume one arm at its last completed update and publish the final model atomically."""
     device = torch.device(device)
     _, weighted, _, _ = parse_arm(arm)
@@ -232,8 +233,11 @@ def train_one(arm, cache, raw, indices, labels, k, batches, initial, device, out
         synchronize(device)
         init_seconds = time.monotonic() - initial_time
         started = time.monotonic()
-        for step in range(len(history) + 1, len(batches) + 1):
+        first_step = len(history) + 1
+        for step in range(first_step, len(batches) + 1):
             check_abort(abort)
+            if step == first_step and on_first_update is not None:
+                on_first_update()
             tick = time.monotonic()
             before = getattr(view, "peer_bytes", 0)
             batch = batches[step - 1]

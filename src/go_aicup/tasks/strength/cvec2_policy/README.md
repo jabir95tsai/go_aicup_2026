@@ -52,9 +52,12 @@ python -m "$MODULE" all --phase score --out "$OUT"
 Run full preparation on CPU compute resources. It publishes shared zstd shards
 under `data/processed/strength_features/humansl/cvec2_policy/input_planes/` and
 locks the CPU artifacts in `$OUT/cpu/`. The eight-card GPU job uses H15 on cards
-0–3 and C10 on cards 4–7. The four joint arms train on cards 4–7. The weighted arm
-starts as soon as its CNN mother arm finishes. GPU output includes raw teacher
-parity, per-side offsets, final checkpoints, game features and `gpu_complete.json`.
+0–3 and C10 on cards 4–7. C10 cards finish both splits, then help complete
+H15 fitting games and write back to the resident H15 shards. After fitting-cache
+parity passes, the same C10 cards start training while H15 processes E2. The
+weighted arm starts as soon as its CNN mother arm finishes. Extraction waits
+for E2 parity. GPU output includes per-side offsets, final checkpoints, game
+features, `teacher_overlap.json` and `gpu_complete.json`.
 Resubmit with the same `OUT` to resume completed updates and reuse validated features.
 
 CPU scoring fits both normalization controls from the saved offsets and fixed

@@ -1,5 +1,6 @@
 """Prepare, train, and score the fixed A/H15 eight-arm cvec2 policy experiment."""
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from functools import partial
 import json
 from pathlib import Path
 import platform
@@ -72,6 +73,7 @@ def prepare(args):
         "weight_decay": train.WEIGHT_DECAY, "position_chunk": train.POSITION_CHUNK,
         "head_c": 1, "head_weight_decay": 0, "weight_concentration_penalty": .01,
         "checkpoint_every": 500, "teacher_config": full_cache.a_config(),
+        "schedule": "c10-assists-h15-fit-first",
         "teacher_sources": teacher_sources(),
     }
     write_json(out / "prepare_timing.json", {"seconds": monotonic() - started,
@@ -104,34 +106,52 @@ def environment(out):
     write_json(out / "environment.json", result)
 
 
-def run_tasks(out, data, cache, identity):
-    """Use one worker per GPU and prioritize a weighted arm when its mother finishes."""
+def run_tasks(out, data, fit_cache, full_ready, identity, abort, phase_started):
+    """Train with the aligned fit cache, then extract when both splits are available."""
     from . import joint
 
     started = monotonic()
-    abort = Event()
     devices = list(TRAIN_DEVICES)
     pending = list(MODELS)
     completed = set()
     tasks, diagnostics = {}, {"train": {}, "extract": {}}
     extracts = []
+    update_starts = {}
+    full_cache = None
+    n_fit = len(data.groups["fit"])
+
+    def mark_first_update(arm):
+        update_starts[arm] = monotonic() - phase_started
+
     with ThreadPoolExecutor(max_workers=len(TRAIN_DEVICES)) as pool:
         try:
             while pending or tasks or extracts:
-                while devices and (pending or extracts):
+                if full_cache is None and full_ready.done():
+                    full_cache = full_ready.result()
+                while devices and (pending or (full_cache is not None and extracts)):
                     phase = "train" if pending else "extract"
                     arm = pending.pop(0) if pending else extracts.pop(0)
                     raw = data.features[arm[0]]
                     slot = devices.pop(0)
                     device = torch.device("cuda", slot)
                     if phase == "train":
-                        future = pool.submit(joint.train_one, arm, cache, raw, data.indices, data.labels,
-                                             data.k, data.batches, data.heads["A"], device, out, identity, abort)
+                        diagnostics.setdefault("first_train_submit_seconds", monotonic() - phase_started)
+                        future = pool.submit(joint.train_one, arm, fit_cache, raw[:n_fit], data.indices,
+                                             data.labels, data.k, data.batches, data.heads["A"],
+                                             device, out, identity, abort,
+                                             on_first_update=partial(mark_first_update, arm))
                     else:
-                        future = pool.submit(joint.extract_one, arm, cache, raw, device, out, identity,
-                                             len(data.groups["fit"]), abort)
+                        diagnostics.setdefault("first_extract_submit_seconds", monotonic() - phase_started)
+                        future = pool.submit(joint.extract_one, arm, full_cache, raw, device, out, identity,
+                                             n_fit, abort)
                     tasks[future] = (phase, arm, slot)
-                ready, _ = wait(tasks, return_when=FIRST_COMPLETED)
+                waiting = list(tasks)
+                if full_cache is None:
+                    waiting.append(full_ready)
+                ready, _ = wait(waiting, return_when=FIRST_COMPLETED)
+                if full_ready in ready:
+                    full_cache = full_ready.result()
+                    ready.remove(full_ready)
                 for future in ready:
                     phase, arm, slot = tasks.pop(future)
                     diagnostics[phase][arm] = future.result() | {"gpu": slot}
@@ -151,7 +171,29 @@ def run_tasks(out, data, cache, identity):
         raise ValueError("arm scheduler did not complete all five learned arms")
     diagnostics["wall_seconds"] = monotonic() - started
     diagnostics["parallel_arms"] = len(TRAIN_DEVICES)
+    diagnostics["first_update_seconds_from_gpu_start"] = update_starts
     return diagnostics
+
+
+def teacher_parity(cache, expected, path):
+    errors = np.abs(cache.arrays["c"].numpy() - expected)
+    parity = {"max": float(errors.max()), "mean": float(errors.mean()), "games": len(errors)}
+    for family, values in (("H", errors[:, :30]), ("C", errors[:, 30:])):
+        parity[family] = {"max": float(values.max()), "mean": float(values.mean())}
+    write_json(path, parity)
+    if not np.isfinite(errors).all() or any(parity[f]["max"] > .05 or parity[f]["mean"] > .005
+                                           for f in ("H", "C")):
+        raise ValueError(f"played-move teacher parity failed: {parity}")
+    return parity
+
+
+def check_smoke_teachers(out, overlap):
+    if overlap["h_helper_positions"] <= 0 or overlap["h_helper_peer_bytes"] <= 0:
+        raise ValueError("smoke did not exercise writing H15 policy from a C10 GPU")
+    for family in ("H", "C"):
+        workers = read_json(out / f"teacher_{family}.json")["workers"]
+        if len(workers) != 4 or any(w["compiled_batches"] < 2 for w in workers):
+            raise ValueError(f"smoke did not exercise successive compiled {family} teacher batches")
 
 
 def gpu_phase(out, data, config):
@@ -170,30 +212,59 @@ def gpu_phase(out, data, config):
     if config["teacher_sources"] != teacher_sources():
         raise ValueError("teacher weights changed since preparation")
     smoke = config["smoke_steps"] is not None
-    cache = full_cache.infer(data.games, out, planes_dir=Path(config["planes"]),
-                            config=config["teacher_config"],
-                            nominal_lengths=data.nominal_lengths if smoke else None)
-    errors = np.abs(cache.arrays["c"].numpy() - data.expected)
-    parity = {"max": float(errors.max()), "mean": float(errors.mean()), "games": len(errors)}
-    for family, values in (("H", errors[:, :30]), ("C", errors[:, 30:])):
-        parity[family] = {"max": float(values.max()), "mean": float(values.mean())}
-    write_json(out / "teacher_parity.json", parity)
-    if not np.isfinite(errors).all() or any(parity[f]["max"] > .05 or parity[f]["mean"] > .005
-                                           for f in ("H", "C")):
-        raise ValueError(f"played-move teacher parity failed: {parity}")
-    summary = {"teacher_seconds": monotonic() - started, "teacher_parity": parity}
-    torch.cuda.empty_cache()
+    n_fit = len(data.groups["fit"])
+    nominal_fit = nominal_e2 = None
     if smoke:
-        for family in ("H", "C"):
-            workers = read_json(out / f"teacher_{family}.json")["workers"]
-            if len(workers) != 4 or any(w["compiled_batches"] < 2 for w in workers):
-                raise ValueError(f"smoke did not exercise successive compiled {family} teacher batches")
-    summary["arms"] = run_tasks(out, data, cache, identity)
-    del cache
+        split = all_data.COUNTS["fit"][0]
+        nominal_fit, nominal_e2 = data.nominal_lengths[:split], data.nominal_lengths[split:]
+
+    abort = Event()
+    fit_ready = Future()
+    summary = {}
+
+    def on_fit(cache):
+        summary["fit_teacher_parity"] = teacher_parity(cache, data.expected[:n_fit], out / "teacher_fit_parity.json")
+        summary["fit_ready_seconds"] = monotonic() - started
+        fit_ready.set_result(cache)
+
+    def run_teachers():
+        try:
+            teacher_started = monotonic()
+            cache = full_cache.overlap(data.games, n_fit, out, Path(config["planes"]), config["teacher_config"],
+                                       nominal_fit, nominal_e2, on_fit, smoke=smoke, abort=abort)
+            summary["teacher_parity"] = teacher_parity(cache, data.expected, out / "teacher_parity.json")
+            summary["teacher_seconds"] = monotonic() - started
+            overlap = read_json(out / "teacher_overlap.json")
+            before_teacher = teacher_started - started
+            summary["e2_start_seconds"] = before_teacher + overlap["e2_start_seconds"]
+            summary["e2_end_seconds"] = before_teacher + overlap["e2_end_seconds"]
+            if smoke:
+                check_smoke_teachers(out, overlap)
+            return cache
+        except BaseException as error:
+            abort.set()
+            if not fit_ready.done():
+                fit_ready.set_exception(error)
+            raise
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        full_ready = pool.submit(run_teachers)
+        try:
+            summary["arms"] = run_tasks(out, data, fit_ready.result(), full_ready, identity, abort, started)
+        except BaseException:
+            abort.set()
+            raise
+    updates = summary["arms"]["first_update_seconds_from_gpu_start"]
+    summary["updates_started_before_e2_complete"] = sorted(
+        arm for arm, when in updates.items() if when < summary["e2_end_seconds"]
+    )
+    if smoke and updates and not summary["updates_started_before_e2_complete"]:
+        raise ValueError("smoke training did not overlap the E2 teacher stage")
     summary["seconds"] = monotonic() - started
     files = [f"{arm}/{name}" for arm in all_report.LEARNED_ARMS for name in all_report.ARM_FILES]
     files += ["teacher_parity.json", "environment.json", "teacher_H.json", "teacher_C.json",
-              "teacher_alignment.json", "offset_H.npy", "offset_C.npy"]
+              "teacher_alignment.json", "offset_H.npy", "offset_C.npy", "teacher_fit_parity.json",
+              "teacher_overlap.json"]
     gpu = {"identity": identity, "files": all_report.fingerprint(out, files), "diagnostics": summary}
     write_json(marker, gpu)
     return gpu
