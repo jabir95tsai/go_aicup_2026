@@ -546,3 +546,10 @@ CPU／Gloo 整合 108 項（108.24 秒）與最新 B2 15 項（1.83 秒）通過
 ### 2026-11-17：e2e_adam 僅保留 ZIP
 
 依使用者要求，`data/processed/identity/e2e_adam/` 已完整打包為同層 `e2e_adam.zip`（4,224,570,410 bytes），再次逐檔 SHA-256 核對封存內容與來源一致、確認來源未變後刪除原目錄（原一般檔案共 5,376,719,380 bytes，約 5.01 GiB）。ZIP 包含 lr1e5／lr3e5 兩臂的完整快取；重做依賴它們的分析前，執行 `unzip data/processed/identity/e2e_adam.zip -d data/processed/identity/` 還原。其他實驗目錄與模型未刪除。
+
+
+### 2026-11-20：cvec2 policy 逐手特徵重整
+
+依使用者要求，`data/processed/strength_features/humansl/cvec2_policy/` 集中本實驗逐手特徵。貼目 6.5 的 H9 共 130,243 盤，逐盤平均與原基準最大差 2.09e-6。貼目 0.5 的 H15 共 35,979 盤，另有 184,698 盤 C v2。原 HD1／C v2 分片路徑以相對符號連結指向同一份檔案。Public／Private 的匯出快取維持現有路徑。
+
+`strength_train_hc/` 現只保留 H 逐盤基準與索引、train20 棋局表和 E1 題表。舊 ZIP 與未選入的歷史資料已移除，取代 11/17 的 ZIP 封存安排。歷史實驗若需要已移除的分片或題表，需另行取得。新包的 `h_missing.parquet` 列出 18,476 盤缺 H 逐手原值的 Valid-U 棋局，其中 17,432 盤 HD0、1,044 盤 HD≥2。既有 Stage 1 的逐盤摘要涵蓋該清單，815890 已完成 `stage1/812279/`，建議 anchor B。Stage 2 開跑時按棋譜重播生成全盤 policy。操作及詳細路徑見 [cvec2 policy README](src/go_aicup/tasks/strength/cvec2_policy/README.md)。

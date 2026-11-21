@@ -22,6 +22,7 @@ from scripts.strength.rank_permove import _side_mean
 
 H_IDS = np.array([humansl.PROFILES.index(name) for name in PROFILES])
 H_COLUMNS = np.r_[H_IDS, H_IDS + len(humansl.PROFILES)]
+H_HD0_CACHE = PROCESSED / "strength_features/humansl/cvec2_policy/h_hd0"
 H_CACHE = (
     PROCESSED / "strength_features/humansl/p3_komi/h_train",
     PROCESSED / "strength_features/humansl/train20_hc/h_hd1",
@@ -174,27 +175,37 @@ def h_offsets(games, canon, out):
         offsets[rows] = norm
         max_error = max(max_error, error)
 
-    for source in H_CACHE:
+    sources = [(source, 1) for source in H_CACHE]
+    if H_HD0_CACHE.exists():
+        sources.append((H_HD0_CACHE, 0))
+    for source, handicap in sources:
         shards = sorted(source.glob("shard_*/meta.json"))
         if not shards:
-            raise FileNotFoundError(f"missing original HD1 H played-move shards: {source}")
+            raise FileNotFoundError(f"missing HD{handicap} H played-move shards: {source}")
         for marker in shards:
             shard = marker.parent
             table = pd.read_parquet(shard / "games.parquet")
             rows = target.get_indexer(table.game_index)
             if ((rows < 0).any() or not np.array_equal(games.iloc[rows].player_color, table.player_color)
-                    or not games.iloc[rows].handicap.eq(1).all()):
+                    or not (games.iloc[rows].handicap.eq(1) == bool(handicap)).all()):
                 raise ValueError(f"H shard identity changed: {shard}")
             raw, norm = h_means(shard, games.iloc[rows])
             ingest(table.game_index, raw, norm, shard)
 
-    reused = int(np.isfinite(offsets).all(axis=1).sum())
+    reused_shards = np.isfinite(offsets).all(axis=1)
+    reused = int(reused_shards.sum())
     # Parts from earlier attempts are reused whatever slice they came from, so a resume splits
     # only the remaining games evenly over the GPUs it has.
     for path in sorted(Path(out).glob("h_backfill_*/part_*.npz")):
         if path.name.count(".") == 1:
             with np.load(path, allow_pickle=False) as data:
-                ingest(data["games"], data["raw"], data["offsets"], path)
+                ids = data["games"]
+                rows = target.get_indexer(ids)
+                if (rows < 0).any():
+                    raise ValueError(f"unknown games in H normalization shard: {path}")
+                keep = ~reused_shards[rows]
+                if keep.any():
+                    ingest(ids[keep], data["raw"][keep], data["offsets"][keep], path)
     missing_rows = np.flatnonzero(~np.isfinite(offsets).all(axis=1))
     missing = games.iloc[missing_rows]
     if missing.handicap.eq(1).any():

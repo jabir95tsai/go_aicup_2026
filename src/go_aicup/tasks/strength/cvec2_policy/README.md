@@ -3,10 +3,30 @@
 Stage 1 reproduces cvec2 on Valid-U and all 800 release predictions. It then fits A
 (original H15/C10), B (H9 and normalized C10), and C (normalized H9 and C10).
 The normalizer is the per-side mean of per-move logsumexp across profiles, subtracted
-from the canonical cvec2 log-likelihoods. It uses the existing per-move C and HD1 H
-shards and recomputes missing H9 offsets with KataGo. The original archive can remain
-zipped at `data/processed/strength_train_hc.zip`; only required members are staged
-temporarily. An alternate archive is accepted via `LEGACY_ZIP`.
+from the canonical cvec2 log-likelihoods. The played-move inputs are grouped under
+`data/processed/strength_features/humansl/cvec2_policy/`.
+
+| Path | Contents |
+| --- | --- |
+| `h_hd0/` | H9 for 130,243 games at komi 6.5, including applicable HD≥2 games |
+| `h_hd1/` | Original komi-0.5 H shards for 35,979 games. The 15 profiles also supply the canonical baseline |
+| `c_v2/` | Original played-move C v2 shards for all 184,698 fit/evaluation games |
+| `h_missing.parquet` | 18,476 Valid-U games missing played-move H. Includes 17,432 HD0 and 1,044 HD≥2 games |
+| `manifest.json` | Coverage, baseline reproduction and per-file SHA-256 hashes |
+
+Stage 1 reads these shards and any reusable offsets from the selected output directory
+before dispatching the remaining games to KataGo. The existing
+`stage1/812279/` output has validated offsets for all 18,476 games on the missing
+list. A fresh output directory requires those games to be analyzed again.
+The previous C v2 and komi-0.5 H
+paths resolve to the same shard directories through symbolic links. Public/private
+played-move caches for export retain their existing paths.
+
+`data/processed/strength_train_hc/` supplies the original `standard/features.npy`,
+`standard/game_index.npy`, the train20 game index and the E1 question table. The old
+ZIP and unused historical shards were removed. Older experiments that read those
+historical shards or their tables require those inputs to be recovered separately.
+`LEGACY_ZIP` remains a fallback for installations using the original layout.
 
 ```bash
 sbatch src/go_aicup/tasks/strength/cvec2_policy/stage1.slurm
@@ -31,7 +51,10 @@ Stage 2 stores model checkpoints, per-game features, paired results, and score r
 under `outputs/rank/humansl/cvec2_policy/stage2/<job_id>/`. Full-board caches are
 volatile. An explicit restart with the same `OUT` and unchanged settings rebuilds
 the volatile cache and resumes the encoder checkpoints saved every 500 updates.
-The two stages report local validation; they do not publish submissions.
+Job 815890 completed Stage 1 in the `stage1/812279/` directory. Its suggested anchor
+is B. Stage 2 can use this directory directly and generates full-board policies
+from the replay shards and teacher checkpoints at runtime. The Stage 1 export
+has a separate entry point.
 
 ## Locked A/H15 eight-arm experiment
 

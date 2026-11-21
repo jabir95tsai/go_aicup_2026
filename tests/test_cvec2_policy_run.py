@@ -69,6 +69,7 @@ def test_h_backfill_dispatch_keeps_games_and_canonical_rows_aligned(monkeypatch,
     (shard / "meta.json").touch()
     games.iloc[[1]].to_parquet(shard / "games.parquet", index=False)
     monkeypatch.setattr(played, "H_CACHE", [shard.parent])
+    monkeypatch.setattr(played, "H_HD0_CACHE", tmp_path / "missing")
     monkeypatch.setattr(played, "h_means", lambda *_: (canon[[1]], np.array([[24, -24]])))
     monkeypatch.setattr(played, "ProcessPoolExecutor", lambda workers, **_: ThreadPoolExecutor(workers))
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3,7")
@@ -96,6 +97,12 @@ def test_h_backfill_resume_reuses_saved_parts_and_resplits_the_rest(monkeypatch,
                           "player_color": 0, "handicap": 0})
     canon = np.arange(6 * 18, dtype=float).reshape(6, 18)
     monkeypatch.setattr(played, "H_CACHE", [])
+    packed = tmp_path / "packed" / "shard_0"
+    packed.mkdir(parents=True)
+    (packed / "meta.json").touch()
+    games.iloc[[0]].to_parquet(packed / "games.parquet", index=False)
+    monkeypatch.setattr(played, "H_HD0_CACHE", packed.parent)
+    monkeypatch.setattr(played, "h_means", lambda *_: (canon[[0]], np.array([[70, -70]])))
     monkeypatch.setattr(played, "ProcessPoolExecutor", lambda workers, **_: ThreadPoolExecutor(workers))
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
     old = tmp_path / "h_backfill_06"
@@ -123,7 +130,7 @@ def test_h_backfill_resume_reuses_saved_parts_and_resplits_the_rest(monkeypatch,
     (next(tmp_path.glob("h_backfill_*_01/part_000000.error.json"))).unlink()
     offsets, error, reused = played.h_offsets(games, canon, tmp_path)
     np.testing.assert_array_equal(offsets[:, 0], games.game_index)
-    assert error == 0 and reused == 0
+    assert error == 0 and reused == 1
 
 
 def test_export_test_offsets_align_shards_with_release_rows(monkeypatch, tmp_path):
