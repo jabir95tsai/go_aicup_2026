@@ -4432,3 +4432,20 @@ GPU 效能與正式分數尚未驗證。第二階段獨立手動提交，沒有 
   - 量級：預期約 +0.001，實得約 8 倍。pub2 只有 32 題改 top-1；若改動的對錯各半，淨分的標準差約 √32 ≈ 5.7 分，所以 +6.5 分約 1.1 個標準差，仍在雜訊內。
   - **依事前規則不升為基底，基底仍為 `820880-likeb.csv`。** 但這和 11/20 使用者修訂的規則衝突：理論支持、Public 上升、本地沒有明確為負（pool 1 +0.0019、pool 0 +0.0031）即可保留。是否改用交由使用者決定。
 - **使用者決定（11/21）：** 依 11/20 規則改用 `821010-comb-probe.csv` 為競賽一基底（取代事前「不升基底」規則）。
+
+### 2026-11-21：競賽一——融合權重隨題目執色變化（使用者「2 照計畫實作」；事前登記，看結果前寫定）
+
+- **計畫：** [PID_PSEUDO_COLOUR_PLAN.md](PID_PSEUDO_COLOUR_PLAN.md) 計畫二。基底為 `821010-comb-probe.csv` 的新增集融合（FULL 逐 k 權重，`outputs/pid/likelihood/combine/report.json` 的 `chosen.weights`）。
+- **模型：** 每個 k 的第 j 項權重 w_kj ＋ v_kj·z，z＝2f−1，f 為題內本人執黑的盤數比例。conditional logit、L-BFGS，起點 w＝FULL、v＝0；懲罰 ρ‖v‖²（loss 為每題平均負對數似然），ρ ∈ {0, 1, 10, 100}。
+- **draws：** 開發 pool 0 4000–4039（前 20／後 20 對半交叉擬合選 ρ，再以 40 個重擬合）；封存 pool 0 4100–4119、pool 1 4100–4129。
+- **診斷臂 REFIT**（v 固定 0、只重擬合 w，不可被選）：用來區分「執色效果」與「單純重擬合」。另報現行權重在開發 draws 上各 k 黑題／白題／混合題的分數。
+- **停止：** 交叉擬合中沒有 COL 臂勝過 COMB → 不開封存。選到 ρ＝0 或 100 記為邊界風險。
+- **判定（11/20 規則，對 COMB）：** pool 1 Δ>0 且 z≥2.5、各 k ≥−0.005、pool 0 Δ>0。
+- **產出：**
+  - 通過：`<job>-combcol.csv`，Public 對 `821010-comb-probe.csv` ≥ −0.005 → 成為基底。
+  - 未過但兩個 pool Δ 都 >0：`<job>-combcol-probe.csv`，Public 上升才成為基底。
+  - pool 1 Δ ≤ 0：不匯出、結案。
+  - 匯出前以分項重建 `821010-comb-probe.csv` 的 top-5 須逐列相同，原測試集逐列不變。
+- **預期：** 驗證台 +0.001～+0.003，集中在 k＝1。
+- **程式：** `pid2_likelihood.py` 新增 `evaluate7`、`fit_colour`、`apply_colour`、`colour_selfcheck`（合成資料還原植入的 w、v，誤差 ≤0.25；ρ 很大時 v→0；v＝0 時與 `apply_weights` 相同，已在登入節點 CPU 通過），以及 export `--colour`。Slurm：`likelihood_colour.slurm`、`likelihood_export_colour.slurm`。
+- **成本：** 1 卡，約 30–40 分鐘（11/21 evaluate5 在 70 draws 上跑了 23 分鐘，這次是 90 draws）。

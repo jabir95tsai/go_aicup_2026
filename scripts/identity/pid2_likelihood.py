@@ -1450,6 +1450,181 @@ def evaluate6(_args) -> None:
     (EB2_OUT / "report.json").write_text(json.dumps(report, indent=1, default=float))
 
 
+# ---------------------------------------------------------------- colour-dependent fusion weights (2026-11-21, PID_PSEUDO_COLOUR_PLAN.md plan 2)
+COL_OUT = OUT / "combine_colour"
+R7_DEV = [(0, d) for d in range(4000, 4040)]
+R7_SEALED = [(0, d) for d in range(4100, 4120)] + [(1, d) for d in range(4100, 4130)]
+COL_RHOS = (0.0, 1.0, 10.0, 100.0)
+
+
+def fit_colour(sets, w0: np.ndarray, rho: float, device, refit_only: bool = False) -> np.ndarray:
+    """conditional logit for one k with weights w + z v, z = 2 f - 1 per question (f = share of the
+    question's games played as black); sets = [(X [Q, C, 8], owner [Q], z [Q])]; L2 penalty rho |v|^2.
+    Returns [16] = (w, v). refit_only keeps v = 0 (diagnostic: refit without colour)."""
+    import torch
+    Xs = [(torch.from_numpy(x).to(device), torch.from_numpy(o).to(device), torch.from_numpy(z).to(device))
+          for x, o, z in sets]
+    n = sum(len(o) for _, o, _ in sets)
+    p = torch.tensor(np.r_[w0, np.zeros(8)], device=device, dtype=torch.float64, requires_grad=True)
+    opt = torch.optim.LBFGS([p], lr=1.0, max_iter=500, tolerance_grad=1e-9, tolerance_change=1e-12,
+                            line_search_fn="strong_wolfe")
+
+    def closure():
+        opt.zero_grad()
+        w, v = p[:8], (p[8:] * 0 if refit_only else p[8:])
+        loss = 0.0
+        for x, o, z in Xs:
+            wq = w[None] + z[:, None] * v[None]
+            s = torch.einsum("qcj,qj->qc", x, wq)
+            loss = loss + (torch.logsumexp(s, dim=1) - s[torch.arange(len(o), device=device), o]).sum()
+        loss = loss / n + (0.0 if refit_only else rho * (v ** 2).sum())
+        loss.backward()
+        return loss
+
+    opt.step(closure)
+    out = p.detach().cpu().numpy().copy()
+    if refit_only:
+        out[8:] = 0.0
+    return out
+
+
+def apply_colour(X: np.ndarray, ks: np.ndarray, z: np.ndarray, W: dict) -> np.ndarray:
+    """W[k] = [16] (w, v) -> scores [Q, C]."""
+    wq = np.stack([W[int(k)][:8] + zi * W[int(k)][8:] for k, zi in zip(ks, z)])
+    return np.einsum("qcj,qj->qc", X, wq)
+
+
+def evaluate7(_args) -> None:
+    """colour-dependent per-k fusion weights on top of the learned fusion (821010-comb-probe): cross-fit rho on
+    dev draws 4000-4039, refit on all 40, sealed test vs the current weights."""
+    import torch
+
+    from scripts.identity.pid2_cheap import COLS, buckets, official, paired, verdict
+
+    COL_OUT.mkdir(parents=True, exist_ok=True)
+    stage0 = json.loads((OUT / "report.json").read_text())
+    fp = json.loads((EB_OUT / "report.json").read_text())["final_params"]
+    r5 = json.loads((COMB_OUT / "report.json").read_text())
+    WC = {int(k): np.array(v, np.float64) for k, v in r5["chosen"]["weights"].items()}
+    W0 = {k: np.r_[WC[k], np.zeros(8)] for k in KS}
+    ctx = _context(stage0["theta_pop"], rich=True)
+    report, draw, llr, device, env = ctx["report"], ctx["draw"], ctx["llr"], ctx["device"], ctx["env"]
+    color = env["color"]
+    mask = torch.tensor(fp["mask"], device=device, dtype=torch.float32)
+    prior = torch.tensor(fp["theta_pop"], device=device, dtype=torch.float64)
+    P = torch.from_numpy(np.load(EB_OUT / "precision.npy")).to(device)
+
+    def get(pool, d):
+        x = draw(pool, d, with_parts=True)
+        le = llr(x, 1.0, mask, prior, P)[0]
+        X = np.stack([x["parts"][c] for c in PARTS[:-1]] + [le], axis=2)
+        f = np.array([float((color[np.asarray(g)] == 0).mean()) for g in x["query"]])
+        return X, x["ks"], x["owner"], 2 * f - 1
+
+    def score_rows(d, X, ks, owner, z, arms):
+        return [{"draw": d, "arm": a, **buckets(official(apply_colour(X, ks, z, W), owner), ks)} for a, W in arms.items()]
+
+    dev, colour_rows = {}, []
+    for pool, d in R7_DEV:
+        X, ks, owner, z = get(pool, d)
+        if not dev:
+            diff = float(np.abs(apply_colour(X, ks, z, W0) - apply_weights(X, ks, WC)).max())
+            report["v0_reproduction"] = diff
+            print(f"v = 0 reproduction max abs diff {diff:.2e}", flush=True)
+            assert diff < 1e-9
+        dev[d] = (X, ks, owner, z)
+        pts = official(apply_weights(X, ks, WC), owner)
+        for k in KS:
+            for name, sel in (("black", z == 1), ("white", z == -1), ("mixed", np.abs(z) < 1)):
+                m = (ks == k) & sel
+                if m.any():
+                    colour_rows.append({"draw": d, "k": k, "group": name, "n": int(m.sum()), "pts": float(pts[m].sum())})
+        print(f"dev draw {d}", flush=True)
+    cg = pd.DataFrame(colour_rows).groupby(["k", "group"])[["n", "pts"]].sum()
+    cg["mean"] = cg["pts"] / cg["n"]
+    report["base_by_colour"] = {f"{k}_{g}": {"n": int(r.n), "mean": float(r["mean"])} for (k, g), r in cg.iterrows()}
+    print("base (current weights) by k and colour on dev:\n", cg.round(4).to_string(), flush=True)
+
+    def fit_all(draws, rho, refit_only=False):
+        return {k: fit_colour([(dev[d][0][dev[d][1] == k], dev[d][2][dev[d][1] == k], dev[d][3][dev[d][1] == k])
+                               for d in draws], WC[k], rho, device, refit_only) for k in KS}
+
+    names = [d for _, d in R7_DEV]
+    halves = (names[:20], names[20:])
+    rows = []
+    for fit_on, held in (halves, halves[::-1]):
+        arms = {"COMB": W0, "REFIT": fit_all(fit_on, 0.0, True),
+                **{f"COL_r{r:g}": fit_all(fit_on, r) for r in COL_RHOS}}
+        for d in held:
+            rows += score_rows(d, *dev[d], arms)
+    s1 = paired(pd.DataFrame(rows), "COMB").set_index("arm")
+    report["crossfit"] = s1[["1", "2", "3", "5", "all", "d_1", "d_2", "d_3", "d_5", "d_all", "se_all", "pos"]].to_dict(orient="index")
+    print("cross-fit (vs COMB; REFIT = diagnostic, not selectable):\n",
+          s1[["all", "d_1", "d_2", "d_3", "d_5", "d_all", "se_all"]].round(4).to_string(), flush=True)
+    cand = s1.loc[[f"COL_r{r:g}" for r in COL_RHOS]]
+    best = cand["d_all"].idxmax()
+    rho = float(best.split("_r")[1])
+    if cand.loc[best, "d_all"] <= 0:
+        report["stopped"] = "no colour arm beat the current weights in the cross-fit; sealed draws not opened"
+        (COL_OUT / "report.json").write_text(json.dumps(report, indent=1, default=float))
+        print(report["stopped"], flush=True)
+        return
+    W = fit_all(names, rho)
+    flags = []
+    for k in KS:
+        for j, c in enumerate(PARTS):
+            for zz in (-1.0, 1.0):
+                if np.sign(W[k][j] + zz * W[k][8 + j]) != np.sign(W[k][j]) and abs(W[k][j]) > 0:
+                    flags.append({"k": k, "part": c, "z": zz, "w": float(W[k][j]), "v": float(W[k][8 + j])})
+    report["chosen"] = {"rho": rho, "crossfit_delta": float(cand.loc[best, "d_all"]), "grid_edge": rho in (COL_RHOS[0], COL_RHOS[-1]),
+                        "weights": {k: W[k].tolist() for k in KS},
+                        "v_over_w": {k: np.round(W[k][8:] / W[k][:8], 3).tolist() for k in KS}, "flags": flags}
+    print("chosen:", report["chosen"]["rho"], "\nv / w per k:", report["chosen"]["v_over_w"], "\nflags:", flags, flush=True)
+    (COL_OUT / "report.json").write_text(json.dumps(report, indent=1, default=float))
+    del dev
+
+    out = []
+    for pool, d in R7_SEALED:
+        X, ks, owner, z = get(pool, d)
+        for r in score_rows(d, X, ks, owner, z, {"COMB": W0, "COL": W}):
+            out.append({"pool": pool, **r})
+        print(f"sealed pool {pool} draw {d}", flush=True)
+    frame = pd.DataFrame(out)
+    frame.to_csv(COL_OUT / "sealed_per_draw.csv", index=False)
+    t1, t0 = paired(frame[frame.pool == 1], "COMB"), paired(frame[frame.pool == 0], "COMB")
+    v = verdict(t1, t0, "COL")
+    v["probe"] = bool(not v["pass"] and v["pool1_delta"] > 0 and v["pool0_delta"] > 0)
+    report["sealed"] = {"pool1": t1.to_dict(orient="records"), "pool0": t0.to_dict(orient="records"), "verdict": v}
+    print("sealed pool 1 vs COMB:\n", t1.round(4).to_string(index=False), "\nsealed pool 0 vs COMB:\n",
+          t0.round(4).to_string(index=False), "\nverdict:", json.dumps(v), flush=True)
+    (COL_OUT / "report.json").write_text(json.dumps(report, indent=1, default=float))
+
+
+def colour_selfcheck() -> None:
+    """synthetic: fit_colour recovers planted (w, v); rho -> large shrinks v to ~0; v = 0 equals apply_weights."""
+    import torch
+    rng = np.random.default_rng(3)
+    w_true = np.array([1.0, 0.5, 2.0, 1.0, 0.8, 0.3, 1.2, 3.0])
+    v_true = np.array([0.5, 0.0, -0.5, 0.3, 0.0, 0.0, 0.0, 0.0])
+    sets = []
+    for _ in range(3):
+        X = rng.normal(size=(1500, 60, 8)) * 0.5
+        z = rng.choice([-1.0, 0.0, 1.0], size=1500)
+        s = np.einsum("qcj,qj->qc", X, w_true[None] + z[:, None] * v_true[None])
+        p = np.exp(s - s.max(1, keepdims=True))
+        p /= p.sum(1, keepdims=True)
+        sets.append((X, np.array([rng.choice(60, p=r) for r in p]), z))
+    got = fit_colour(sets, np.ones(8), 0.0, torch.device("cpu"))
+    assert np.abs(got[:8] - w_true).max() < 0.25 and np.abs(got[8:] - v_true).max() < 0.25, got
+    big = fit_colour(sets, np.ones(8), 1e4, torch.device("cpu"))
+    assert np.abs(big[8:]).max() < 0.01, big
+    X, o, z = sets[0]
+    W = {k: np.r_[w_true, np.zeros(8)] for k in KS}
+    ks = np.full(len(o), 1)
+    assert np.abs(apply_colour(X, ks, z, W) - apply_weights(X, ks, {1: w_true})).max() < 1e-12
+    print("colour selfcheck ok", {"w": np.round(got[:8], 2).tolist(), "v": np.round(got[8:], 2).tolist()}, flush=True)
+
+
 # ---------------------------------------------------------------- official export
 def position_tensors(arr: dict, moves_of, device, rich: dict | None = None):
     """sorted positions -> (B, PHI, SLOT tensors, first / end position per game id); rich = the
@@ -1531,9 +1706,17 @@ def export(args) -> None:
     if args.combine:                       # per-k learned fusion on top of EB (plan 2), only if it passed
         assert args.eb, "--combine stacks on --eb"
         r5 = json.loads((COMB_OUT / "report.json").read_text())
-        assert args.probe or r5["sealed"]["verdict"]["pass"], "the learned fusion did not pass the switch rule"
+        assert args.probe or args.colour or r5["sealed"]["verdict"]["pass"], "the learned fusion did not pass the switch rule"
         comb = {int(k): np.array(v, np.float64) for k, v in r5["chosen"]["weights"].items()}
         tag = "comb-probe" if args.probe else "comb"
+    colw = None
+    if args.colour:                        # colour-dependent weights on top of the probe fusion (821010 base)
+        assert args.combine and not args.probe, "--colour stacks on --combine (the 821010-comb-probe weights)"
+        r7 = json.loads((COL_OUT / "report.json").read_text())
+        v7 = r7["sealed"]["verdict"]
+        assert v7["pass"] or v7["probe"], "colour weights neither passed nor qualify as a probe"
+        colw = {int(k): np.array(v, np.float64) for k, v in r7["chosen"]["weights"].items()}
+        tag = "combcol" if v7["pass"] else "combcol-probe"
     target = SUB / f"{job}-{tag}.csv"
     assert not target.exists(), target
     device = torch.device("cuda")
@@ -1632,6 +1815,14 @@ def export(args) -> None:
                                           eb_file.loc[qids, COLS].to_numpy())
             np.testing.assert_array_equal(ranked, eb_file.loc[qids, COLS].to_numpy())
             ranked = cand[top5(apply_weights(X, ks, comb))]
+            if colw is not None:           # the probe weights must give the current base file first
+                base_file = pd.read_csv(SUB / "821010-comb-probe.csv", dtype=str).set_index("question_id")
+                np.testing.assert_array_equal(ranked, base_file.loc[qids, COLS].to_numpy())
+                qc = q_meta["color"].astype(str).to_numpy()
+                z = np.array([2.0 * (qc[rows[q]] == "B").mean() - 1.0 for q in qids])
+                report.setdefault("colour_groups", {})[prefix] = {
+                    "black": int((z == 1).sum()), "white": int((z == -1).sum()), "mixed": int((np.abs(z) < 1).sum())}
+                ranked = cand[top5(apply_colour(X, ks, z, colw))]
         out.loc[qids, COLS] = ranked
         ch = ranked[:, 0] != base.loc[qids, "top_1"].to_numpy()
         alone_top1 = cand[llr.argmax(1)] == base.loc[qids, "top_1"].to_numpy()
@@ -1732,6 +1923,7 @@ def selfcheck(_args) -> None:
     assert (iso - t27).abs().max() < 1e-9
     eb_selfcheck()
     combiner_selfcheck()
+    colour_selfcheck()
     print("selfcheck ok", flush=True)
 
 
@@ -1751,6 +1943,7 @@ def main() -> None:
     sub.add_parser("evaluate4")
     sub.add_parser("evaluate5")
     sub.add_parser("evaluate6")
+    sub.add_parser("evaluate7")
     e = sub.add_parser("export")
     e.add_argument("--workers", type=int, default=11)
     e.add_argument("--round2", action="store_true", help="use the round-2 choice (refuses if it kept B0)")
@@ -1758,11 +1951,12 @@ def main() -> None:
     e.add_argument("--eb", action="store_true", help="use the empirical-Bayes prior (refuses unless it passed)")
     e.add_argument("--combine", action="store_true", help="per-k learned fusion on top of --eb (refuses unless it passed)")
     e.add_argument("--probe", action="store_true", help="with --combine: LB probe even though the gate failed")
+    e.add_argument("--colour", action="store_true", help="with --combine: colour-dependent weights (passed or probe)")
     e.add_argument("--eb-lambda", action="store_true", help="with --eb: the widened-grid lambda (refuses unless it passed)")
     sub.add_parser("selfcheck")
     args = parser.parse_args()
     {"games": games, "policy": policy, "evaluate": evaluate, "evaluate2": evaluate2, "export": export,
-     "rich-features": rich_features_cmd, "evaluate3": evaluate3, "evaluate4": evaluate4, "evaluate5": evaluate5, "evaluate6": evaluate6,
+     "rich-features": rich_features_cmd, "evaluate3": evaluate3, "evaluate4": evaluate4, "evaluate5": evaluate5, "evaluate6": evaluate6, "evaluate7": evaluate7,
      "selfcheck": selfcheck}[args.cmd](args)
 
 
