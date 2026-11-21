@@ -49,7 +49,8 @@ class JointEncoder(nn.Module):
             if self.raw_a:
                 legal = torch.isfinite(logp[:, 0])
                 lp = logp.float()
-                p, lp = lp.exp(), lp.masked_fill(~legal[:, None], 0)
+                p = lp.exp().masked_fill(~legal[:, None], 0)
+                lp = lp.masked_fill(~legal[:, None], 0)
             else:
                 p, lp, legal = probabilities(logp)
             at = target[:, None, None].expand(-1, q.shape[1], 1)

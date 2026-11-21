@@ -74,7 +74,10 @@ python -m "$MODULE" all --phase score --out "$OUT"
 
 Run full preparation on CPU compute resources. It publishes shared zstd shards
 under `data/processed/strength_features/humansl/cvec2_policy/input_planes/` and
-locks the CPU artifacts in `$OUT/cpu/`. The eight-card GPU job uses H15 on cards
+locks the CPU artifacts in `$OUT/cpu/`. To reuse a completed plane cache, add
+`--reuse-planes <version-directory>` to `prepare` with a fresh `OUT`. Preparation
+verifies the cache, its sources and the game order before referencing it in the
+new configuration. The eight-card GPU job uses H15 on cards
 0–3 and C10 on cards 4–7. C10 cards finish both splits, then help complete
 H15 fitting games and write back to the resident H15 shards. After fitting-cache
 parity passes, the same C10 cards start training while H15 processes E2. The

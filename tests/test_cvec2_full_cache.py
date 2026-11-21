@@ -54,11 +54,14 @@ def test_a_teacher_uses_raw_profile_order_microbatches_and_side_offsets():
         torch.testing.assert_close(profile_offsets(family, side), reference)
 
 
-def test_h15_joint_view_keeps_board_and_legal_masks_aligned():
+def test_h15_joint_view_accepts_stricter_h_mask_and_rejects_reverse_difference():
+    from go_aicup.tasks.strength.cvec2_policy.encoder import build
+
     h, c = cache(15), cache(10)
     h.offsets = c.offsets = np.zeros((2, 2), dtype=np.float32)
     for shard in h.shards:
         shard.board = shard.target[:, None].expand(-1, 91).byte().clone()
+    h.shards[0].logp[0, :, 9] = -torch.inf
     joint = JointCache(h, c).for_device("cpu")
     lp, target, q, slot, board = (torch.cat(parts) for parts in zip(*joint.chunks([1, 0], 3, board=True)))
     assert lp.shape == (5, 25, 362)
@@ -66,6 +69,10 @@ def test_h15_joint_view_keeps_board_and_legal_masks_aligned():
     assert slot.tolist() == [0, 1, 0, 2, 3]
     assert board.shape == (5, 91)
     torch.testing.assert_close(board[:, 0], target.byte())
-    c.shards[0].logp[0, 0, 9] = -torch.inf
-    with pytest.raises(ValueError, match="legal move masks differ"):
+    assert torch.isfinite(lp[3, 15:, 9]).all()
+    p, features, legal = build("CNN-R10", True, 2027, raw_a=True).policy_inputs(lp, target, q)
+    assert not legal[3, 9]
+    assert not p[3, :, 9].any() and not features[3, :, 9].any()
+    c.shards[0].logp[0, :, 10] = -torch.inf
+    with pytest.raises(ValueError, match="outside the C10 mask"):
         JointCache(h, c)

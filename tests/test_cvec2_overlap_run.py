@@ -1,12 +1,37 @@
+import json
 from concurrent.futures import Future
 from threading import Event, Lock
 from time import monotonic
 from types import SimpleNamespace
 
 import numpy as np
+import pandas as pd
 import pytest
+import torch
 
 from go_aicup.tasks.strength.cvec2_policy import all_report, all_run, joint
+
+
+def test_teacher_parity_records_game_ids_and_only_gates_mean_or_nonfinite(tmp_path):
+    actual = torch.zeros(3, 50)
+    actual[0, :2] = .06
+    actual[1, 30] = -.2
+    expected = np.zeros_like(actual.numpy())
+    games = pd.DataFrame({"game_index": [407, 19, 200]}, index=[4, 5, 6])
+    cache = SimpleNamespace(arrays={"c": actual}, games=games)
+    path = tmp_path / "teacher_fit_parity.json"
+
+    report = all_run.teacher_parity(cache, expected, path)
+    assert report["H"]["game_indices_over_max_tolerance"] == [407]
+    assert report["C"]["game_indices_over_max_tolerance"] == [19]
+    assert json.loads(path.read_text()) == report
+
+    actual[:, 30:] = .01
+    with pytest.raises(ValueError, match="played-move teacher parity failed"):
+        all_run.teacher_parity(cache, expected, path)
+    actual[1, 30] = float("nan")
+    with pytest.raises(ValueError, match="nonfinite played-move teacher parity"):
+        all_run.teacher_parity(cache, expected, path)
 
 
 def test_train_on_fit_then_extract_on_full(monkeypatch, tmp_path):

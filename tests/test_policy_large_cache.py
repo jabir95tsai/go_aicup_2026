@@ -4,7 +4,28 @@ import numpy as np
 import pandas as pd
 import torch
 import pytest
-from go_aicup.tasks.strength.policy_large.cache import PolicyCache,Shard,split_games
+from go_aicup.tasks.strength.policy_large.cache import PolicyCache, Shard, legal_moves, split_games
+
+
+def test_h15_mask_excludes_suicide_but_keeps_capture_connection_and_pass():
+    inputs = torch.zeros(7, 7, 19, 19)
+    inputs[:, 0] = 1
+    for row, col in ((8, 9), (10, 9), (9, 8), (9, 10)):
+        inputs[1:5, 2, row, col] = 1
+    inputs[2, 3, 8, 9] = 1  # Capturing the opponent atari makes the move legal.
+    inputs[3:5, 2, 8, 9] = 0
+    inputs[3:5, 1, 8, 9] = 1
+    inputs[3, 3, 8, 9] = 1  # Connecting to a chain with only this liberty is suicide.
+    inputs[5, 6, 9, 9] = 1
+    inputs[6, 2, 0, 1] = inputs[6, 2, 1, 0] = 1
+
+    simple = legal_moves(inputs)
+    japanese = legal_moves(inputs, exclude_suicide=True)
+    center = 9 * 19 + 9
+    assert simple[:6, center].tolist() == [True, True, True, True, True, False]
+    assert japanese[:6, center].tolist() == [True, False, True, False, True, False]
+    assert simple[6, 0] and not japanese[6, 0]
+    assert japanese[:, -1].all()
 
 
 def sample():

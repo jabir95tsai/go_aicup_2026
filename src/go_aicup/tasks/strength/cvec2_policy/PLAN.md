@@ -34,7 +34,7 @@
 沿用或建立 `data/processed/strength_features/humansl/cvec2_policy/input_planes/` 的版本目錄。193,271 盤整盤重播一次，分片直接 `zstd -1` 壓縮發布。每手保留 `uint8[993]` packed planes、`float32[19]` 全域輸入、`int16` 落點和 `uint8` 相對執色（本人 0、對手 1）。保存 input config、規則、貼目、盤序、offsets、棋局與題目對照及 checksum。Public／Private 沿用 [`policy_large/export.py`](../policy_large/export.py) 的盤與題目準備。
 
 - 八卡只讀 **165,075 盤、36,809,189 手**的原擬合＋E2。保留四張 H 卡、四張 C 卡與現有對齊的棋局分片。H teacher 使用原版 `humansl.PROFILES` 的 15 個 profiles 和實際輪到下棋的顏色，C teacher 使用原版 C v2 的十級向量和本人／對手角色。
-- 顯存快取保存 **H15＋C10 全盤 FP16 raw log policy**，每個 profile 362 點含 pass。`Shard.q` 保存合法點 FP32 log-softmax 的實際落點原值，另存 target、side 和 offsets。兩個 teacher 的盤序、手序、合法遮罩及側別核對一致。H15／C10 的逐盤 raw q 均值對原版 A 的 parity 沿用最大 **≤ .05**、平均 **≤ .005**。可用既有 HD1 H15 分片對照。 [既有 teacher 快取](../policy_large/cache.py) · [H/C 快取對齊](full_cache.py)
+- 顯存快取保存 **H15＋C10 全盤 FP16 raw log policy**，每個 profile 362 點含 pass。`Shard.q` 保存合法點 FP32 log-softmax 的實際落點原值，另存 target、side 和 offsets。H15 依日本規則排除自殺手，C10 沿用原遮罩。檢查兩者的盤序、手序、側別和 H15 遮罩為 C10 的子集，聯合模型以 H15 遮罩選取候選點。逐盤 raw q 均值對原版 A 的差若非有限值或任一族平均差 **> .005**，即停止。最大差 **> .05** 的棋局按族記在 `teacher_fit_parity.json` 和 `teacher_parity.json` 的 `game_indices_over_max_tolerance`。 [teacher 快取](../policy_large/cache.py) · [H/C 快取對齊](full_cache.py)
 - 全量 policy 快取平均每張 H 卡約 **93.6 GiB**、每張 C 卡約 **62.4 GiB**。納入第 5 節的盤面圖後，H 卡快取約 **94.4 GiB／卡**，以實際分片及裝置容量預檢。舊 `cache_fraction=0.75` 加 16 GiB 工作空間不足以容納 H15。A 版配置先用 `cache_fraction=0.85`、保留現有 **至少 16 GiB** 的檢查，H15 的推論微批先用 **128 個位置**、C10 沿用 256。八卡短測要驗證真實峰值、跨卡搬運以及每臂 step 速度，通過後才定正式配置。A 版設置透過本輪配置傳入，舊 H9 路徑保有各自配置。
 - 全盤 log policy 與逐手 q 留在該八卡作業顯存。按第 6 節在 teacher 前向時歸約並原子發布小型 offsets。縮小 F/B 位置分塊可降低工作峰值，完整顯存預檢仍需通過。A 版使用新的 run 身分，原有 input planes 可依 manifest 驗證後重用。
 

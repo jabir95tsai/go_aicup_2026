@@ -195,6 +195,7 @@ def main():
     full.add_argument("--folds", type=Path, default=PROCESSED / "cv/strength_folds_seed2027.parquet")
     full.add_argument("--planes", type=Path,
                       default=PROCESSED / "strength_features/humansl/cvec2_policy/input_planes")
+    full.add_argument("--reuse-planes", type=Path, help="reuse a verified input-plane directory during prepare")
     full.add_argument("--workers", type=int, default=88)
     full.add_argument("--smoke-steps", type=int, choices=range(2, 6), metavar="2..5")
     args = parser.parse_args()

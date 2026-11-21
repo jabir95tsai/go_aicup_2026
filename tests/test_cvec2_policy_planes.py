@@ -7,7 +7,7 @@ import torch
 
 from go_aicup.artifacts import file_hash, object_hash, write_json
 from go_aicup.features import humansl_torch
-from go_aicup.tasks.strength.cvec2_policy import planes
+from go_aicup.tasks.strength.cvec2_policy import all_run, planes
 from go_aicup.tasks.strength.policy_large import cache
 
 pytestmark = pytest.mark.skipif(not shutil.which("zstd"), reason="requires the zstd command")
@@ -63,6 +63,47 @@ def test_plane_reader_crosses_shards_and_checks_checksum(tmp_path):
     assert planes._cached_shard(directory / "fit-2.npz.zst", shards[2]) is None
     with pytest.raises(ValueError, match="checksum"):
         list(reader.batches(0, 4, 2))
+
+
+def test_reuse_planes_accepts_known_mask_only_change_and_checks_content(tmp_path, monkeypatch):
+    source = tmp_path / "cache.py"
+    source.write_text("new policy mask")
+    monkeypatch.setattr(all_run, "ROOT", tmp_path)
+    monkeypatch.setattr(planes.cache, "__file__", str(source))
+    monkeypatch.setattr(all_run, "MASK_CACHE_SHA256", file_hash(source))
+    raw = tmp_path / "raw.zip"
+    raw.write_bytes(b"official source")
+    monkeypatch.setattr(planes, "RAW_ZIP", raw)
+    monkeypatch.setattr(planes, "_canonical_sources", lambda groups: {"board": "unchanged"})
+    checkpoint = tmp_path / "weights.pt"
+    net_config = {"version": 14}
+    torch.save({"config": net_config}, checkpoint)
+    monkeypatch.setattr(humansl_torch, "CKPT", checkpoint)
+    sources = {"format": 1, "smoke": False, "input_config": net_config,
+               "board": {"board": "unchanged"}, "official_zip": file_hash(raw),
+               "code": {source.name: all_run.PRE_MASK_CACHE_SHA256}}
+    identity = object_hash(sources)
+    directory = tmp_path / identity
+    directory.mkdir()
+    games = pd.DataFrame({"game_index": [10, 21], "length": [2, 3],
+                          "handicap": [1, 0], "player_color": [1, 0]})
+    table, shard = directory / "fit.parquet", directory / "fit-0.npz.zst"
+    games.to_parquet(table, index=False)
+    info = planes._write_shard(shard, fixture_planes([2, 3]), [2, 3])
+    manifest = directory / "manifest.json"
+    write_json(manifest, {"identity": identity, "sources": sources, "tables": {table.name: file_hash(table)},
+                         "shards": [info | {"file": shard.name, "group": "fit", "start": 0, "end": 2, "positions": 5}]})
+    write_json(directory / "complete.json", {"identity": identity, "sha256": file_hash(manifest)})
+
+    assert all_run.reuse_planes(directory, {"fit": games}, smoke=False) == directory
+    with pytest.raises(ValueError, match="teacher game order"):
+        all_run.reuse_planes(directory, {"fit": games.iloc[::-1]}, smoke=False)
+    shard.write_bytes(b"corrupt")
+    with pytest.raises(ValueError, match="plane shard checksum"):
+        all_run.reuse_planes(directory, {"fit": games}, smoke=False)
+    source.write_text("another unreviewed change")
+    with pytest.raises(ValueError, match="encoding code differs"):
+        all_run.reuse_planes(directory, {"fit": games}, smoke=False)
 
 
 @pytest.mark.skipif(not humansl_torch.KATAGO_PY.is_dir(), reason="requires project KataGo Python source")

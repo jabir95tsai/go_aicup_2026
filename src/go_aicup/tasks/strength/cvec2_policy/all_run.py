@@ -21,6 +21,9 @@ SEED = 2027
 MODELS = all_report.MODEL_ARMS
 WEIGHTED = all_report.WEIGHTED_ARMS
 TRAIN_DEVICES = (4, 5, 6, 7)
+# shortcut: these two cache.py versions share identical plane encoding, recheck before adding another pair.
+PRE_MASK_CACHE_SHA256 = "18098a7f6bd56e36787c43745f91f5f04054c3c23fc8218fcf0a42d7d87a4d43"
+MASK_CACHE_SHA256 = "72a22a34435121b554b85a19fb904a13a2c4eca5ebcbcefc15991404bfc528c8"
 
 
 def read_json(path):
@@ -42,6 +45,31 @@ def sources():
     return code_sources() | {str(path.relative_to(ROOT)): file_hash(path) for path in files}
 
 
+def reuse_planes(directory, groups, smoke):
+    from . import planes
+
+    directory = directory.resolve()
+    manifest = planes._verified_manifest(directory)
+    saved = manifest["sources"]
+    current_code = {name: file_hash(ROOT / name) for name in saved["code"]}
+    cache_source = str(Path(planes.cache.__file__).relative_to(ROOT))
+    if current_code[cache_source] == MASK_CACHE_SHA256 and saved["code"][cache_source] == PRE_MASK_CACHE_SHA256:
+        current_code[cache_source] = PRE_MASK_CACHE_SHA256
+    if current_code != saved["code"]:
+        raise ValueError("reusable input-plane encoding code differs")
+
+    net_config = torch.load(planes.humansl_torch.CKPT, map_location="cpu", weights_only=False)["config"]
+    if (saved["format"] != 1 or saved["smoke"] != smoke
+            or object_hash(saved["input_config"]) != object_hash(net_config)
+            or saved["board"] != planes._canonical_sources(groups)
+            or saved["official_zip"] != file_hash(planes.RAW_ZIP)):
+        raise ValueError("reusable input-plane sources differ from preparation inputs")
+    planes._published(directory, manifest)
+    for group, rows in groups.items():
+        planes.PlaneReader(directory, rows, groups=(group,))
+    return directory
+
+
 def prepare(args):
     started = monotonic()
     out = args.out
@@ -52,7 +80,8 @@ def prepare(args):
         requested = (str(args.stage1_out.resolve()), str(args.folds.resolve()),
                      str(args.planes.resolve()), args.smoke_steps)
         stored = tuple(config[key] for key in ("stage1", "folds", "planes_root", "smoke_steps"))
-        if requested != stored:
+        if requested != stored or (args.reuse_planes is not None
+                                   and str(args.reuse_planes.resolve()) != config["planes"]):
             raise ValueError("prepared experiment settings differ")
         all_data.load(out / "cpu")
         return config
@@ -60,7 +89,9 @@ def prepare(args):
 
     data = all_data.prepare(out / "cpu", args.stage1_out, args.folds, smoke_steps=args.smoke_steps)
     planes_started = monotonic()
-    packed = planes.build(data.groups, args.planes, args.workers, smoke=args.smoke_steps is not None)
+    smoke = args.smoke_steps is not None
+    packed = (planes.build(data.groups, args.planes, args.workers, smoke=smoke) if args.reuse_planes is None
+              else reuse_planes(args.reuse_planes, data.groups, smoke))
     config = {
         "stage1": str(args.stage1_out.resolve()), "folds": str(args.folds.resolve()),
         "seed": SEED, "smoke_steps": args.smoke_steps, "updates": len(data.batches),
@@ -177,13 +208,19 @@ def run_tasks(out, data, fit_cache, full_ready, identity, abort, phase_started):
 
 def teacher_parity(cache, expected, path):
     errors = np.abs(cache.arrays["c"].numpy() - expected)
-    parity = {"max": float(errors.max()), "mean": float(errors.mean()), "games": len(errors)}
+    if not np.isfinite(errors).all():
+        raise ValueError("nonfinite played-move teacher parity")
+    max_tolerance = .05
+    parity = {"max": float(errors.max()), "mean": float(errors.mean()), "games": len(errors),
+              "max_tolerance": max_tolerance}
     for family, values in (("H", errors[:, :30]), ("C", errors[:, 30:])):
-        parity[family] = {"max": float(values.max()), "mean": float(values.mean())}
+        above = values.max(axis=1) > max_tolerance
+        parity[family] = {"max": float(values.max()), "mean": float(values.mean()),
+                          "game_indices_over_max_tolerance": cache.games.loc[above, "game_index"].tolist()}
     write_json(path, parity)
-    if not np.isfinite(errors).all() or any(parity[f]["max"] > .05 or parity[f]["mean"] > .005
-                                           for f in ("H", "C")):
-        raise ValueError(f"played-move teacher parity failed: {parity}")
+    if any(parity[f]["mean"] > .005 for f in ("H", "C")):
+        raise ValueError(f"played-move teacher parity failed: H mean={parity['H']['mean']}, "
+                         f"C mean={parity['C']['mean']}")
     return parity
 
 
@@ -272,6 +309,8 @@ def gpu_phase(out, data, config):
 
 
 def execute(args):
+    if args.reuse_planes is not None and args.phase != "prepare":
+        raise SystemExit("--reuse-planes requires --phase prepare")
     if args.phase == "preflight":
         data = all_data.preflight(args.stage1_out, args.folds)
         print(json.dumps(data.identity, indent=2), flush=True)

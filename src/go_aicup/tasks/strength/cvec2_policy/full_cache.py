@@ -48,10 +48,10 @@ class JointCache:
                     raise ValueError("expected mover-stone planes on H15 shards only")
                 for start in range(0, len(hs.target), 65536):
                     end = start + 65536
-                    left = torch.isfinite(hs.logp[start:end, 0])
-                    right = torch.isfinite(cs.logp[start:end, 0]).to(left.device)
-                    if not torch.equal(left, right):
-                        raise ValueError("H/C legal move masks differ")
+                    h_legal = torch.isfinite(hs.logp[start:end, 0])
+                    c_legal = torch.isfinite(cs.logp[start:end, 0]).to(h_legal.device)
+                    if (h_legal & ~c_legal).any():
+                        raise ValueError("H15 has a legal move outside the C10 mask")
         self.arrays = {
             "counts": h.arrays["counts"],
             "c": torch.cat((h.arrays["c"], c.arrays["c"]), dim=1),
@@ -137,7 +137,7 @@ def infer(games, out, planes_dir=None, config=None, nominal_lengths=None):
     joint = JointCache(result["H"][0], result["C"][0])
     if planes_dir is not None:
         write_json(out / "teacher_alignment.json", {"games": len(games), "positions": int(games.length.sum()),
-                   "seconds": time.monotonic() - alignment_started, "legal_masks_equal": True})
+                   "seconds": time.monotonic() - alignment_started, "h15_legal_subset_of_c10": True})
     joint.games = games
     return joint
 
@@ -276,7 +276,7 @@ def overlap(games, n_fit, out, planes_dir, config, nominal_fit, nominal_e2, on_f
     _publish_overlap(out, stores, result, h_workers, c_workers, helper_reports,
                      max(row[2] for row in c_results.values()), e2_end)
     write_json(out / "teacher_alignment.json", {
-        "games": len(games), "positions": int(games.length.sum()), "legal_masks_equal": True,
+        "games": len(games), "positions": int(games.length.sum()), "h15_legal_subset_of_c10": True,
         "seconds": fit_alignment_seconds + e2_alignment_seconds,
         "fit_alignment_seconds": fit_alignment_seconds, "e2_alignment_seconds": e2_alignment_seconds,
     })

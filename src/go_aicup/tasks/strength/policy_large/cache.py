@@ -62,6 +62,20 @@ def pack_mover_stones(inputs):
     return (stones << shifts).sum(dim=-1, dtype=torch.uint8)
 
 
+def legal_moves(inputs, *, exclude_suicide=False):
+    on_board, own, opponent, atari = inputs[:, :4].bool().unbind(1)
+    empty = on_board & ~(own | opponent)
+    legal = empty & ~inputs[:, 6].bool()
+    if exclude_suicide:
+        # A neighbor supplies a liberty through an empty point, capture, or connection.
+        neighbor = empty | (opponent & atari) | (own & ~atari)
+        padded = torch.nn.functional.pad(neighbor, (1, 1, 1, 1))
+        legal &= (padded[:, :-2, 1:-1] | padded[:, 2:, 1:-1]
+                  | padded[:, 1:-1, :-2] | padded[:, 1:-1, 2:])
+    legal = legal.flatten(1)
+    return torch.cat((legal, torch.ones_like(legal[:, :1])), dim=1)
+
+
 def profile_offsets(q, side):
     """Mean per-move logsumexp across profiles, separately for each game side."""
     normalizer = q.float().logsumexp(dim=-1)
@@ -298,6 +312,7 @@ class TeacherStore:
         if batches is None:
             batches = self.plane_batches(first, last, self.games_per_batch)
         p, size = len(self.profiles), self.size
+        exclude_suicide = self.family == 'H' and p == 15
         maxima = np.zeros(3)
         cursor = first
         compiled_count = eager_count = 0
@@ -349,8 +364,7 @@ class TeacherStore:
                         compiled_count += 1
                     else:
                         eager_count += 1
-                    legal = (xb[:,0] * (1-xb[:,1]) * (1-xb[:,2]) * (1-xb[:,6])).flatten(1).gt(0)
-                    legal = torch.cat((legal, torch.ones_like(legal[:,:1])), 1)
+                    legal = legal_moves(xb, exclude_suicide=exclude_suicide)
                     if not legal.gather(1, t[a:b,None]).all():
                         raise ValueError('actual move excluded by legal mask')
                     lp = logits.float().masked_fill(~legal[:,None], -torch.inf).log_softmax(-1)
