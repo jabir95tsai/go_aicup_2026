@@ -468,7 +468,7 @@ def _context(theta_fixed=None, rich: bool = False) -> dict:
     popf = np.load(STAGE1 / "pop_keys.npz")
     poptab = PopTable(popf["keys"], color[popf["game_index"]])
 
-    def draw(pool, d):
+    def draw(pool, d, with_parts=False):
         candidates, gallery, q = cv.draw_pid2(env["bank"], pool, d)
         query = list(q["games"])
         g, qq = [posv[x] for x in gallery], [posv[x] for x in query]
@@ -480,8 +480,20 @@ def _context(theta_fixed=None, rich: bool = False) -> dict:
         styl = style(base_sets, g, qq)
         owner = np.searchsorted(candidates, q["player_id"].to_numpy())
         assert (candidates[owner] == q["player_id"].to_numpy()).all()
-        return dict(candidates=candidates, q=q, owner=owner, ks=q["k"].to_numpy(), gallery=gallery,
-                    query=query, rest=rest, style=styl, base=rest + scale * BASE_M * styl)
+        out = dict(candidates=candidates, q=q, owner=owner, ks=q["k"].to_numpy(), gallery=gallery,
+                   query=query, rest=rest, style=styl, base=rest + scale * BASE_M * styl)
+        if with_parts:                     # fusion components in base units (PID_EB_COMBINER_PLAN.md plan 2)
+            parts = {"opening": twocolor.opening_scores(env["prefix"], env["hashes"], gallery, query, color,
+                                                        env["populations"], env["summary"]["opening"]),
+                     "category": twocolor.category_scores(env["codes"], gallery, query, 4),
+                     "L1": s1["lambda1"] * level_scores(keys1, color, poptab, gallery, query, s1["n"], "L1")[s1["beta"]],
+                     "L2": s1["lambda2"] * level_scores(keys1, color, poptab, gallery, query, s1["n"], "L2")[s1["beta"]]}
+            for n in WEIGHTS:                  # each encoder's term at style multiplier 1.5
+                parts[n] = scale * BASE_M * WEIGHTS[n] * cosines(unit[n], g, qq)
+            assert np.allclose(sum(parts[c] for c in ("opening", "category", "L1", "L2")), rest)
+            assert np.allclose(sum(parts[n] for n in WEIGHTS), scale * BASE_M * styl)
+            out["parts"] = parts
+        return out
 
     x = draw(*CHECK)
     got = bucket_means(points(x["base"], x["candidates"], x["q"]), x["ks"])
@@ -1200,6 +1212,179 @@ def eb_selfcheck() -> None:
                               "mse_iso": {k: round(v, 4) for k, v in mse_iso.items()}}, flush=True)
 
 
+# ---------------------------------------------------------------- per-k learned fusion (PID_EB_COMBINER_PLAN.md, plan 2)
+COMB_OUT = OUT / "combine"
+R5_DEV = [(0, d) for d in range(3400, 3420)]
+R5_SEALED = [(0, d) for d in range(3500, 3520)] + [(1, d) for d in range(3500, 3530)]
+PARTS = ("opening", "category", "L1", "L2", "B", "A1", "A2", "LLR")
+KS = (1, 2, 3, 5)
+
+
+def current_weights(mk: dict, lam: float) -> dict:
+    """the base fusion as per-k weights on PARTS (encoder terms are in units of multiplier 1.5)."""
+    return {k: np.array([1, 1, 1, 1] + [mk[k] / BASE_M] * 3 + [lam], np.float64) for k in KS}
+
+
+def fit_combiner(sets, w0: np.ndarray, arm: str, device) -> np.ndarray:
+    """conditional logit for one k: sets = [(X [Q, C, 8], owner [Q])]; returns the 8 weights.
+    FULL: all 8 free; SMALL: one multiplier on the three encoder terms and the LLR weight."""
+    import torch
+    Xs = [(torch.from_numpy(x).to(device), torch.from_numpy(o).to(device)) for x, o in sets]
+    n = sum(len(o) for _, o in sets)
+    w0t = torch.tensor(w0, device=device, dtype=torch.float64)
+    p = torch.tensor(w0 if arm == "FULL" else w0[[4, 7]], device=device, dtype=torch.float64, requires_grad=True)
+
+    def weights(p):
+        if arm == "FULL":
+            return p
+        return torch.cat([w0t[:4], p[:1].repeat(3), p[1:]])
+
+    opt = torch.optim.LBFGS([p], lr=1.0, max_iter=500, tolerance_grad=1e-9, tolerance_change=1e-12,
+                            line_search_fn="strong_wolfe")
+
+    def closure():
+        opt.zero_grad()
+        w = weights(p)
+        loss = 0.0
+        for x, o in Xs:
+            s = torch.einsum("qcj,j->qc", x, w)
+            loss = loss + (torch.logsumexp(s, dim=1) - s[torch.arange(len(o), device=device), o]).sum()
+        loss = loss / n
+        loss.backward()
+        return loss
+
+    opt.step(closure)
+    return weights(p).detach().cpu().numpy()
+
+
+def apply_weights(X: np.ndarray, ks: np.ndarray, W: dict) -> np.ndarray:
+    return np.einsum("qcj,qj->qc", X, np.stack([W[int(k)] for k in ks]))
+
+
+def evaluate5(_args) -> None:
+    """per-k learned fusion weights on top of the empirical-Bayes base: cross-fit arm choice on dev
+    draws, refit on all dev draws, sealed test vs EB."""
+    import torch
+
+    from scripts.identity.pid2_cheap import COLS, buckets, official, paired, verdict
+
+    COMB_OUT.mkdir(parents=True, exist_ok=True)
+    stage0 = json.loads((OUT / "report.json").read_text())
+    r4 = json.loads((EB_OUT / "report.json").read_text())
+    assert r4["sealed"]["verdict"]["pass"]
+    fp = r4["final_params"]
+    ctx = _context(stage0["theta_pop"], rich=True)
+    report, draw, llr, scale, device = ctx["report"], ctx["draw"], ctx["llr"], ctx["scale"], ctx["device"]
+    mask = torch.tensor(fp["mask"], device=device, dtype=torch.float32)
+    prior = torch.tensor(fp["theta_pop"], device=device, dtype=torch.float64)
+    P = torch.from_numpy(np.load(EB_OUT / "precision.npy")).to(device)
+    mk = {int(k): float(v) for k, v in fp["m_k"].items()}
+    lam = float(fp["lambda"])
+    W0 = current_weights(mk, lam)
+
+    def get(pool, d):
+        x = draw(pool, d, with_parts=True)
+        le = llr(x, 1.0, mask, prior, P)[0]
+        X = np.stack([x["parts"][c] for c in PARTS[:-1]] + [le], axis=2)
+        f = np.array([mk[int(k)] for k in x["ks"]])[:, None]
+        eb = x["rest"] + scale * f * x["style"] + lam * le
+        return X, x["ks"], x["owner"], eb
+
+    def score_rows(d, X, ks, owner, arms):
+        return [{"draw": d, "arm": a, **buckets(official(apply_weights(X, ks, W), owner), ks)} for a, W in arms.items()]
+
+    # ---- dev draws: components, reproduction of EB at the current weights
+    dev = {}
+    for pool, d in R5_DEV:
+        X, ks, owner, eb = get(pool, d)
+        if not dev:
+            a = buckets(official(eb, owner), ks)
+            b_ = buckets(official(apply_weights(X, ks, W0), owner), ks)
+            report["current_reproduction"] = {"score_max_abs_diff": float(np.abs(apply_weights(X, ks, W0) - eb).max()),
+                                              "points_max_diff": max(abs(a[c] - b_[c]) for c in COLS)}
+            print("current-weights reproduction:", report["current_reproduction"], flush=True)
+            assert report["current_reproduction"]["points_max_diff"] == 0.0
+        dev[d] = (X, ks, owner)
+        print(f"dev draw {d}", flush=True)
+
+    def fit_all(draws, arm):
+        return {k: fit_combiner([(dev[d][0][dev[d][1] == k], dev[d][2][dev[d][1] == k]) for d in draws], W0[k], arm,
+                                device) for k in KS}
+
+    # ---- cross-fit: fit on one half, score the other
+    names = [d for _, d in R5_DEV]
+    halves = (names[:10], names[10:])
+    rows, cross = [], {}
+    for i, (fit_on, held) in enumerate((halves, halves[::-1])):
+        arms = {"CURRENT": W0, **{a: fit_all(fit_on, a) for a in ("SMALL", "FULL")}}
+        cross[i] = {a: {k: v.tolist() for k, v in W.items()} for a, W in arms.items() if a != "CURRENT"}
+        for d in held:
+            rows += score_rows(d, *dev[d], arms)
+    s1 = paired(pd.DataFrame(rows), "CURRENT").set_index("arm")
+    report["crossfit"] = s1[["1", "2", "3", "5", "all", "d_1", "d_2", "d_3", "d_5", "d_all", "se_all", "pos"]].to_dict(orient="index")
+    report["crossfit_weights"] = cross
+    print("cross-fit (vs CURRENT):\n", s1[["all", "d_1", "d_2", "d_3", "d_5", "d_all", "se_all"]].round(4).to_string(),
+          flush=True)
+    best = s1.drop(index="CURRENT")["d_all"].idxmax()
+    if s1.loc[best, "d_all"] <= 0:
+        report["stopped"] = "the current weights won the cross-fit; sealed draws not opened"
+        (COMB_OUT / "report.json").write_text(json.dumps(report, indent=1, default=float))
+        print(report["stopped"], flush=True)
+        return
+
+    # ---- refit the chosen arm on all dev draws; weight check
+    W = fit_all(names, best)
+    flags = []
+    for k in KS:
+        ratio = W[k] / W0[k]
+        for j, c in enumerate(PARTS):
+            if W[k][j] < 0 or ratio[j] > 4:
+                flags.append({"k": k, "part": c, "weight": float(W[k][j]), "ratio": float(ratio[j])})
+    report["chosen"] = {"arm": best, "crossfit_delta": float(s1.loc[best, "d_all"]),
+                        "weights": {k: W[k].tolist() for k in KS},
+                        "ratio_to_current": {k: np.round(W[k] / W0[k], 3).tolist() for k in KS}, "flags": flags}
+    print("chosen:", best, "\nweights / current per k:",
+          {k: np.round(W[k] / W0[k], 2).tolist() for k in KS}, "\nflags:", flags, flush=True)
+    (COMB_OUT / "report.json").write_text(json.dumps(report, indent=1, default=float))
+    del dev
+
+    # ---- sealed
+    out = []
+    for pool, d in R5_SEALED:
+        X, ks, owner, _ = get(pool, d)
+        for r in score_rows(d, X, ks, owner, {"EB": W0, "COMB": W}):
+            out.append({"pool": pool, **r})
+        print(f"sealed pool {pool} draw {d}", flush=True)
+    frame = pd.DataFrame(out)
+    frame.to_csv(COMB_OUT / "sealed_per_draw.csv", index=False)
+    t1, t0 = paired(frame[frame.pool == 1], "EB"), paired(frame[frame.pool == 0], "EB")
+    report["sealed"] = {"pool1": t1.to_dict(orient="records"), "pool0": t0.to_dict(orient="records"),
+                        "verdict": verdict(t1, t0, "COMB")}
+    print("sealed pool 1 vs EB:\n", t1.round(4).to_string(index=False), "\nsealed pool 0 vs EB:\n",
+          t0.round(4).to_string(index=False), "\nverdict:", json.dumps(report["sealed"]["verdict"]), flush=True)
+    (COMB_OUT / "report.json").write_text(json.dumps(report, indent=1, default=float))
+
+
+def combiner_selfcheck() -> None:
+    """synthetic: the conditional logit recovers planted weights; SMALL keeps the fixed weights."""
+    import torch
+    rng = np.random.default_rng(2)
+    true = np.array([1.0, 0.5, 2.0, 1.0, 0.8, 0.3, 1.2, 3.0])
+    sets = []
+    for _ in range(3):
+        X = rng.normal(size=(1500, 60, 8)) * 0.5
+        s = X @ true
+        p = np.exp(s - s.max(1, keepdims=True))
+        p /= p.sum(1, keepdims=True)
+        owner = np.array([rng.choice(60, p=r) for r in p])
+        sets.append((X, owner))
+    w = fit_combiner(sets, np.ones(8), "FULL", torch.device("cpu"))
+    assert np.abs(w - true).max() < 0.2, w
+    ws = fit_combiner(sets, np.ones(8), "SMALL", torch.device("cpu"))
+    assert np.array_equal(ws[:4], np.ones(4)) and ws[4] == ws[5] == ws[6], ws
+    print("combiner selfcheck ok", {"full": np.round(w, 2).tolist(), "small": np.round(ws, 2).tolist()}, flush=True)
+
+
 # ---------------------------------------------------------------- official export
 def position_tensors(arr: dict, moves_of, device, rich: dict | None = None):
     """sorted positions -> (B, PHI, SLOT tensors, first / end position per game id); rich = the
@@ -1272,6 +1457,13 @@ def export(args) -> None:
         fp = r4["final_params"]
         sigma, lam, mk = 1.0, fp["lambda"], {int(k): float(v) for k, v in fp["m_k"].items()}
         tag = "likeb"
+    comb = None
+    if args.combine:                       # per-k learned fusion on top of EB (plan 2), only if it passed
+        assert args.eb, "--combine stacks on --eb"
+        r5 = json.loads((COMB_OUT / "report.json").read_text())
+        assert r5["sealed"]["verdict"]["pass"], "the learned fusion did not pass the switch rule"
+        comb = {int(k): np.array(v, np.float64) for k, v in r5["chosen"]["weights"].items()}
+        tag = "comb"
     target = SUB / f"{job}-{tag}.csv"
     assert not target.exists(), target
     device = torch.device("cuda")
@@ -1360,6 +1552,16 @@ def export(args) -> None:
                  candidates=cand, qids=np.array(qids))
         factor = np.array([mk[int(k)] / BASE_M for k in ks])[:, None]
         ranked = cand[top5(rest + factor * style_term + lam * llr)]
+        if comb is not None:               # components in base units; current weights must give the EB file
+            comps = {"opening": parts["B"]["opening"], "category": parts["B"]["category"],
+                     "L1": choice["lambda1"] * ml["ml_L1"], "L2": choice["lambda2"] * ml["ml_L2"],
+                     **{n: 16 * w * parts[n]["style"] for n, (_, w) in ENC.items()}, "LLR": llr}
+            X = np.stack([comps[c] for c in PARTS], axis=2)
+            eb_file = pd.read_csv(SUB / "820880-likeb.csv", dtype=str).set_index("question_id")
+            np.testing.assert_array_equal(cand[top5(apply_weights(X, ks, current_weights(mk, lam)))],
+                                          eb_file.loc[qids, COLS].to_numpy())
+            np.testing.assert_array_equal(ranked, eb_file.loc[qids, COLS].to_numpy())
+            ranked = cand[top5(apply_weights(X, ks, comb))]
         out.loc[qids, COLS] = ranked
         ch = ranked[:, 0] != base.loc[qids, "top_1"].to_numpy()
         alone_top1 = cand[llr.argmax(1)] == base.loc[qids, "top_1"].to_numpy()
@@ -1459,6 +1661,7 @@ def selfcheck(_args) -> None:
               precision=torch.eye(DIM, dtype=torch.float64) / 9.0)
     assert (iso - t27).abs().max() < 1e-9
     eb_selfcheck()
+    combiner_selfcheck()
     print("selfcheck ok", flush=True)
 
 
@@ -1476,15 +1679,17 @@ def main() -> None:
     sub.add_parser("rich-features")
     sub.add_parser("evaluate3")
     sub.add_parser("evaluate4")
+    sub.add_parser("evaluate5")
     e = sub.add_parser("export")
     e.add_argument("--workers", type=int, default=11)
     e.add_argument("--round2", action="store_true", help="use the round-2 choice (refuses if it kept B0)")
     e.add_argument("--rich", action="store_true", help="use the rich-feature choice (refuses unless it passed)")
     e.add_argument("--eb", action="store_true", help="use the empirical-Bayes prior (refuses unless it passed)")
+    e.add_argument("--combine", action="store_true", help="per-k learned fusion on top of --eb (refuses unless it passed)")
     sub.add_parser("selfcheck")
     args = parser.parse_args()
     {"games": games, "policy": policy, "evaluate": evaluate, "evaluate2": evaluate2, "export": export,
-     "rich-features": rich_features_cmd, "evaluate3": evaluate3, "evaluate4": evaluate4,
+     "rich-features": rich_features_cmd, "evaluate3": evaluate3, "evaluate4": evaluate4, "evaluate5": evaluate5,
      "selfcheck": selfcheck}[args.cmd](args)
 
 
