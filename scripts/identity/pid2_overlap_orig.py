@@ -13,9 +13,14 @@ Statistic: margin = top-1 minus top-2 opening score. Per m bucket, the threshold
 percentile; overlap share estimate = (test rate - null rate) / (control rate - null rate).
 
     python -m scripts.identity.pid2_overlap_orig
+    python -m scripts.identity.pid2_overlap_orig --null-reps 20 --quantile 0.995   # robustness (post hoc)
+
+--null-reps R draws R null (and control) truncations per added candidate, so the threshold rests on
+R x n samples instead of n; the Poisson p-value tests the test exceedances against the null rate.
 """
 from __future__ import annotations
 
+import argparse
 import json
 
 import numpy as np
@@ -33,6 +38,12 @@ SEED = 2026
 
 
 def main() -> None:
+    from scipy.stats import poisson
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--null-reps", type=int, default=1)
+    ap.add_argument("--quantile", type=float, default=0.99)
+    args = ap.parse_args()
+    reps, qu = args.null_reps, args.quantile
     OUT.mkdir(parents=True, exist_ok=True)
     params = load_params("d4")
     min_plies = 2 * max(params["moves"], params["slot_moves"])
@@ -85,24 +96,30 @@ def main() -> None:
             q = tests[added_part]
             ms = [len(g) for g in q]
             mt = margins(pool_part, q)
-            mc = margins(pool_part, matched(pool_part, ms))
-            mn = margins(pool_part, matched(other, ms))
+            mc = margins(pool_part, matched(pool_part, ms * reps))
+            mn = margins(pool_part, matched(other, ms * reps))
+            ms_r = ms * reps
             for lo, hi in BUCKETS:
                 sel = np.array([lo <= m <= hi for m in ms])
+                sel_r = np.array([lo <= m <= hi for m in ms_r])
                 if sel.sum() < 10:
                     continue
-                t = float(np.quantile(mn[sel], 0.99))
-                rt, rc, rn = (float((x[sel] > t).mean()) for x in (mt, mc, mn))
+                t = float(np.quantile(mn[sel_r], qu))
+                rt, rc, rn = float((mt[sel] > t).mean()), float((mc[sel_r] > t).mean()), float((mn[sel_r] > t).mean())
                 share = (rt - rn) / (rc - rn) if rc > rn else float("nan")
+                hits = int((mt[sel] > t).sum())
+                pval = float(poisson.sf(hits - 1, rn * sel.sum())) if hits else 1.0
                 rows.append({"pool": pool_part, "added": added_part, "m": f"{lo}-{hi}", "n": int(sel.sum()),
                              "threshold": t, "test_rate": rt, "control_rate": rc, "null_rate": rn,
-                             "overlap_share": share,
-                             "test_median": float(np.median(mt[sel])), "control_median": float(np.median(mc[sel])),
-                             "null_median": float(np.median(mn[sel]))})
+                             "overlap_share": share, "hits": hits, "poisson_p": pval,
+                             "test_median": float(np.median(mt[sel])), "control_median": float(np.median(mc[sel_r])),
+                             "null_median": float(np.median(mn[sel_r]))})
     frame = pd.DataFrame(rows)
-    frame.to_csv(OUT / "margins.csv", index=False)
+    tag = "" if reps == 1 and qu == 0.99 else f"_r{reps}_q{qu:g}"
+    report.update({"null_reps": reps, "quantile": qu})
+    frame.to_csv(OUT / f"margins{tag}.csv", index=False)
     report["table"] = frame.to_dict(orient="records")
-    (OUT / "report.json").write_text(json.dumps(report, indent=1, default=float))
+    (OUT / f"report{tag}.json").write_text(json.dumps(report, indent=1, default=float))
     print(json.dumps({k: v for k, v in report.items() if k != "table"}, indent=1, default=float))
     print(frame.round(3).to_string(index=False))
 
