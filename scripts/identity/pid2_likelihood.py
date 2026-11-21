@@ -2040,7 +2040,7 @@ def export(args) -> None:
     if args.combine:                       # per-k learned fusion on top of EB (plan 2), only if it passed
         assert args.eb, "--combine stacks on --eb"
         r5 = json.loads((COMB_OUT / "report.json").read_text())
-        assert args.probe or args.colour or r5["sealed"]["verdict"]["pass"], "the learned fusion did not pass the switch rule"
+        assert args.probe or args.colour or args.pseudo or r5["sealed"]["verdict"]["pass"], "the learned fusion did not pass the switch rule"  # colour / pseudo stack on the adopted 821010 base
         comb = {int(k): np.array(v, np.float64) for k, v in r5["chosen"]["weights"].items()}
         tag = "comb-probe" if args.probe else "comb"
     colw = None
