@@ -1925,6 +1925,167 @@ def position_tensors(arr: dict, moves_of, device, rich: dict | None = None):
             torch.from_numpy(arr["slot"].astype(np.int64)).to(device), span)
 
 
+# ---------------------------------------------------------------- pseudo-label retune + weight refit (2026-11-21, plan A after 824896)
+PS2_OUT = OUT / "pseudo2"
+R9_DEV = [(0, d) for d in range(4200, 4220)]
+R9_SEALED = [(0, d) for d in range(4300, 4320)] + [(1, d) for d in range(4300, 4330)]
+PS2_TAUS = (0.2, 0.3, 0.4, 0.5)
+PS2_ROUNDS = (2, 3)
+PS2_CUR = "T0.5_R2"                      # the current base (824896-comb-pseudo)
+
+
+def evaluate9(_args) -> None:
+    """lower tau / one more round for the pseudo-label expansion, then a cross-fitted refit of the
+    per-k fusion weights on the expanded components; sealed test vs the current base (tau 0.5, 2 rounds,
+    current weights)."""
+    import torch
+
+    from scripts.identity.pid2_cheap import buckets, official, paired, verdict
+
+    PS2_OUT.mkdir(parents=True, exist_ok=True)
+    stage0 = json.loads((OUT / "report.json").read_text())
+    fp = json.loads((EB_OUT / "report.json").read_text())["final_params"]
+    r8 = json.loads((PS_OUT / "report.json").read_text())
+    assert r8["base"] == "comb" and r8["chosen"]["arm"] == PS2_CUR and r8["sealed"]["verdict"]["pass"]
+    base = pseudo_base()
+    assert base["kind"] == "comb"
+    W0 = base["W"]
+    ctx = _context(stage0["theta_pop"], rich=True)
+    report, draw, llr, device, env = ctx["report"], ctx["draw"], ctx["llr"], ctx["device"], ctx["env"]
+    color, codes, components = env["color"], ctx["codes"], ctx["components"]
+    mask = torch.tensor(fp["mask"], device=device, dtype=torch.float32)
+    prior = torch.tensor(fp["theta_pop"], device=device, dtype=torch.float64)
+    P = torch.from_numpy(np.load(EB_OUT / "precision.npy")).to(device)
+
+    def comp(gallery, query, cat_prior=None):
+        parts = components(gallery, query, cat_prior)
+        le = llr({"gallery": gallery, "query": query}, 1.0, mask, prior, P)[0]
+        return np.stack([parts[c] for c in PARTS[:-1]] + [le], axis=2)
+
+    def get(pool, d):
+        x = draw(pool, d, with_parts=True)
+        le = llr(x, 1.0, mask, prior, P)[0]
+        X = np.stack([x["parts"][c] for c in PARTS[:-1]] + [le], axis=2)
+        z = 2 * np.array([float((color[np.asarray(g)] == 0).mean()) for g in x["query"]]) - 1
+        return x, X, z
+
+    def configs(x, X0, z, wanted):
+        """{(tau, rounds): (X, assignment of the last round)} for wanted = {tau: [rounds]}; rounds share prefixes."""
+        out = {}
+        S0 = fuse(base, X0, x["ks"], z)
+        for tau, rs in wanted.items():
+            S, done, a, X1 = S0, 0, None, None
+            for r in sorted(rs):
+                while done < r:
+                    a, _p = posterior_assign(S, tau)
+                    X1, _ = expand(comp, x["gallery"], x["query"], a, X0, codes)
+                    S, done = fuse(base, X1, x["ks"], z), done + 1
+                out[(tau, r)] = (X1, a)
+        return out
+
+    def row(tag, pool, d, X, x, z, W, a):
+        pts = official(apply_weights(X, x["ks"], W), x["owner"])
+        aug = np.isin(x["owner"], np.unique(a[a >= 0])) if a is not None else np.zeros(len(pts), bool)
+        return {"pool": pool, "draw": d, "arm": tag, **buckets(pts, x["ks"]),
+                "pts_aug": float(pts[aug].sum()), "n_aug": int(aug.sum()),
+                "pts_noaug": float(pts[~aug].sum()), "n_noaug": int((~aug).sum())}
+
+    name = lambda tau, r: f"T{tau:g}_R{r}"
+    grid = {t: list(PS2_ROUNDS) for t in PS2_TAUS}
+    dev, rows, quality = {}, [], []
+    for pool, d in R9_DEV:
+        x, X0, z = get(pool, d)
+        out = configs(x, X0, z, grid)
+        for (tau, r), (X1, a) in out.items():
+            rows.append(row(name(tau, r), pool, d, X1, x, z, W0, a))
+            if r == PS2_ROUNDS[0]:
+                for k in KS:
+                    m = x["ks"] == k
+                    quality.append({"tau": tau, "k": k, "n": int(m.sum()), "picked": int((a[m] >= 0).sum()),
+                                    "correct": int((a[m] == x["owner"][m]).sum())})
+        dev[d] = {"ks": x["ks"], "owner": x["owner"], "X": {key: v[0].astype(np.float32) for key, v in out.items()}}
+        print(f"dev draw {d}", flush=True)
+    frame = pd.DataFrame(rows)
+    frame.to_csv(PS2_OUT / "dev_per_draw.csv", index=False)
+    s1 = paired(frame, PS2_CUR).set_index("arm")
+    q = pd.DataFrame(quality).groupby(["tau", "k"])[["n", "picked", "correct"]].sum()
+    q["coverage"], q["precision"] = q["picked"] / q["n"], q["correct"] / q["picked"].clip(lower=1)
+    report["dev"] = s1[["1", "2", "3", "5", "all", "d_1", "d_2", "d_3", "d_5", "d_all", "se_all", "pos"]].to_dict(orient="index")
+    report["pseudo_quality_last_round"] = {f"{t:g}_{k}": r.to_dict() for (t, k), r in q.iterrows()}
+    bias = frame.groupby("arm")[["pts_aug", "n_aug", "pts_noaug", "n_noaug"]].sum()
+    bias["mean_aug"], bias["mean_noaug"] = bias["pts_aug"] / bias["n_aug"], bias["pts_noaug"] / bias["n_noaug"]
+    report["dev_bias"] = bias.to_dict(orient="index")
+    print("dev (vs current tau 0.5 / 2 rounds):\n", s1[["all", "d_1", "d_2", "d_3", "d_5", "d_all", "se_all"]].round(4).to_string(),
+          f"\npseudo-label quality (round {PS2_ROUNDS[0]}):\n", q.round(3).to_string(),
+          "\nbias (true owner expanded / not):\n", bias[["mean_aug", "n_aug", "mean_noaug", "n_noaug"]].round(4).to_string(), flush=True)
+    best = s1["d_all"].idxmax()
+    key = (float(best[1:].split("_R")[0]), int(best.split("_R")[1]))
+    report["chosen_config"] = {"arm": best, "tau": key[0], "rounds": key[1], "dev_delta": float(s1.loc[best, "d_all"]),
+                               "grid_edge": key[0] == PS2_TAUS[0] or key[1] == PS2_ROUNDS[-1]}
+    print("chosen config:", report["chosen_config"], flush=True)
+
+    # ---- cross-fitted refit of the per-k weights on the chosen expanded components
+    names = [d for _, d in R9_DEV]
+    halves = (names[:10], names[10:])
+
+    def fit_all(draws):
+        return {k: fit_combiner([(dev[d]["X"][key][dev[d]["ks"] == k].astype(np.float64), dev[d]["owner"][dev[d]["ks"] == k])
+                                 for d in draws], W0[k], "FULL", device) for k in KS}
+
+    rr = []
+    for fit_on, held in (halves, halves[::-1]):
+        Wf = fit_all(fit_on)
+        for d in held:
+            X = dev[d]["X"][key].astype(np.float64)
+            for tag, W in (("CURW", W0), ("REFIT", Wf)):
+                rr.append({"draw": d, "arm": tag, **buckets(official(apply_weights(X, dev[d]["ks"], W), dev[d]["owner"]), dev[d]["ks"])})
+    s2 = paired(pd.DataFrame(rr), "CURW").set_index("arm")
+    report["refit_crossfit"] = s2[["1", "2", "3", "5", "all", "d_1", "d_2", "d_3", "d_5", "d_all", "se_all", "pos"]].to_dict(orient="index")
+    print("refit cross-fit on the chosen config (vs current weights):\n",
+          s2[["all", "d_1", "d_2", "d_3", "d_5", "d_all", "se_all"]].round(4).to_string(), flush=True)
+    refit = bool(s2.loc["REFIT", "d_all"] > 0)
+    W = fit_all(names) if refit else W0
+    report["refit"] = {"used": refit, "weights": {k: W[k].tolist() for k in KS},
+                       "ratio_to_current": {k: np.round(W[k] / W0[k], 3).tolist() for k in KS}}
+    if refit:
+        print("refit weights / current:", report["refit"]["ratio_to_current"], flush=True)
+    if best == PS2_CUR and not refit:
+        report["stopped"] = "the current setting won the dev draws and the refit did not help; sealed draws not opened"
+        (PS2_OUT / "report.json").write_text(json.dumps(report, indent=1, default=float))
+        print(report["stopped"], flush=True)
+        return
+    (PS2_OUT / "report.json").write_text(json.dumps(report, indent=1, default=float))
+    del dev
+
+    # ---- sealed: CUR (tau 0.5 / 2 rounds, current weights), TAU (chosen config, current weights), FINAL
+    want = {0.5: [2]}
+    want.setdefault(key[0], [])
+    if key[1] not in want[key[0]]:
+        want[key[0]].append(key[1])
+    out = []
+    for pool, d in R9_SEALED:
+        x, X0, z = get(pool, d)
+        got = configs(x, X0, z, want)
+        Xc, ac = got[(0.5, 2)]
+        Xk, ak = got[key]
+        out += [row("CUR", pool, d, Xc, x, z, W0, ac), row("TAU", pool, d, Xk, x, z, W0, ak),
+                row("FINAL", pool, d, Xk, x, z, W, ak)]
+        print(f"sealed pool {pool} draw {d}", flush=True)
+    frame = pd.DataFrame(out)
+    frame.to_csv(PS2_OUT / "sealed_per_draw.csv", index=False)
+    t1, t0 = paired(frame[frame.pool == 1], "CUR"), paired(frame[frame.pool == 0], "CUR")
+    v = verdict(t1, t0, "FINAL")
+    v["probe"] = bool(not v["pass"] and v["pool1_delta"] > 0 and v["pool0_delta"] > 0)
+    g = frame.groupby(["pool", "arm"])[["pts_aug", "n_aug", "pts_noaug", "n_noaug"]].sum()
+    g["mean_aug"], g["mean_noaug"] = g["pts_aug"] / g["n_aug"], g["pts_noaug"] / g["n_noaug"]
+    report["sealed_bias"] = {f"{p}_{a}": r_.to_dict() for (p, a), r_ in g.iterrows()}
+    report["sealed"] = {"pool1": t1.to_dict(orient="records"), "pool0": t0.to_dict(orient="records"), "verdict": v}
+    print("sealed pool 1 vs CUR:\n", t1.round(4).to_string(index=False), "\nsealed pool 0 vs CUR:\n",
+          t0.round(4).to_string(index=False), "\nbias:\n", g[["mean_aug", "n_aug", "mean_noaug", "n_noaug"]].round(4).to_string(),
+          "\nverdict:", json.dumps(v), flush=True)
+    (PS2_OUT / "report.json").write_text(json.dumps(report, indent=1, default=float))
+
+
 def official_builder(part: str, choice: dict, cache_dir: Path):
     """(comp7, local category codes) for one official added-set part: the 7 non-LLR fusion parts
     for arbitrary gallery / query lists in local game rows (pool rows, then question rows), rebuilt
@@ -2060,6 +2221,13 @@ def export(args) -> None:
         assert (r8["base"] == "colour") == bool(args.colour), "export base differs from the tested base"
         pseudo = {"tau": float(r8["chosen"]["tau"]), "rounds": int(r8["chosen"]["rounds"])}
         tag = tag + ("-pseudo" if v8["pass"] else "-pseudo-probe")
+        if args.pseudo2:                   # retuned tau / rounds and refitted weights (evaluate9)
+            r9 = json.loads((PS2_OUT / "report.json").read_text())
+            v9 = r9["sealed"]["verdict"]
+            assert v9["pass"] or v9["probe"], "the retune neither passed nor qualifies as a probe"
+            pseudo["second"] = {"tau": float(r9["chosen_config"]["tau"]), "rounds": int(r9["chosen_config"]["rounds"]),
+                                "W": {int(k): np.array(w_, np.float64) for k, w_ in r9["refit"]["weights"].items()}}
+            tag = tag.replace("-pseudo-probe", "-pseudo").replace("-pseudo", "-pseudo2" if v9["pass"] else "-pseudo2-probe")
     target = SUB / f"{job}-{tag}.csv"
     assert not target.exists(), target
     device = torch.device("cuda")
@@ -2202,6 +2370,16 @@ def export(args) -> None:
                     Xp, _ = expand(comp, gal_l, qry_l, a, X, codes_local)
                     S = fuse(base_f, Xp, ks, z)
                 ranked = cand[top5(S)]
+                if "second" in pseudo:     # the first pass must give the current base file
+                    cur_file = pd.read_csv(SUB / "824896-comb-pseudo.csv", dtype=str).set_index("question_id")
+                    np.testing.assert_array_equal(ranked, cur_file.loc[qids, COLS].to_numpy())
+                    sec = pseudo["second"]
+                    S = S0
+                    for _ in range(sec["rounds"]):
+                        a, _p = posterior_assign(S, sec["tau"])
+                        Xp, _ = expand(comp, gal_l, qry_l, a, X, codes_local)
+                        S = fuse(base_f, Xp, ks, z)
+                    ranked = cand[top5(apply_weights(Xp, ks, sec["W"]))]
                 report.setdefault("pseudo", {})[prefix] = {
                     "comp_diff": rdiff, "picked": int((a >= 0).sum()),
                     "picked_by_k": {int(k): int((a[ks == k] >= 0).sum()) for k in (1, 2, 3, 5)},
@@ -2329,6 +2507,7 @@ def main() -> None:
     sub.add_parser("evaluate6")
     sub.add_parser("evaluate7")
     sub.add_parser("evaluate8")
+    sub.add_parser("evaluate9")
     e = sub.add_parser("export")
     e.add_argument("--workers", type=int, default=11)
     e.add_argument("--round2", action="store_true", help="use the round-2 choice (refuses if it kept B0)")
@@ -2336,13 +2515,14 @@ def main() -> None:
     e.add_argument("--eb", action="store_true", help="use the empirical-Bayes prior (refuses unless it passed)")
     e.add_argument("--combine", action="store_true", help="per-k learned fusion on top of --eb (refuses unless it passed)")
     e.add_argument("--probe", action="store_true", help="with --combine: LB probe even though the gate failed")
+    e.add_argument("--pseudo2", action="store_true", help="with --pseudo: retuned tau / rounds and refitted weights (evaluate9)")
     e.add_argument("--pseudo", action="store_true", help="with --combine [--colour]: pseudo-label expansion (passed or probe)")
     e.add_argument("--colour", action="store_true", help="with --combine: colour-dependent weights (passed or probe)")
     e.add_argument("--eb-lambda", action="store_true", help="with --eb: the widened-grid lambda (refuses unless it passed)")
     sub.add_parser("selfcheck")
     args = parser.parse_args()
     {"games": games, "policy": policy, "evaluate": evaluate, "evaluate2": evaluate2, "export": export,
-     "rich-features": rich_features_cmd, "evaluate3": evaluate3, "evaluate4": evaluate4, "evaluate5": evaluate5, "evaluate6": evaluate6, "evaluate7": evaluate7, "evaluate8": evaluate8,
+     "rich-features": rich_features_cmd, "evaluate3": evaluate3, "evaluate4": evaluate4, "evaluate5": evaluate5, "evaluate6": evaluate6, "evaluate7": evaluate7, "evaluate8": evaluate8, "evaluate9": evaluate9,
      "selfcheck": selfcheck}[args.cmd](args)
 
 
