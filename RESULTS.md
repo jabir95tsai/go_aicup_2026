@@ -4449,3 +4449,37 @@ GPU 效能與正式分數尚未驗證。第二階段獨立手動提交，沒有 
 - **預期：** 驗證台 +0.001～+0.003，集中在 k＝1。
 - **程式：** `pid2_likelihood.py` 新增 `evaluate7`、`fit_colour`、`apply_colour`、`colour_selfcheck`（合成資料還原植入的 w、v，誤差 ≤0.25；ρ 很大時 v→0；v＝0 時與 `apply_weights` 相同，已在登入節點 CPU 通過），以及 export `--colour`。Slurm：`likelihood_colour.slurm`、`likelihood_export_colour.slurm`。
 - **成本：** 1 卡，約 30–40 分鐘（11/21 evaluate5 在 70 draws 上跑了 23 分鐘，這次是 90 draws）。
+
+### 2026-11-21：競賽一——偽標籤擴充全部分項的參考盤（使用者「1 照計畫實作」；事前登記，看結果前寫定）
+
+- **計畫：** [PID_PSEUDO_COLOUR_PLAN.md](PID_PSEUDO_COLOUR_PLAN.md) 計畫一。
+- **基底融合：** 計畫二（evaluate7）通過換檔規則時用其執色權重，否則用 `821010-comb-probe.csv` 的 FULL 權重；由 `pseudo_base()` 依 `combine_colour/report.json` 自動決定，作業排在計畫二之後。
+- **做法：**
+  - 後驗 P＝softmax(S)，S 為基底融合分數，不另加溫度。
+  - top-1 後驗 ≥ τ 的題，其所有盤加入該候選人的參考盤，8 個分項全部依擴充後的參考盤重算。
+  - 留一：題 q 自己的盤不計入它自己的分數，(q, c(q)) 一格以「擴充參考盤去掉 q 的盤」重算。類別分項的族群直方圖固定為擴充後全體參考盤估計的值。
+  - 沒有變動的候選人沿用原分數（分項只依賴自己的參考盤）。
+  - τ ∈ {0.5, 0.7, 0.9, 0.97}；輪數 {1, 2}，第 2 輪以第 1 輪的分數重新選題，仍從原始參考盤擴充。
+- **draws：** 開發 pool 0 3800–3819；封存 pool 0 3900–3919、pool 1 3900–3929。
+- **第 0 關（開發 draws）：** 以真實歸屬擴充（所有題加入其真實候選人，同樣留一）。報全部分項與逐組（opening／category／L1＋L2／三個編碼器／LLR）的上限。全部分項上限 < +0.010 → 停止。
+- **開發選參：** 以整體平均選 τ 與輪數；選到 τ＝0.5 或 0.97 記為邊界風險。最佳 Δ < +0.003 → 不開封存。
+- **判定（11/20 規則，對基底融合）：** pool 1 Δ>0 且 z≥2.5、各 k ≥−0.005、pool 0 Δ>0。
+- **另報：**
+  - 各 τ 的覆蓋與偽標籤正確率，分 k 報。
+  - 富者愈富偏差：真實候選人有／沒有被擴充的題，各自的平均分數。
+  - 官方 pub2／priv2 被選中的題數。
+- **產出：**
+  - 通過：`<job>-comb[col]-pseudo.csv`，Public 對當時基底 ≥ −0.005 → 成為基底。
+  - 未過但兩個 pool Δ 都 >0：`<job>-comb[col]-pseudo-probe.csv`，Public 上升才成為基底。
+  - 其他情況不匯出。
+  - 正式匯出先以 store 重建全部分項，須與現存分項相符：計數項與 LLR 差 ≤1e-9，編碼器項因重新推論差 ≤2e-3。不擴充時的 top-5 須與基底檔逐列相同。原測試集逐列不變。
+- **程式：** `pid2_likelihood.py` 新增：
+  - 評估：`evaluate8`、`expand`（留一擴充）、`posterior_assign`、`pseudo_base`、`category_scores_fixed`、`_context` 的 `components()`；
+  - 正式匯出：`official_builder`（以 store 重建官方的 7 個分項）與 export `--pseudo`。
+  - 作業內的工程關，第一個開發 draw：
+    - `components()`＋LLR 重現 draw 的分項：計數項 ≤1e-9、LLR ≤1e-6；
+    - 只傳部分候選人時各欄不變：LLR ≤1e-3，其餘 ≤1e-9；
+    - 不擴充時 X 完全相同。
+  - CPU 合成 `pseudo_selfcheck` 通過：留一後自己的盤不出現在自己那一格，未變動的候選人不變。
+  - Slurm：`likelihood_pseudo.slurm`、`likelihood_export_pseudo.slurm`。
+- **成本修正（看結果前）：** 每個開發 draw 需 9 次擴充重算（真值 1 次＋τ 4 種 × 輪數 2），每次都要重擬合最多約 700 個 θ。估每個 draw 約 5 分鐘，開發約 1.5–2 小時；封存 50 draws × 最多 2 次擴充，約 1 小時。合計約 2.5–3.5 小時、1 卡，計畫原估 1.5 小時偏低。時限設 6 小時。

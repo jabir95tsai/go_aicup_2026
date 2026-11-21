@@ -351,6 +351,20 @@ def played_logp(phi, b, slot, pos, theta, chunk=2_000, mask=None):
 
 
 # ---------------------------------------------------------------- evaluation
+def category_prior(codes: np.ndarray, gallery_games, n_codes: int = 4) -> np.ndarray:
+    prior = np.bincount(codes[np.concatenate(gallery_games)], minlength=n_codes) + 1.0
+    return prior / prior.sum()
+
+
+def category_scores_fixed(codes, gallery_games, query_games, n_codes: int = 4, prior=None, smoothing: float = 1.0):
+    """= twocolor.category_scores, with the pooled prior optionally given (then every column depends
+    only on its own candidate's gallery)."""
+    prior = category_prior(codes, gallery_games, n_codes) if prior is None else prior
+    counts = np.stack([np.bincount(codes[g], minlength=n_codes) for g in gallery_games])
+    logp = np.log((counts + smoothing * prior) / (counts.sum(axis=1, keepdims=True) + smoothing))
+    return np.stack([logp[:, codes[q]].sum(axis=1) for q in query_games])
+
+
 def _context(theta_fixed=None, rich: bool = False) -> dict:
     """shared evaluation setup: bench positions and features, theta_pop, base fusion, draw and LLR.
     rich=True builds the 50-dim features (likelihood_rich, PID_LIKELIHOOD_RICH_PLAN.md)."""
@@ -495,6 +509,20 @@ def _context(theta_fixed=None, rich: bool = False) -> dict:
             out["parts"] = parts
         return out
 
+    def components(gallery, query, cat_prior=None):
+        """the 7 non-LLR fusion parts in base units for arbitrary gallery / query game lists
+        (pseudo-label expansion, PID_PSEUDO_COLOUR_PLAN.md plan 1); cat_prior fixes the pooled
+        category histogram so that columns do not depend on which candidates are passed."""
+        g, qq = [posv[x] for x in gallery], [posv[x] for x in query]
+        parts = {"opening": twocolor.opening_scores(env["prefix"], env["hashes"], gallery, query, color,
+                                                    env["populations"], env["summary"]["opening"]),
+                 "category": category_scores_fixed(env["codes"], gallery, query, 4, cat_prior),
+                 "L1": s1["lambda1"] * level_scores(keys1, color, poptab, gallery, query, s1["n"], "L1")[s1["beta"]],
+                 "L2": s1["lambda2"] * level_scores(keys1, color, poptab, gallery, query, s1["n"], "L2")[s1["beta"]]}
+        for n in WEIGHTS:
+            parts[n] = scale * BASE_M * WEIGHTS[n] * cosines(unit[n], g, qq)
+        return parts
+
     x = draw(*CHECK)
     got = bucket_means(points(x["base"], x["candidates"], x["q"]), x["ks"])
     ref = pd.read_csv(A2OUT / "sealed_per_draw.csv")
@@ -527,7 +555,7 @@ def _context(theta_fixed=None, rich: bool = False) -> dict:
 
     return dict(report=report, device=device, draw=draw, llr=llr, theta_pop=theta_pop, scale=scale,
                 env=env, PHI=PHI, B=B, SLOT=SLOT, positions_of=positions_of, fit_pop=fit_pop,
-                base_mask=base_mask)
+                base_mask=base_mask, components=components, codes=env["codes"])
 
 
 def evaluate(args) -> None:
@@ -1625,6 +1653,245 @@ def colour_selfcheck() -> None:
     print("colour selfcheck ok", {"w": np.round(got[:8], 2).tolist(), "v": np.round(got[8:], 2).tolist()}, flush=True)
 
 
+# ---------------------------------------------------------------- pseudo-label gallery expansion (2026-11-21, PID_PSEUDO_COLOUR_PLAN.md plan 1)
+PS_OUT = OUT / "pseudo"
+R8_DEV = [(0, d) for d in range(3800, 3820)]
+R8_SEALED = [(0, d) for d in range(3900, 3920)] + [(1, d) for d in range(3900, 3930)]
+PS_TAUS = (0.5, 0.7, 0.9, 0.97)
+PS_ROUNDS = (1, 2)
+PS_ORACLE_GATE = 0.010
+PS_DEV_GATE = 0.003
+ORACLE_GROUPS = {"opening": [0], "category": [1], "L12": [2, 3], "enc": [4, 5, 6], "LLR": [7], "all": list(range(8))}
+
+
+def pseudo_base() -> dict:
+    """the fusion the expansion stacks on: plan-2 colour weights if they passed the switch rule,
+    else the 821010-comb-probe FULL weights."""
+    r7 = COL_OUT / "report.json"
+    if r7.exists():
+        rep = json.loads(r7.read_text())
+        if rep.get("sealed", {}).get("verdict", {}).get("pass"):
+            return {"kind": "colour", "W": {int(k): np.array(v, np.float64) for k, v in rep["chosen"]["weights"].items()}}
+    rep = json.loads((COMB_OUT / "report.json").read_text())
+    return {"kind": "comb", "W": {int(k): np.array(v, np.float64) for k, v in rep["chosen"]["weights"].items()}}
+
+
+def fuse(base: dict, X: np.ndarray, ks: np.ndarray, z: np.ndarray) -> np.ndarray:
+    return apply_colour(X, ks, z, base["W"]) if base["kind"] == "colour" else apply_weights(X, ks, base["W"])
+
+
+def posterior_assign(S: np.ndarray, tau: float) -> tuple[np.ndarray, np.ndarray]:
+    """(assignment [Q] = top-1 candidate where its softmax posterior >= tau else -1, top-1 posterior)."""
+    e = np.exp(S - S.max(axis=1, keepdims=True))
+    p = e / e.sum(axis=1, keepdims=True)
+    top = p.argmax(axis=1)
+    p1 = p[np.arange(len(p)), top]
+    return np.where(p1 >= tau, top, -1), p1
+
+
+def expand(comp, gallery, query, assign, X0: np.ndarray, codes: np.ndarray) -> tuple[np.ndarray, list]:
+    """X [Q, C, 8] with every assigned question's games added to its candidate's gallery.
+    Leave-one-out: a question's own games never score that question (only cell (q, assign[q])
+    can contain them; it is recomputed from the expanded gallery minus q's games). Columns of
+    unchanged candidates are copied from X0 (every part depends only on its own candidate once
+    the pooled category prior is fixed). comp(gallery_list, query_list, cat_prior) -> [Q', G', 8]."""
+    aug = [np.asarray(g) for g in gallery]
+    for q, c in enumerate(assign):
+        if c >= 0:
+            aug[c] = np.concatenate([aug[c], np.asarray(query[q])])
+    changed = np.unique(assign[assign >= 0])
+    X = X0.copy()
+    if not len(changed):
+        return X, aug
+    prior = category_prior(codes, aug)
+    sel = np.flatnonzero(assign >= 0)
+    special = [np.setdiff1d(aug[assign[q]], np.asarray(query[q])) for q in sel]
+    for q, sp in zip(sel, special):
+        assert len(sp) == len(aug[assign[q]]) - len(query[q]), "a question's games overlap a gallery"
+    Y = comp([aug[c] for c in changed] + special, list(query), prior)     # [Q, n_changed + P, 8]
+    X[:, changed] = Y[:, :len(changed)]
+    X[sel, assign[sel]] = Y[sel, len(changed) + np.arange(len(sel))]
+    return X, aug
+
+
+def evaluate8(_args) -> None:
+    """pseudo-label expansion of every fusion part: oracle bound (go / no-go), dev choice of tau and
+    rounds, sealed test vs the current fusion."""
+    import torch
+
+    from scripts.identity.pid2_cheap import COLS, buckets, official, paired, verdict
+
+    PS_OUT.mkdir(parents=True, exist_ok=True)
+    stage0 = json.loads((OUT / "report.json").read_text())
+    fp = json.loads((EB_OUT / "report.json").read_text())["final_params"]
+    base = pseudo_base()
+    ctx = _context(stage0["theta_pop"], rich=True)
+    report, draw, llr, device, env = ctx["report"], ctx["draw"], ctx["llr"], ctx["device"], ctx["env"]
+    report["base"] = base["kind"]
+    print("base fusion:", base["kind"], flush=True)
+    color, codes, components = env["color"], ctx["codes"], ctx["components"]
+    mask = torch.tensor(fp["mask"], device=device, dtype=torch.float32)
+    prior = torch.tensor(fp["theta_pop"], device=device, dtype=torch.float64)
+    P = torch.from_numpy(np.load(EB_OUT / "precision.npy")).to(device)
+
+    def comp(gallery, query, cat_prior=None):
+        parts = components(gallery, query, cat_prior)
+        le = llr({"gallery": gallery, "query": query}, 1.0, mask, prior, P)[0]
+        return np.stack([parts[c] for c in PARTS[:-1]] + [le], axis=2)
+
+    def get(pool, d):
+        x = draw(pool, d, with_parts=True)
+        le = llr(x, 1.0, mask, prior, P)[0]
+        X = np.stack([x["parts"][c] for c in PARTS[:-1]] + [le], axis=2)
+        z = 2 * np.array([float((color[np.asarray(g)] == 0).mean()) for g in x["query"]]) - 1
+        return x, X, z
+
+    def arm(x, X0, z, S0, tau, rounds):
+        """expanded X after `rounds` rounds starting from the base posterior."""
+        S, out, a = S0, None, None
+        for _ in range(rounds):              # each round re-selects from the original galleries
+            a, _p = posterior_assign(S, tau)
+            out, _ = expand(comp, x["gallery"], x["query"], a, X0, codes)
+            S = fuse(base, out, x["ks"], z)
+        return out, a
+
+    def rows_of(tag, d, pool, X, x, z, a_true_aug):
+        pts = official(fuse(base, X, x["ks"], z), x["owner"])
+        r = {"pool": pool, "draw": d, "arm": tag, **buckets(pts, x["ks"])}
+        if a_true_aug is not None:          # bias check: true owner expanded or not
+            r["pts_aug"], r["n_aug"] = float(pts[a_true_aug].sum()), int(a_true_aug.sum())
+            r["pts_noaug"], r["n_noaug"] = float(pts[~a_true_aug].sum()), int((~a_true_aug).sum())
+        return r, pts
+
+    # ---- dev: engineering checks, oracle, tau x rounds
+    rows, quality, first = [], [], True
+    for pool, d in R8_DEV:
+        x, X0, z = get(pool, d)
+        S0 = fuse(base, X0, x["ks"], z)
+        if first:
+            first = False
+            Xr = comp(x["gallery"], x["query"])
+            diff = {c: float(np.abs(Xr[:, :, j] - X0[:, :, j]).max()) for j, c in enumerate(PARTS)}
+            report["comp_reproduction"] = diff
+            print("comp() reproduces the draw parts, max abs diff per part:", diff, flush=True)
+            assert max(v for c, v in diff.items() if c != "LLR") <= 1e-9 and diff["LLR"] <= 1e-6
+            idx = np.arange(0, len(x["gallery"]), 7)
+            Xs = comp([x["gallery"][i] for i in idx], x["query"], category_prior(codes, x["gallery"]))
+            col = {c: float(np.abs(Xs[:, :, j] - X0[:, idx, j]).max()) for j, c in enumerate(PARTS)}
+            report["column_independence"] = col
+            print("column independence (subset of candidates), max abs diff per part:", col, flush=True)
+            assert max(v for c, v in col.items() if c != "LLR") <= 1e-9 and col["LLR"] <= 1e-3
+            none, _ = expand(comp, x["gallery"], x["query"], np.full(len(x["query"]), -1), X0, codes)
+            assert np.array_equal(none, X0)
+        r, base_pts = rows_of("BASE", d, pool, X0, x, z, None)
+        rows.append(r)
+        Xo, _ = expand(comp, x["gallery"], x["query"], x["owner"].copy(), X0, codes)
+        for g, cols in ORACLE_GROUPS.items():
+            Xm = X0.copy()
+            Xm[:, :, cols] = Xo[:, :, cols]
+            rows.append(rows_of(f"ORACLE_{g}", d, pool, Xm, x, z, None)[0])
+        for tau in PS_TAUS:
+            a, p1 = posterior_assign(S0, tau)
+            for k in KS:
+                m = x["ks"] == k
+                quality.append({"draw": d, "tau": tau, "k": k, "n": int(m.sum()), "picked": int((a[m] >= 0).sum()),
+                                "correct": int((a[m] == x["owner"][m]).sum())})
+            S, rr_done = S0, 0                 # rounds share their prefix: round r+1 starts from round r's scores
+            for rr in PS_ROUNDS:
+                while rr_done < rr:
+                    a1, _p = posterior_assign(S, tau)
+                    X1, _ = expand(comp, x["gallery"], x["query"], a1, X0, codes)
+                    S, rr_done = fuse(base, X1, x["ks"], z), rr_done + 1
+                aug_true = np.isin(x["owner"], np.unique(a1[a1 >= 0]))
+                rows.append(rows_of(f"T{tau:g}_R{rr}", d, pool, X1, x, z, aug_true)[0])
+        print(f"dev draw {d}", flush=True)
+    frame = pd.DataFrame(rows)
+    frame.to_csv(PS_OUT / "dev_per_draw.csv", index=False)
+    s1 = paired(frame, "BASE").set_index("arm")
+    q = pd.DataFrame(quality).groupby(["tau", "k"])[["n", "picked", "correct"]].sum()
+    q["coverage"], q["precision"] = q["picked"] / q["n"], q["correct"] / q["picked"].clip(lower=1)
+    report["dev"] = s1[["1", "2", "3", "5", "all", "d_1", "d_2", "d_3", "d_5", "d_all", "se_all", "pos"]].to_dict(orient="index")
+    report["pseudo_quality"] = {f"{t:g}_{k}": r.to_dict() for (t, k), r in q.iterrows()}
+    print("dev (vs BASE):\n", s1[["all", "d_1", "d_2", "d_3", "d_5", "d_all", "se_all"]].round(4).to_string(),
+          "\npseudo-label quality on dev:\n", q.round(3).to_string(), flush=True)
+    bias = frame[frame.arm.str.startswith("T")].groupby("arm")[["pts_aug", "n_aug", "pts_noaug", "n_noaug"]].sum()
+    b0 = frame[frame.arm == "BASE"]
+    report["bias_rows"] = bias.to_dict(orient="index")
+    oracle = float(s1.loc["ORACLE_all", "d_all"])
+    report["oracle_all"] = oracle
+    if oracle < PS_ORACLE_GATE:
+        report["stopped"] = f"oracle bound {oracle:.4f} < {PS_ORACLE_GATE}; stage 0 gate failed"
+        (PS_OUT / "report.json").write_text(json.dumps(report, indent=1, default=float))
+        print(report["stopped"], flush=True)
+        return
+    arms = s1.loc[[f"T{t:g}_R{r}" for t in PS_TAUS for r in PS_ROUNDS]]
+    best = arms["d_all"].idxmax()
+    tau, rounds = float(best[1:].split("_R")[0]), int(best.split("_R")[1])
+    report["chosen"] = {"arm": best, "tau": tau, "rounds": rounds, "dev_delta": float(arms.loc[best, "d_all"]),
+                        "grid_edge": tau in (PS_TAUS[0], PS_TAUS[-1])}
+    print("chosen:", report["chosen"], flush=True)
+    if arms.loc[best, "d_all"] < PS_DEV_GATE:
+        report["stopped"] = f"best dev delta {arms.loc[best, 'd_all']:.4f} < {PS_DEV_GATE}; sealed draws not opened"
+        (PS_OUT / "report.json").write_text(json.dumps(report, indent=1, default=float))
+        print(report["stopped"], flush=True)
+        return
+    (PS_OUT / "report.json").write_text(json.dumps(report, indent=1, default=float))
+
+    # ---- sealed
+    out, bias_s = [], []
+    for pool, d in R8_SEALED:
+        x, X0, z = get(pool, d)
+        S0 = fuse(base, X0, x["ks"], z)
+        X1, a1 = arm(x, X0, z, S0, tau, rounds)
+        aug_true = np.isin(x["owner"], np.unique(a1[a1 >= 0]))
+        r0, p0 = rows_of("BASE", d, pool, X0, x, z, aug_true)
+        r1, p1_ = rows_of("PSEUDO", d, pool, X1, x, z, aug_true)
+        out += [r0, r1]
+        print(f"sealed pool {pool} draw {d}", flush=True)
+    frame = pd.DataFrame(out)
+    frame.to_csv(PS_OUT / "sealed_per_draw.csv", index=False)
+    t1, t0 = paired(frame[frame.pool == 1], "BASE"), paired(frame[frame.pool == 0], "BASE")
+    v = verdict(t1, t0, "PSEUDO")
+    v["probe"] = bool(not v["pass"] and v["pool1_delta"] > 0 and v["pool0_delta"] > 0)
+    g = frame.groupby(["pool", "arm"])[["pts_aug", "n_aug", "pts_noaug", "n_noaug"]].sum()
+    g["mean_aug"], g["mean_noaug"] = g["pts_aug"] / g["n_aug"], g["pts_noaug"] / g["n_noaug"]
+    report["sealed_bias"] = {f"{p}_{a}": r.to_dict() for (p, a), r in g.iterrows()}
+    report["sealed"] = {"pool1": t1.to_dict(orient="records"), "pool0": t0.to_dict(orient="records"), "verdict": v}
+    print("sealed pool 1 vs BASE:\n", t1.round(4).to_string(index=False), "\nsealed pool 0 vs BASE:\n",
+          t0.round(4).to_string(index=False), "\nbias (true owner expanded / not):\n",
+          g[["mean_aug", "n_aug", "mean_noaug", "n_noaug"]].round(4).to_string(), "\nverdict:", json.dumps(v), flush=True)
+    (PS_OUT / "report.json").write_text(json.dumps(report, indent=1, default=float))
+
+
+def pseudo_selfcheck() -> None:
+    """synthetic: leave-one-out keeps a question's own games out of its own cell; unassigned
+    questions and unchanged candidates keep X0; posterior_assign thresholds correctly."""
+    rng = np.random.default_rng(4)
+    gallery = [np.arange(10 * c, 10 * c + 10) for c in range(6)]
+    query = [np.array([100 + 3 * q, 101 + 3 * q, 102 + 3 * q]) for q in range(8)]
+
+    def comp(gal, qry, cat_prior=None):        # part 0 = overlap count, part 1 = gallery size
+        X = np.zeros((len(qry), len(gal), 8))
+        for i, q in enumerate(qry):
+            for j, g in enumerate(gal):
+                X[i, j, 0] = len(np.intersect1d(q, g))
+                X[i, j, 1] = len(g)
+        return X
+
+    codes = rng.integers(0, 4, 200)
+    X0 = comp(gallery, query)
+    assign = np.array([2, -1, 2, 5, -1, -1, 0, -1])
+    X, aug = expand(comp, gallery, query, assign, X0, codes)
+    assert X[:, :, 0].max() == 0, "a question's own games scored it"
+    assert X[0, 2, 1] == 13 and X[1, 2, 1] == 16 and X[3, 5, 1] == 10 and X[4, 5, 1] == 13
+    assert np.array_equal(X[:, [1, 3, 4]], X0[:, [1, 3, 4]])
+    assert len(aug[2]) == 16 and len(aug[5]) == 13 and len(aug[0]) == 13
+    S = np.array([[0.0, 5.0, 0.0], [1.0, 1.0, 1.0]])
+    a, p1 = posterior_assign(S, 0.9)
+    assert a.tolist() == [1, -1] and p1[0] > 0.98
+    print("pseudo selfcheck ok", flush=True)
+
+
 # ---------------------------------------------------------------- official export
 def position_tensors(arr: dict, moves_of, device, rich: dict | None = None):
     """sorted positions -> (B, PHI, SLOT tensors, first / end position per game id); rich = the
@@ -1656,6 +1923,73 @@ def position_tensors(arr: dict, moves_of, device, rich: dict | None = None):
         ps.append(torch.from_numpy(phi))
     return (torch.cat(bs).to(device), torch.cat(ps).to(device),
             torch.from_numpy(arr["slot"].astype(np.int64)).to(device), span)
+
+
+def official_builder(part: str, choice: dict, cache_dir: Path):
+    """(comp7, local category codes) for one official added-set part: the 7 non-LLR fusion parts
+    for arbitrary gallery / query lists in local game rows (pool rows, then question rows), rebuilt
+    from the stores exactly as predict2 / pid2_style_export / pid2_multilevel_export built them
+    (PID_PSEUDO_COLOUR_PLAN.md plan 1)."""
+    from multiprocessing import Pool
+
+    from go_aicup.data.preprocess import load_store
+    from go_aicup.tasks.identity import data as idata, opening as op, twocolor
+    from go_aicup.tasks.identity.predict import PLIES, store_prefix, train_prefix
+    from scripts.identity.pid2_multilevel_export import _init as ml_init, _keys_of as ml_keys, game_list
+    from scripts.identity.pid2_multilevel_fuse import OUT as STAGE1, PopTable, level_scores
+    from scripts.identity.pid2_qmerge_export import DAY0, ENC
+    from scripts.identity.pid2_style_export import REF_HEAD, REF_RUN, STORE, head_vectors
+
+    s = json.loads((DAY0 / f"{part}2_d4_9600_seqB" / "info.json").read_text())["summary"]
+    params = s["opening"]
+    min_plies = 2 * max(params["moves"], params["slot_moves"])
+    train_meta, train_pre = train_prefix("d4")
+    pool_m, pool_c, pool_meta = load_store(f"pool2_{part}", STORE, mmap=False)
+    q_m, q_c, q_meta = load_store(f"pid2_{part}", STORE, mmap=False)
+    pool_pre, ok_p = store_prefix(pool_m, pool_c, pool_meta, "d4", min_plies)
+    q_pre, ok_q = store_prefix(q_m, q_c, q_meta, "d4", min_plies)
+    assert ok_p.all() and ok_q.all()
+    n_train = len(train_meta)
+    prefix = np.concatenate([train_pre[:, :PLIES], pool_pre, q_pre])
+    hashes = op.prefix_hashes(prefix)
+    train_color = train_meta["player_color"].to_numpy().astype(np.int64)
+    populations = (np.flatnonzero(train_color == 0), np.flatnonzero(train_color == 1))
+    is_white = lambda meta: (meta["color"].astype(str).to_numpy() == "W").astype(np.int64)
+    color_full = np.concatenate([train_color, is_white(pool_meta), is_white(q_meta)])
+    codes_full = np.concatenate([np.zeros(n_train, np.int64),
+                                 np.minimum(pool_meta["hd"].to_numpy(), 1) + 2 * is_white(pool_meta),
+                                 np.minimum(q_meta["hd"].to_numpy(), 1) + 2 * is_white(q_meta)])
+    games = game_list(pool_m, pool_c, pool_meta) + game_list(q_m, q_c, q_meta)
+    with Pool(12, initializer=ml_init, initargs=(games,)) as pool:
+        keys = np.stack(pool.map(ml_keys, range(len(games)), chunksize=64))
+    color_ml = np.array([g[1] for g in games], np.int64)
+    meta_train = idata.load_meta()
+    popfile = np.load(STAGE1 / "pop_keys.npz")
+    pop = PopTable(popfile["keys"], meta_train["player_color"].to_numpy().astype(np.int64)[popfile["game_index"]])
+    runs = {"B": (REF_RUN, REF_HEAD)}
+    for name, (suffix, _) in ENC.items():
+        if name != "B":
+            info = json.loads((DAY0 / f"{part}2_d4_9600{suffix}" / "info.json").read_text())
+            runs[name] = (info["run"], ROOT / info["head"])
+    vecs = {}
+    for name, (run, head) in runs.items():
+        path = cache_dir / f"vectors_{name}_{part}.npy"
+        if not path.exists():
+            np.save(path, head_vectors(run, Path(head), part))
+        vecs[name] = np.load(path)
+        assert len(vecs[name]) == len(games), name
+
+    def comp7(gal, qry, cat_prior=None):
+        G, Q = [np.asarray(g) + n_train for g in gal], [np.asarray(q) + n_train for q in qry]
+        out = {"opening": twocolor.opening_scores(prefix, hashes, G, Q, color_full, populations, params),
+               "category": category_scores_fixed(codes_full, G, Q, 4, cat_prior)}
+        for lv, lam in (("L1", choice["lambda1"]), ("L2", choice["lambda2"])):
+            out[lv] = lam * level_scores(lambda g: keys[g], color_ml, pop, gal, qry, choice["n"], lv)[choice["beta"]]
+        for name, (_, w) in ENC.items():
+            out[name] = 16 * w * s["w"] * twocolor.style_scores(vecs[name], gal, qry)
+        return out
+
+    return comp7, codes_full[n_train:]
 
 
 def export(args) -> None:
@@ -1717,6 +2051,15 @@ def export(args) -> None:
         assert v7["pass"] or v7["probe"], "colour weights neither passed nor qualify as a probe"
         colw = {int(k): np.array(v, np.float64) for k, v in r7["chosen"]["weights"].items()}
         tag = "combcol" if v7["pass"] else "combcol-probe"
+    pseudo = None
+    if args.pseudo:                        # pseudo-label expansion (plan 1) on top of the base fusion it was tested on
+        assert args.combine and not args.probe, "--pseudo stacks on --combine [--colour]"
+        r8 = json.loads((PS_OUT / "report.json").read_text())
+        v8 = r8["sealed"]["verdict"]
+        assert v8["pass"] or v8["probe"], "the expansion neither passed nor qualifies as a probe"
+        assert (r8["base"] == "colour") == bool(args.colour), "export base differs from the tested base"
+        pseudo = {"tau": float(r8["chosen"]["tau"]), "rounds": int(r8["chosen"]["rounds"])}
+        tag = tag + ("-pseudo" if v8["pass"] else "-pseudo-probe")
     target = SUB / f"{job}-{tag}.csv"
     assert not target.exists(), target
     device = torch.device("cuda")
@@ -1823,6 +2166,46 @@ def export(args) -> None:
                 report.setdefault("colour_groups", {})[prefix] = {
                     "black": int((z == 1).sum()), "white": int((z == -1).sum()), "mixed": int((np.abs(z) < 1).sum())}
                 ranked = cand[top5(apply_colour(X, ks, z, colw))]
+            else:
+                probe_file = pd.read_csv(SUB / "821010-comb-probe.csv", dtype=str).set_index("question_id")
+                if not args.probe:
+                    np.testing.assert_array_equal(ranked, probe_file.loc[qids, COLS].to_numpy())
+                qc = q_meta["color"].astype(str).to_numpy()
+                z = np.array([2.0 * (qc[rows[q]] == "B").mean() - 1.0 for q in qids])
+            if pseudo is not None:
+                base_f = {"kind": "colour", "W": colw} if colw is not None else {"kind": "comb", "W": comb}
+                comp7, codes_local = official_builder(part, choice, official)
+                n_pool = len(pool_meta)
+                gal_l = [g - p_i * 1_000_000 for g in gallery]
+                qry_l = [q - p_i * 1_000_000 for q in query]
+
+                def comp(gal, qry, cat_prior=None):
+                    parts7 = comp7(gal, qry, cat_prior)
+                    pg, og = positions_of([np.asarray(g) + p_i * 1_000_000 for g in gal])
+                    th_ = fit(PHI, B, SLOT, pg, og, len(gal), theta_pop, sigma, mask=rich_mask, precision=precision)
+                    pq, oq = positions_of([np.asarray(q) + p_i * 1_000_000 for q in qry])
+                    lp_ = played_logp(PHI, B, SLOT, pq, torch.cat([th_, theta_pop[None]]), mask=rich_mask)
+                    le = torch.zeros(len(qry), len(gal), device=device, dtype=torch.float64)
+                    le.index_add_(0, oq, lp_[:, :-1] - lp_[:, -1:])
+                    return np.stack([parts7[c] for c in PARTS[:-1]] + [le.cpu().numpy()], axis=2)
+
+                Xr = comp(gal_l, qry_l)
+                rdiff = {c: float(np.abs(Xr[:, :, j] - X[:, :, j]).max()) for j, c in enumerate(PARTS)}
+                print(prefix, "official comp() vs saved parts, max abs diff:", rdiff, flush=True)
+                assert max(rdiff[c] for c in ("opening", "category", "L1", "L2", "LLR")) <= 1e-9, rdiff
+                assert max(rdiff[c] for c in ("B", "A1", "A2")) <= 2e-3, rdiff
+                S0 = fuse(base_f, X, ks, z)
+                assert np.array_equal(cand[top5(S0)], ranked)
+                S, a = S0, None
+                for _ in range(pseudo["rounds"]):
+                    a, _p = posterior_assign(S, pseudo["tau"])
+                    Xp, _ = expand(comp, gal_l, qry_l, a, X, codes_local)
+                    S = fuse(base_f, Xp, ks, z)
+                ranked = cand[top5(S)]
+                report.setdefault("pseudo", {})[prefix] = {
+                    "comp_diff": rdiff, "picked": int((a >= 0).sum()),
+                    "picked_by_k": {int(k): int((a[ks == k] >= 0).sum()) for k in (1, 2, 3, 5)},
+                    "expanded_candidates": int(len(np.unique(a[a >= 0])))}
         out.loc[qids, COLS] = ranked
         ch = ranked[:, 0] != base.loc[qids, "top_1"].to_numpy()
         alone_top1 = cand[llr.argmax(1)] == base.loc[qids, "top_1"].to_numpy()
@@ -1924,6 +2307,7 @@ def selfcheck(_args) -> None:
     eb_selfcheck()
     combiner_selfcheck()
     colour_selfcheck()
+    pseudo_selfcheck()
     print("selfcheck ok", flush=True)
 
 
@@ -1944,6 +2328,7 @@ def main() -> None:
     sub.add_parser("evaluate5")
     sub.add_parser("evaluate6")
     sub.add_parser("evaluate7")
+    sub.add_parser("evaluate8")
     e = sub.add_parser("export")
     e.add_argument("--workers", type=int, default=11)
     e.add_argument("--round2", action="store_true", help="use the round-2 choice (refuses if it kept B0)")
@@ -1951,12 +2336,13 @@ def main() -> None:
     e.add_argument("--eb", action="store_true", help="use the empirical-Bayes prior (refuses unless it passed)")
     e.add_argument("--combine", action="store_true", help="per-k learned fusion on top of --eb (refuses unless it passed)")
     e.add_argument("--probe", action="store_true", help="with --combine: LB probe even though the gate failed")
+    e.add_argument("--pseudo", action="store_true", help="with --combine [--colour]: pseudo-label expansion (passed or probe)")
     e.add_argument("--colour", action="store_true", help="with --combine: colour-dependent weights (passed or probe)")
     e.add_argument("--eb-lambda", action="store_true", help="with --eb: the widened-grid lambda (refuses unless it passed)")
     sub.add_parser("selfcheck")
     args = parser.parse_args()
     {"games": games, "policy": policy, "evaluate": evaluate, "evaluate2": evaluate2, "export": export,
-     "rich-features": rich_features_cmd, "evaluate3": evaluate3, "evaluate4": evaluate4, "evaluate5": evaluate5, "evaluate6": evaluate6, "evaluate7": evaluate7,
+     "rich-features": rich_features_cmd, "evaluate3": evaluate3, "evaluate4": evaluate4, "evaluate5": evaluate5, "evaluate6": evaluate6, "evaluate7": evaluate7, "evaluate8": evaluate8,
      "selfcheck": selfcheck}[args.cmd](args)
 
 
