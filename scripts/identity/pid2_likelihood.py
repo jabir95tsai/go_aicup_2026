@@ -2086,6 +2086,497 @@ def evaluate9(_args) -> None:
     (PS2_OUT / "report.json").write_text(json.dumps(report, indent=1, default=float))
 
 
+# ---------------------------------------------------------------- shared by items 1 / 2 after 829297 (2026-11-21)
+PARTS9 = PARTS + ("RLLR",)
+
+
+def question_thetas(PHI, B, SLOT, positions_of, query, prior, mask, P):
+    """MAP theta of every question on its own games, under the same EB prior as the candidates."""
+    pq, oq = positions_of(query)
+    return fit(PHI, B, SLOT, pq, oq, len(query), prior, 1.0, mask=mask, precision=P)
+
+
+def reverse_llr(PHI, B, SLOT, positions_of, gallery, theta_q, prior, mask):
+    """[Q, C]: sum over candidate c's reference moves of log p(m | theta_q) - log p(m | theta_pop)."""
+    import torch
+    pg, og = positions_of(gallery)
+    lp = played_logp(PHI, B, SLOT, pg, torch.cat([theta_q, prior[None]]), mask=mask)
+    out = torch.zeros(len(gallery), len(theta_q), device=PHI.device, dtype=torch.float64)
+    out.index_add_(0, og, lp[:, :-1] - lp[:, -1:])
+    return out.T.cpu().numpy()
+
+
+def pair_llr(PHI, B, SLOT, positions_of, query, theta_q, prior, mask):
+    """([Q, Q] sum over q's moves of log p(m | theta_q') - log p(m | theta_pop), [Q] own-move counts)."""
+    import torch
+    pq, oq = positions_of(query)
+    lp = played_logp(PHI, B, SLOT, pq, torch.cat([theta_q, prior[None]]), mask=mask)
+    out = torch.zeros(len(query), len(theta_q), device=PHI.device, dtype=torch.float64)
+    out.index_add_(0, oq, lp[:, :-1] - lp[:, -1:])
+    return out.cpu().numpy(), np.bincount(oq.cpu().numpy(), minlength=len(query)).astype(np.float64)
+
+
+def fit_free(sets, w0: np.ndarray, free: list[int], device) -> np.ndarray:
+    """conditional logit for one k with only the weights at `free` fitted (the rest stay at w0)."""
+    import torch
+    Xs = [(torch.from_numpy(x).to(device), torch.from_numpy(o).to(device)) for x, o in sets]
+    n = sum(len(o) for _, o in sets)
+    base = torch.tensor(w0, device=device, dtype=torch.float64)
+    idx = torch.tensor(free, device=device, dtype=torch.long)
+    p = base[idx].clone().requires_grad_(True)
+    opt = torch.optim.LBFGS([p], lr=1.0, max_iter=500, tolerance_grad=1e-9, tolerance_change=1e-12,
+                            line_search_fn="strong_wolfe")
+
+    def closure():
+        opt.zero_grad()
+        w = base.index_put((idx,), p)
+        loss = 0.0
+        for x, o in Xs:
+            s = torch.einsum("qcj,j->qc", x, w)
+            loss = loss + (torch.logsumexp(s, dim=1) - s[torch.arange(len(o), device=device), o]).sum()
+        loss = loss / n
+        loss.backward()
+        return loss
+
+    opt.step(closure)
+    return base.index_put((idx,), p.detach()).cpu().numpy()
+
+
+def pseudo_rounds(comp, gallery, query, X0, ks, W, codes, tau=0.5, rounds=2):
+    """(X after the last round, last assignment, final scores); each round re-selects from the
+    original galleries (as evaluate8 / evaluate9 / export)."""
+    S, X1, a = apply_weights(X0, ks, W), X0, np.full(len(query), -1)
+    for _ in range(rounds):
+        a, _p = posterior_assign(S, tau)
+        X1, _ = expand(comp, gallery, query, a, X0, codes)
+        S = apply_weights(X1, ks, W)
+    return X1, a, S
+
+
+def _llr_setup():
+    """context plus the EB-LLR settings and the comb weights the 824896 base used."""
+    import torch
+    stage0 = json.loads((OUT / "report.json").read_text())
+    fp = json.loads((EB_OUT / "report.json").read_text())["final_params"]
+    r8 = json.loads((PS_OUT / "report.json").read_text())
+    assert r8["base"] == "comb" and r8["chosen"]["arm"] == "T0.5_R2" and r8["sealed"]["verdict"]["pass"]
+    base = pseudo_base()
+    assert base["kind"] == "comb"
+    ctx = _context(stage0["theta_pop"], rich=True)
+    device = ctx["device"]
+    ctx["mask"] = torch.tensor(fp["mask"], device=device, dtype=torch.float32)
+    ctx["prior"] = torch.tensor(fp["theta_pop"], device=device, dtype=torch.float64)
+    ctx["P"] = torch.from_numpy(np.load(EB_OUT / "precision.npy")).to(device)
+    ctx["W8"] = base["W"]
+    return ctx
+
+
+# ---------------------------------------------------------------- item 1: reverse LLR (symmetric scoring)
+RL_OUT = OUT / "reverse"
+R10_DEV = [(0, d) for d in range(4400, 4420)]
+R10_SEALED = [(0, d) for d in range(4500, 4520)] + [(1, d) for d in range(4500, 4530)]
+
+
+def evaluate10(_args) -> None:
+    """reverse LLR as a 9th fusion part: cross-fitted ADD1 / FULL9 weights on dev draws, sealed test
+    of 9 parts + pseudo-labels against the 824896 form."""
+    from scripts.identity.pid2_cheap import buckets, official, paired, verdict
+
+    RL_OUT.mkdir(parents=True, exist_ok=True)
+    ctx = _llr_setup()
+    report, draw, llr, device, env = ctx["report"], ctx["draw"], ctx["llr"], ctx["device"], ctx["env"]
+    codes, components = ctx["codes"], ctx["components"]
+    PHI, B, SLOT, positions_of = ctx["PHI"], ctx["B"], ctx["SLOT"], ctx["positions_of"]
+    mask, prior, P, W8 = ctx["mask"], ctx["prior"], ctx["P"], ctx["W8"]
+    W0 = {k: np.r_[W8[k], 0.0] for k in KS}
+
+    def comp_for(thq, with_rl: bool):
+        def comp(gallery, query, cat_prior=None):
+            parts = components(gallery, query, cat_prior)
+            le = llr({"gallery": gallery, "query": query}, 1.0, mask, prior, P)[0]
+            cols = [parts[c] for c in PARTS[:-1]] + [le]
+            if with_rl:
+                assert len(query) == len(thq)
+                cols.append(reverse_llr(PHI, B, SLOT, positions_of, gallery, thq, prior, mask))
+            return np.stack(cols, axis=2)
+        return comp
+
+    def get(pool, d):
+        x = draw(pool, d, with_parts=True)
+        le = llr(x, 1.0, mask, prior, P)[0]
+        thq = question_thetas(PHI, B, SLOT, positions_of, x["query"], prior, mask, P)
+        rl = reverse_llr(PHI, B, SLOT, positions_of, x["gallery"], thq, prior, mask)
+        X = np.stack([x["parts"][c] for c in PARTS[:-1]] + [le, rl], axis=2)
+        return x, X, thq
+
+    def corr_rows(X):
+        a, b = X[:, :, 7], X[:, :, 8]
+        a = a - a.mean(1, keepdims=True)
+        b = b - b.mean(1, keepdims=True)
+        return float(((a * b).sum(1) / np.sqrt((a * a).sum(1) * (b * b).sum(1) + 1e-300)).mean())
+
+    # ---- dev draws (no expansion): engineering checks, cross-fit
+    dev, rows, first = {}, [], True
+    for pool, d in R10_DEV:
+        x, X, thq = get(pool, d)
+        if first:
+            first = False
+            Xr = comp_for(thq, True)(x["gallery"], x["query"])
+            diff = {c: float(np.abs(Xr[:, :, j] - X[:, :, j]).max()) for j, c in enumerate(PARTS9)}
+            report["comp_reproduction"] = diff
+            print("comp() reproduces the draw parts:", diff, flush=True)
+            assert max(v for c, v in diff.items() if c not in ("LLR", "RLLR")) <= 1e-9
+            assert diff["LLR"] <= 1e-6 and diff["RLLR"] <= 1e-6
+            idx = np.arange(0, len(x["gallery"]), 7)
+            sub = reverse_llr(PHI, B, SLOT, positions_of, [x["gallery"][i] for i in idx], thq, prior, mask)
+            report["rllr_column_independence"] = float(np.abs(sub - X[:, idx, 8]).max())
+            print("RLLR column independence:", report["rllr_column_independence"], flush=True)
+            assert report["rllr_column_independence"] <= 1e-6
+            same = np.array_equal(np.argsort(-apply_weights(X, x["ks"], W0), axis=1)[:, :5],
+                                  np.argsort(-apply_weights(X[:, :, :8], x["ks"], W8), axis=1)[:, :5])
+            report["zero_weight_top5_identical"] = bool(same)
+            assert same, "RLLR weight 0 changes the top-5"
+        rows.append({"draw": d, "arm": "LLR_alone", **buckets(official(X[:, :, 7], x["owner"]), x["ks"])})
+        rows.append({"draw": d, "arm": "RLLR_alone", **buckets(official(X[:, :, 8], x["owner"]), x["ks"])})
+        rows.append({"draw": d, "arm": "CURRENT", **buckets(official(apply_weights(X, x["ks"], W0), x["owner"]), x["ks"])})
+        report.setdefault("llr_rllr_corr", []).append(corr_rows(X))
+        dev[d] = (X, x["ks"], x["owner"])
+        print(f"dev draw {d}", flush=True)
+    alone = paired(pd.DataFrame(rows), "CURRENT").set_index("arm")
+    report["alone"] = alone[["1", "2", "3", "5", "all"]].to_dict(orient="index")
+    report["llr_rllr_corr_mean"] = float(np.mean(report["llr_rllr_corr"]))
+    print("alone scores (dev):\n", alone[["1", "2", "3", "5", "all"]].round(4).to_string(),
+          "\nmean within-question corr(LLR, RLLR):", round(report["llr_rllr_corr_mean"], 3), flush=True)
+
+    def fit_all(draws, arm):
+        free = [8] if arm == "ADD1" else list(range(9))
+        return {k: fit_free([(dev[d][0][dev[d][1] == k], dev[d][2][dev[d][1] == k]) for d in draws], W0[k], free, device)
+                for k in KS}
+
+    names = [d for _, d in R10_DEV]
+    halves = (names[:10], names[10:])
+    rows, cross = [], {}
+    for i, (fit_on, held) in enumerate((halves, halves[::-1])):
+        arms = {"CURRENT": W0, **{a: fit_all(fit_on, a) for a in ("ADD1", "FULL9")}}
+        cross[i] = {a: {k: v.tolist() for k, v in W.items()} for a, W in arms.items() if a != "CURRENT"}
+        for d in held:
+            X, ks, owner = dev[d]
+            rows += [{"draw": d, "arm": a, **buckets(official(apply_weights(X, ks, W), owner), ks)} for a, W in arms.items()]
+    s1 = paired(pd.DataFrame(rows), "CURRENT").set_index("arm")
+    report["crossfit"] = s1[["1", "2", "3", "5", "all", "d_1", "d_2", "d_3", "d_5", "d_all", "se_all", "pos"]].to_dict(orient="index")
+    report["crossfit_weights"] = cross
+    print("cross-fit (vs CURRENT):\n", s1[["all", "d_1", "d_2", "d_3", "d_5", "d_all", "se_all"]].round(4).to_string(), flush=True)
+    best = s1.drop(index="CURRENT")["d_all"].idxmax()
+    if s1.loc[best, "d_all"] <= 0:
+        report["stopped"] = "neither ADD1 nor FULL9 beat the current weights in the cross-fit; sealed draws not opened"
+        (RL_OUT / "report.json").write_text(json.dumps(report, indent=1, default=float))
+        print(report["stopped"], flush=True)
+        return
+    W9 = fit_all(names, best)
+    report["chosen"] = {"arm": best, "crossfit_delta": float(s1.loc[best, "d_all"]),
+                        "weights": {k: W9[k].tolist() for k in KS},
+                        "rllr_weight": {k: float(W9[k][8]) for k in KS},
+                        "negative": [{"k": k, "part": c, "w": float(W9[k][j])} for k in KS for j, c in enumerate(PARTS9) if W9[k][j] < 0]}
+    print("chosen:", best, "RLLR weight per k:", report["chosen"]["rllr_weight"], flush=True)
+    (RL_OUT / "report.json").write_text(json.dumps(report, indent=1, default=float))
+    del dev
+
+    # ---- sealed: CUR (8 parts + pseudo, = 824896 form) vs NEW (9 parts + pseudo); no-expansion arms for attribution
+    out = []
+    for pool, d in R10_SEALED:
+        x, X, thq = get(pool, d)
+        ks, owner = x["ks"], x["owner"]
+        Xc, _, Sc = pseudo_rounds(comp_for(thq, False), x["gallery"], x["query"], X[:, :, :8], ks, W8, codes)
+        Xn, _, Sn = pseudo_rounds(comp_for(thq, True), x["gallery"], x["query"], X, ks, W9, codes)
+        for arm, S in (("CUR", Sc), ("NEW", Sn), ("CUR_noexp", apply_weights(X[:, :, :8], ks, W8)),
+                       ("NEW_noexp", apply_weights(X, ks, W9))):
+            out.append({"pool": pool, "draw": d, "arm": arm, **buckets(official(S, owner), ks)})
+        print(f"sealed pool {pool} draw {d}", flush=True)
+    frame = pd.DataFrame(out)
+    frame.to_csv(RL_OUT / "sealed_per_draw.csv", index=False)
+    t1, t0 = paired(frame[frame.pool == 1], "CUR"), paired(frame[frame.pool == 0], "CUR")
+    v = verdict(t1, t0, "NEW")
+    v["probe"] = bool(not v["pass"] and v["pool1_delta"] > 0 and v["pool0_delta"] > 0)
+    report["sealed"] = {"pool1": t1.to_dict(orient="records"), "pool0": t0.to_dict(orient="records"), "verdict": v}
+    print("sealed pool 1 vs CUR:\n", t1.round(4).to_string(index=False), "\nsealed pool 0 vs CUR:\n",
+          t0.round(4).to_string(index=False), "\nverdict:", json.dumps(v), flush=True)
+    (RL_OUT / "report.json").write_text(json.dumps(report, indent=1, default=float))
+
+
+# ---------------------------------------------------------------- item 2: question merging v2 (LLR in the verifier)
+QM2_OUT = OUT / "qmerge2"
+R11_FIT = [(0, d) for d in range(4600, 4620)]
+R11_TUNE = [(0, d) for d in range(4620, 4640)]
+R11_SEAL0 = [(0, d) for d in range(4640, 4660)]
+R11_SEAL1 = [(1, d) for d in range(4600, 4630)]
+QM2_TAUS = (1.0, 2.0, 4.0, 8.0, 16.0)
+QM2_BETAS = (0.125, 0.25, 0.5, 1.0)
+QM2_THETAS = (0.0, 0.1, 0.3, 0.5)
+QM2_PAIR_PARTS = ("opening", "category", "L1", "L2", "B", "A1", "A2")
+
+
+def qm2_features(d: dict) -> np.ndarray:
+    """[Q, Q, F] symmetric pair features from the saved per-draw arrays (bench and official alike)."""
+    from scripts.identity.pid2_qmerge import centred, softmax
+    s, k = d["S"], d["k"].astype(np.float64)
+    lk = np.log(k)
+    a, b = np.meshgrid(lk, lk, indexing="ij")
+    sym = lambda x: 0.5 * (x + x.T)
+    cos = [sym(d[n].astype(np.float64)) for n in ("B", "A1", "A2")]
+    mc = sum(cos) / 3
+    out = cos + [mc * (a + b), mc * a * b]
+    out += [centred(d[n]) for n in ("opening", "L1", "L2", "category")]
+    lp = d["LLRp"].astype(np.float64)
+    out += [centred(lp), centred(lp / np.maximum(d["n_moves"], 1)[:, None])]
+    for tau in (1.0, 8.0):
+        p = softmax(s, tau)
+        out.append(np.log(np.maximum(p @ p.T, 1e-300)))
+    top = s.argmax(axis=1)
+    asg = d["assign"]
+    out += [(top[:, None] == top[None, :]).astype(np.float64),
+            ((asg[:, None] == asg[None, :]) & (asg[:, None] >= 0)).astype(np.float64), a + b, a * b]
+    return np.stack([np.asarray(x, np.float64) for x in out], axis=-1)
+
+
+def qm2_pair_m(verifier, d: dict) -> np.ndarray:
+    f = qm2_features(d)
+    q = len(d["k"])
+    m = verifier(f.reshape(-1, f.shape[-1])).reshape(q, q)
+    m = 0.5 * (m + m.T)
+    np.fill_diagonal(m, 0.0)
+    return m
+
+
+def qm2_apply(S: np.ndarray, m: np.ndarray, target: np.ndarray, tau: float, beta: float, theta: float) -> np.ndarray:
+    from scripts.identity.pid2_qmerge import merge_term
+    out = S.copy()
+    if target.any():
+        out[target] += beta * merge_term(S, m, tau, theta)[target]
+    return out
+
+
+def qm2_fit(draws):
+    """(verifiers, saved state) fitted on the FIT draws' upper-triangle pairs."""
+    from sklearn.ensemble import HistGradientBoostingClassifier
+    from sklearn.linear_model import LogisticRegression
+    xs, ys = [], []
+    for pool, d in draws:
+        dd = dict(np.load(QM2_OUT / "draws" / f"pool{pool}_draw{d}.npz"))
+        iu = np.triu_indices(len(dd["k"]), 1)
+        xs.append(qm2_features(dd)[iu])
+        ys.append((dd["owner"][:, None] == dd["owner"][None, :])[iu])
+    x, y = np.concatenate(xs), np.concatenate(ys)
+    mu, sd = x.mean(0), x.std(0) + 1e-12
+    lr = LogisticRegression(C=1.0, max_iter=5000).fit((x - mu) / sd, y)
+    hgb = HistGradientBoostingClassifier(max_iter=300, learning_rate=0.05, max_leaf_nodes=31,
+                                         l2_regularization=1.0, random_state=2026).fit(x, y)
+    print(f"verifier fit: {len(y)} pairs, positive rate {y.mean():.5f}", flush=True)
+    fns = {"lr": lambda f: lr.predict_proba((f - mu) / sd)[:, 1], "hgb": lambda f: hgb.predict_proba(f)[:, 1]}
+    return fns, {"lr": {"model": lr, "mu": mu, "sd": sd}, "hgb": {"model": hgb}}
+
+
+def qm2_load_verifier():
+    import pickle
+    state = pickle.loads((QM2_OUT / "verifier.pkl").read_bytes())
+    if state["name"] == "lr":
+        lr, mu, sd = state["model"], state["mu"], state["sd"]
+        return lambda f: lr.predict_proba((f - mu) / sd)[:, 1]
+    return lambda f: state["model"].predict_proba(f)[:, 1]
+
+
+def evaluate11(_args) -> None:
+    """GPU: per-draw 824896-form scores, pseudo assignment and pair arrays; CPU: verifier, tuning, sealed."""
+    import pickle
+
+    from sklearn.metrics import average_precision_score, roc_auc_score
+
+    from scripts.identity.pid2_cheap import buckets, official, paired, verdict
+    from scripts.identity.pid2_qmerge import separation
+
+    (QM2_OUT / "draws").mkdir(parents=True, exist_ok=True)
+    ctx = _llr_setup()
+    report, draw, llr, device = ctx["report"], ctx["draw"], ctx["llr"], ctx["device"]
+    codes, components = ctx["codes"], ctx["components"]
+    PHI, B, SLOT, positions_of = ctx["PHI"], ctx["B"], ctx["SLOT"], ctx["positions_of"]
+    mask, prior, P, W8 = ctx["mask"], ctx["prior"], ctx["P"], ctx["W8"]
+
+    def comp(gallery, query, cat_prior=None):
+        parts = components(gallery, query, cat_prior)
+        le = llr({"gallery": gallery, "query": query}, 1.0, mask, prior, P)[0]
+        return np.stack([parts[c] for c in PARTS[:-1]] + [le], axis=2)
+
+    path = lambda pool, d: QM2_OUT / "draws" / f"pool{pool}_draw{d}.npz"
+    first = True
+    for pool, d in R11_FIT + R11_TUNE + R11_SEAL0 + R11_SEAL1:
+        if path(pool, d).exists():
+            continue
+        x = draw(pool, d, with_parts=True)
+        le = llr(x, 1.0, mask, prior, P)[0]
+        X0 = np.stack([x["parts"][c] for c in PARTS[:-1]] + [le], axis=2)
+        _, a, S = pseudo_rounds(comp, x["gallery"], x["query"], X0, x["ks"], W8, codes)
+        pp = components(x["query"], x["query"])
+        thq = question_thetas(PHI, B, SLOT, positions_of, x["query"], prior, mask, P)
+        lpp, nm = pair_llr(PHI, B, SLOT, positions_of, x["query"], thq, prior, mask)
+        if first:
+            first = False
+            diag_rank = float(np.mean([(lpp[i] > lpp[i, i]).sum() for i in range(len(lpp))]))
+            report["pair_llr_diag_rank_mean"] = diag_rank
+            print("pair LLR: mean number of q' scoring above q itself:", diag_rank, flush=True)
+        np.savez(path(pool, d), S=S, assign=a, owner=x["owner"], k=x["ks"], n_cand=len(x["candidates"]),
+                 LLRp=lpp.astype(np.float32), n_moves=nm, **{n: pp[n].astype(np.float32) for n in QM2_PAIR_PARTS})
+        print(f"pool {pool} draw {d} done", flush=True)
+    (QM2_OUT / "report_gpu.json").write_text(json.dumps(report, indent=1, default=float))
+
+    # ---- verifier
+    load = lambda pool, d: dict(np.load(path(pool, d)))
+    fns, states = qm2_fit(R11_FIT)
+    tune = {x: load(*x) for x in R11_TUNE}
+    ap = {}
+    for name, v in fns.items():
+        ys, ps = [], []
+        for dd in tune.values():
+            iu = np.triu_indices(len(dd["k"]), 1)
+            ys.append((dd["owner"][:, None] == dd["owner"][None, :])[iu])
+            ps.append(qm2_pair_m(v, dd)[iu])
+        y, p = np.concatenate(ys), np.concatenate(ps)
+        ap[name] = {"ap": float(average_precision_score(y, p)), "auc": float(roc_auc_score(y, p))}
+    chosen_v = max(ap, key=lambda n: ap[n]["ap"])
+    verifier = fns[chosen_v]
+    (QM2_OUT / "verifier.pkl").write_bytes(pickle.dumps({"name": chosen_v, **states[chosen_v]}))
+    out = {"verifier": ap, "chosen_verifier": chosen_v}
+    print("verifier on tuning draws:", ap, "chosen", chosen_v, flush=True)
+
+    target_of = lambda S: posterior_assign(S, 0.5)[1] < 0.5
+
+    # ---- tuning
+    rows = []
+    for (pool, dr), dd in tune.items():
+        m = qm2_pair_m(verifier, dd)
+        tg = target_of(dd["S"])
+        rows.append({"draw": dr, "arm": "base", **buckets(official(dd["S"], dd["owner"]), dd["k"])})
+        for tau, theta in itertools.product(QM2_TAUS, QM2_THETAS):
+            from scripts.identity.pid2_qmerge import merge_term
+            t = merge_term(dd["S"], m, tau, theta)
+            for beta in QM2_BETAS:
+                S2 = dd["S"].copy()
+                S2[tg] += beta * t[tg]
+                rows.append({"draw": dr, "arm": f"t{tau:g}_b{beta:g}_th{theta:g}", **buckets(official(S2, dd["owner"]), dd["k"])})
+                if beta == QM2_BETAS[0] and theta == QM2_THETAS[0] and tau == QM2_TAUS[0]:
+                    pass
+        print(f"tune draw {dr} done", flush=True)
+    tframe = pd.DataFrame(rows)
+    tframe.to_csv(QM2_OUT / "tune.csv", index=False)
+    ttab = paired(tframe, "base").sort_values("d_all", ascending=False)
+    best = ttab[ttab["arm"] != "base"].iloc[0]["arm"]
+    tau, beta, theta = (float(s[1:].lstrip("bh")) for s in best.split("_"))
+    edge = {"tau": tau in (QM2_TAUS[0], QM2_TAUS[-1]), "beta": beta in (QM2_BETAS[0], QM2_BETAS[-1]),
+            "theta": theta == QM2_THETAS[-1]}
+    out.update({"chosen_arm": best, "params": {"tau": tau, "beta": beta, "theta": theta}, "grid_edge": edge,
+                "tune_top": ttab.head(10).to_dict("records")})
+    print(ttab.head(10)[["arm", "all", "d_1", "d_2", "d_3", "d_5", "d_all", "se_all"]].round(4).to_string(index=False),
+          f"\nchosen {best} (grid edge: {edge})", flush=True)
+    rows = []                                # information only: the same parameters on every question
+    for (pool, dr), dd in tune.items():
+        m = qm2_pair_m(verifier, dd)
+        rows.append({"draw": dr, "arm": "base", **buckets(official(dd["S"], dd["owner"]), dd["k"])})
+        rows.append({"draw": dr, "arm": "all_targets", **buckets(official(
+            qm2_apply(dd["S"], m, np.ones(len(dd["k"]), bool), tau, beta, theta), dd["owner"]), dd["k"])})
+    out["tune_all_targets"] = paired(pd.DataFrame(rows), "base").to_dict("records")
+    (QM2_OUT / "report.json").write_text(json.dumps(out, indent=1, default=float))
+
+    # ---- sealed
+    out["sealed"], out["separation"], out["targets"] = {}, {}, {}
+    for label, draws in (("pool0", R11_SEAL0), ("pool1", R11_SEAL1)):
+        rows, sep, ys, ps, nt = [], [], [], [], []
+        for pool, dr in draws:
+            dd = load(pool, dr)
+            m = qm2_pair_m(verifier, dd)
+            tg = target_of(dd["S"])
+            nt.append(float(tg.mean()))
+            truth = (dd["owner"][:, None] == dd["owner"][None, :]).astype(np.float64)
+            np.fill_diagonal(truth, 0.0)
+            rows.append({"draw": dr, "arm": "base", **buckets(official(dd["S"], dd["owner"]), dd["k"])})
+            rows.append({"draw": dr, "arm": "merge", **buckets(official(qm2_apply(dd["S"], m, tg, tau, beta, theta), dd["owner"]), dd["k"])})
+            for ob in (0.5, 1.0):
+                rows.append({"draw": dr, "arm": f"oracle_b{ob:g}", **buckets(official(
+                    qm2_apply(dd["S"], truth, tg, tau, ob, 0.5), dd["owner"]), dd["k"])})
+            sep.append(separation(m, dd))
+            iu = np.triu_indices(len(m), 1)
+            ys.append(truth[iu] > 0)
+            ps.append(m[iu])
+        frame = pd.DataFrame(rows)
+        frame["pool"] = int(label[-1])
+        frame.to_csv(QM2_OUT / f"sealed_{label}.csv", index=False)
+        out["sealed"][label] = paired(frame, "base").to_dict("records")
+        y, p = np.concatenate(ys), np.concatenate(ps)
+        out["separation"][label] = {**pd.DataFrame(sep).mean().to_dict(), "ap": float(average_precision_score(y, p)),
+                                    "auc": float(roc_auc_score(y, p))}
+        out["targets"][label] = float(np.mean(nt))
+        print(f"sealed {label}:\n", paired(frame, "base").round(4).to_string(index=False),
+              f"\nseparation {label}: {out['separation'][label]}, target share {out['targets'][label]:.3f}", flush=True)
+    t1, t0 = pd.DataFrame(out["sealed"]["pool1"]), pd.DataFrame(out["sealed"]["pool0"])
+    v = verdict(t1, t0, "merge")
+    v["probe"] = bool(not v["pass"] and v["pool1_delta"] > 0 and v["pool0_delta"] > 0)
+    out["verdict"] = v
+    print("verdict:", json.dumps(v), flush=True)
+    (QM2_OUT / "report.json").write_text(json.dumps(out, indent=1, default=float))
+
+
+def items12_selfcheck() -> None:
+    """synthetic: fit_free keeps the fixed weights and recovers a planted free one; reverse_llr /
+    pair_llr are 0 at theta_pop and match a direct computation; qm2_apply leaves non-targets alone."""
+    import torch
+    rng = np.random.default_rng(5)
+    true = np.array([1.0, 0.5, 2.0, 1.0, 0.8, 0.3, 1.2, 3.0, 0.7])
+    sets = []
+    for _ in range(3):
+        X = rng.normal(size=(1500, 60, 9)) * 0.5
+        s = X @ true
+        p = np.exp(s - s.max(1, keepdims=True))
+        p /= p.sum(1, keepdims=True)
+        sets.append((X, np.array([rng.choice(60, p=r) for r in p])))
+    w0 = np.r_[true[:8], 0.0]
+    w = fit_free(sets, w0, [8], torch.device("cpu"))
+    assert np.array_equal(w[:8], true[:8]) and abs(w[8] - 0.7) < 0.15, w
+    n, d = 600, 5
+    phi = torch.from_numpy(rng.normal(size=(n, OPTIONS, d)).astype(np.float16))
+    b = torch.log_softmax(torch.from_numpy(rng.normal(size=(n, OPTIONS)).astype(np.float32)), dim=1)
+    slot = torch.from_numpy(rng.integers(0, OPTIONS, n))
+    games = [np.arange(i * 50, i * 50 + 50) for i in range(12)]
+
+    def positions_of(gl):
+        pos = np.concatenate([np.concatenate([games[g] for g in grp]) for grp in gl])
+        own = np.concatenate([np.full(sum(len(games[g]) for g in grp), i) for i, grp in enumerate(gl)])
+        return torch.from_numpy(pos), torch.from_numpy(own)
+
+    prior = torch.zeros(d, dtype=torch.float64)
+    th = torch.from_numpy(rng.normal(size=(3, d)))
+    gallery, query = [[0, 1], [2, 3, 4], [5]], [[6], [7, 8], [9, 10, 11]]
+    r = reverse_llr(phi, b, slot, positions_of, gallery, th, prior, None)
+    assert np.abs(reverse_llr(phi, b, slot, positions_of, gallery, prior[None].repeat(3, 1), prior, None)).max() < 1e-9
+    direct = np.zeros((3, 3))
+    for qi in range(3):
+        for ci, grp in enumerate(gallery):
+            pos = torch.from_numpy(np.concatenate([games[g] for g in grp]))
+            lp = played_logp(phi, b, slot, pos, torch.stack([th[qi], prior]))
+            direct[qi, ci] = float((lp[:, 0] - lp[:, 1]).sum())
+    assert np.abs(r - direct).max() < 1e-9
+    pl, nm = pair_llr(phi, b, slot, positions_of, query, th, prior, None)
+    assert pl.shape == (3, 3) and nm.tolist() == [50, 100, 150]
+    S = rng.normal(size=(6, 4))
+    m = np.ones((6, 6)) - np.eye(6)
+    tg = np.array([True, False, True, False, False, False])
+    S2 = qm2_apply(S, m, tg, 1.0, 0.5, 0.0)
+    assert np.array_equal(S2[~tg], S[~tg]) and not np.allclose(S2[tg], S[tg])
+    dd = {"S": S, "k": np.array([1, 2, 3, 5, 1, 2]), "assign": np.array([0, 0, -1, 1, -1, 1]),
+          "LLRp": rng.normal(size=(6, 6)), "n_moves": np.full(6, 100.0),
+          **{n_: rng.normal(size=(6, 6)) for n_ in QM2_PAIR_PARTS}}
+    f = qm2_features(dd)
+    assert f.shape[:2] == (6, 6) and np.allclose(f, f.transpose(1, 0, 2))
+    assert f[0, 1, -3] == 1 and f[2, 4, -3] == 0
+    print("items 1/2 selfcheck ok", {"add1_weight": round(float(w[8]), 3), "features": int(f.shape[2])}, flush=True)
+
+
 def official_builder(part: str, choice: dict, cache_dir: Path):
     """(comp7, local category codes) for one official added-set part: the 7 non-LLR fusion parts
     for arbitrary gallery / query lists in local game rows (pool rows, then question rows), rebuilt
