@@ -4374,6 +4374,7 @@ GPU 效能與正式分數尚未驗證。第二階段獨立手動提交，沒有 
     - 驗證台 `draw` 可輸出 8 個分項：opening、category、λ₁·L1、λ₂·L2，各編碼器在倍率 1.5 下的風格項，以及 LLR。分項和與原融合一致（assert）。
     - 新增 `evaluate5`、`export --eb --combine`。
     - 現行權重寫成每 k 一組：[1, 1, 1, 1, m_k/1.5 ×3, λ＝4]。
+  - **作業：** Slurm 820927（`likelihood_combine.slurm`）。
   - **臂：**
     - FULL：每 k 8 權重自由。
     - SMALL：每 k 只學風格倍率與 λ。
