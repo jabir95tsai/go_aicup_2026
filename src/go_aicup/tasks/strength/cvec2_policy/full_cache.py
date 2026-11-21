@@ -192,7 +192,8 @@ def _merge(fit, e2):
         np.concatenate([fit.offsets, e2.offsets]))
 
 
-def overlap(games, n_fit, out, planes_dir, config, nominal_fit, nominal_e2, on_fit, *, smoke=False, abort=None):
+def overlap(games, n_fit, out, planes_dir, config, nominal_fit, nominal_e2, on_fit, *,
+            phase_started, smoke=False, abort=None):
     """Run both teachers, let C10 devices finish H15 fit work, then publish fit before H15 E2."""
     _check_devices_and_games(games)
     if tuple(config["profiles_H"]) != PROFILES:
@@ -201,7 +202,6 @@ def overlap(games, n_fit, out, planes_dir, config, nominal_fit, nominal_e2, on_f
         raise ValueError("fit and E2 require distinct nonempty game ranges")
     if abort is None:
         abort = Event()
-    started = time.monotonic()
     fit, e2 = games.iloc[:n_fit].reset_index(drop=True), games.iloc[n_fit:].reset_index(drop=True)
     readers = [PlaneReader(planes_dir, rows, groups=(group,)).batches
                for group, rows in (("fit", fit), ("e2", e2))]
@@ -230,7 +230,7 @@ def overlap(games, n_fit, out, planes_dir, config, nominal_fit, nominal_e2, on_f
         worker = cache.TeacherWorker("C", config, device)
         c_reports = [store.process(worker, index, *store.ranges[index], abort) for store in stores["C"]]
         del worker
-        c_ready = time.monotonic() - started
+        c_ready = time.monotonic() - phase_started
         helpers = []
         task = work.take(index, helper=True) if not abort.is_set() else None
         if task is not None:
@@ -252,13 +252,13 @@ def overlap(games, n_fit, out, planes_dir, config, nominal_fit, nominal_e2, on_f
             aligned = time.monotonic()
             fit_joint = JointCache(h_fit.finish(), c_fit.finish())
             fit_alignment_seconds = time.monotonic() - aligned
-            fit_ready = time.monotonic() - started
+            fit_ready = time.monotonic() - phase_started
             on_fit(fit_joint)
-            e2_start = time.monotonic() - started
+            e2_start = time.monotonic() - phase_started
             futures = {pool.submit(h_e2.process, h_results[i][0], i, *h_e2.ranges[i], abort): i
                        for i in range(4)}
             e2_results = dict(_wait(futures, abort))
-            e2_end = time.monotonic() - started
+            e2_end = time.monotonic() - phase_started
     except BaseException:
         abort.set()
         raise
@@ -283,7 +283,7 @@ def overlap(games, n_fit, out, planes_dir, config, nominal_fit, nominal_e2, on_f
     helpers = _worker_reports(helper_reports)
     write_json(out / "teacher_overlap.json", {
         "fit_ready_seconds": fit_ready, "e2_start_seconds": e2_start, "e2_end_seconds": e2_end,
-        "elapsed_seconds": time.monotonic() - started,
+        "elapsed_seconds": time.monotonic() - phase_started,
         "c10_ready_seconds": max(row[2] for row in c_results.values()),
         "h_helper_positions": sum(row["positions"] for row in helpers),
         "h_helper_games": sum(row["games"] for row in helpers),

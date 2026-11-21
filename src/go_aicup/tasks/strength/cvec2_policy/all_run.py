@@ -229,15 +229,16 @@ def gpu_phase(out, data, config):
 
     def run_teachers():
         try:
-            teacher_started = monotonic()
             cache = full_cache.overlap(data.games, n_fit, out, Path(config["planes"]), config["teacher_config"],
-                                       nominal_fit, nominal_e2, on_fit, smoke=smoke, abort=abort)
+                                       nominal_fit, nominal_e2, on_fit, phase_started=started,
+                                       smoke=smoke, abort=abort)
             summary["teacher_parity"] = teacher_parity(cache, data.expected, out / "teacher_parity.json")
             summary["teacher_seconds"] = monotonic() - started
             overlap = read_json(out / "teacher_overlap.json")
-            before_teacher = teacher_started - started
-            summary["e2_start_seconds"] = before_teacher + overlap["e2_start_seconds"]
-            summary["e2_end_seconds"] = before_teacher + overlap["e2_end_seconds"]
+            summary["e2_start_seconds"] = overlap["e2_start_seconds"]
+            summary["e2_end_seconds"] = overlap["e2_end_seconds"]
+            if not summary["fit_ready_seconds"] <= summary["e2_start_seconds"] <= summary["e2_end_seconds"]:
+                raise ValueError("E2 timestamps differ from the fitting-cache release timeline")
             if smoke:
                 check_smoke_teachers(out, overlap)
             return cache
