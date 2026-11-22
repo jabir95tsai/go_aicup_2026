@@ -4769,6 +4769,36 @@ GPU 效能與正式分數尚未驗證。第二階段獨立手動提交，沒有 
   - KataGo 強網路的著手品質特徵：本質上也是棋力訊號，競賽二本身 −0.0024，重跑引擎需數小時 GPU。
 - **使用者同意結案**，不做真實級別上限診斷。競賽一基底與最終上傳檔維持 `824896-comb-pseudo.csv`。
 
+### 2026-11-22：競賽一——最終檔重現性稽核（使用者「做重現性稽核」）
+
+- **目的：** 確認 `824896-comb-pseudo.csv` 能由已 commit 的程式從原始測試檔重新產生，逐位元組相同。報告要求可重現的程式碼。
+- **範圍：**
+  - **重算：** 所有由官方測試檔衍生的東西。原始 CSV 由 `data/raw/raw.zip` 重新解壓；store、棋盤快取、原測試集預測（含 GE2E 保險與 Hungarian）、新增集開局／類別／v4 風格、seqB／A1／A2 向量、L1／L2 多層鍵、HumanSL 逐手 policy、豐富逐手特徵、各階段匯出，全部重新計算。
+  - **凍結（不重算）：** 訓練權重；在驗證台擬合的參數（θ_pop、EB 精度矩陣、融合權重、偽標籤設定、多層開局設定、bench summary）；訓練資料快取。重新訓練或重新擬合要數小時到數天，不在本次範圍。
+  - 中間提交檔（772748-hung、hung-seqB、ogsa12w、820880、821010）複製進來，只當各步驟斷言比對的參考。
+- **做法：** `scripts/release/repro_pid_setup.sh` 以 git worktree 建乾淨樹 `/work/jason1122/repro_pid_1122`（commit 856bf0c），未 commit 的程式無法被用到。凍結資源以符號連結指回主 repo，官方衍生的目錄全部是空的新目錄。`scripts/release/repro_pid_run.sh` 依原作業的 sacct 送出指令依序重跑 12 個步驟。
+- **判定：**
+  - 主要：重算的 824896 對原檔逐位元組相同。
+  - 另比：817714-lik、820880、821010、hung-seqB-ml 四個中間檔；原測試集兩個 Hungarian 預測對 824896 的 pub_／priv_ 列；各中間分項的最大差。
+  - 不同時，逐步找出第一個出現差異的地方，並記錄是否改變排名。
+- **已送（11/22 11:29）：** Slurm 839311 在第 1 步失敗：store 的符號連結指向尚未建立的目錄，`mkdir(exist_ok=True)` 對懸空連結報錯。已改 setup 腳本先建目錄，重送 **839312**。
+- **結果（839312，1 小時 7 分）：通過，全部逐位元組相同。** 比對報告 `outputs/pid/repro_1122/report.json`（`scripts/release/repro_pid_compare.py`）。
+  - **提交檔（sha256 前 8 碼）：**
+    - `824896-comb-pseudo.csv`：`d069d70a`＝`d069d70a`；
+    - 中間檔 817714-lik `a18265ba`、820880-likeb `84c2b61b`、821010-comb-probe `e9d19c07`、hung-seqB-ml 皆與原檔相同；
+    - 1,600 列 0 列不同。
+  - **原測試集：** 重算的 public／private Hungarian 預測與 11/12 的 756474 原檔逐位元組相同，與 824896 的 pub_／priv_ 800 列 0 列不同。
+  - **中間分項（最大絕對差）：**
+    - 開局、類別、L1／L2、A2 風格、HumanSL 逐手 policy（`positions.npz`）、豐富特徵（官方與驗證台）、三個編碼器的官方盤向量、LLR：皆為 **0.0**；
+    - seqB／A1 風格項 ≤1.8e-14，正式 θ ≤2.2e-15，融合分數 ≤2.3e-13，屬浮點加總順序的差。
+    - 同一程式碼、同一 H200 型號下，GPU 推論逐值重現。
+  - **主 repo 未被寫入：** 重跑期間主 repo 的 `outputs/pid`、`data/processed/identity`、`submissions/pid`、`data/raw` 沒有任何檔案被修改（以時間戳記比對）。
+  - **耗時：** store 15 秒；原測試集 11 分；新增集 2 分；seqB 4 分；A1／A2 15 分；多層鍵 20 秒；HumanSL 官方 policy 19 分；豐富特徵 28 秒；三次匯出 14 分。
+- **限制（報告須說明）：**
+  - 凍結資源未在本次重算：GE2E v4、seqB 頭、A1／A2、C v2 級別向量、HumanSL 權重；以及驗證台擬合的參數。這些是報告要繳交的「訓練權重與參數」。
+  - 重新擬合這些參數所需的驗證台逐手快取，有一部分放在 repo 之外（`/home/jason1122/pid2_seqagg_cache`、`/work/jason1122/ogs_a1_cache`、`/home/jason1122/ogs_runs/a2_cache`）。正式匯出不讀取它們，但重跑評估（evaluate4／5／8）時需要。
+  - 不同 GPU 型號或驅動下是否仍逐值相同，未測。
+
 ### 2026-11-21：競賽二——題目軟合併＋兩種指紋（使用者「先做第 1 項軟合併」；事前登記，看結果前寫定）
 
 - 計畫與判定見 [RANK_QMERGE_PLAN.md](RANK_QMERGE_PLAN.md) §7。要點：同人機率 w 以風格分數＋開局分數的 logistic regression 估計（在 1,182 位編碼器未見玩家的參考配對上擬合，seed 2033），測試的同人比例 π 以 EM 估計；w≥0.5 連成硬核心，0.05≤w<0.5 做軟混合，score_rank 解碼。

@@ -37,7 +37,7 @@ mv "$NEW/data/raw/_unzip/raw/tests" "$NEW/data/raw/tests"; rm -r "$NEW/data/raw/
 link_all_except "$MAIN/data/processed" "$NEW/data/processed" identity
 link_all_except "$MAIN/data/processed/identity" "$NEW/data/processed/identity" artifacts likelihood
 link_all_except "$MAIN/data/processed/identity/artifacts" "$NEW/data/processed/identity/artifacts" day0_1112
-mkdir -p "$NEW/data/processed/identity/artifacts/day0_1112"                       # fresh store
+mkdir -p "$NEW/data/processed/identity/artifacts/day0_1112/store"                 # fresh store
 link_all_except "$MAIN/data/processed/identity/likelihood" "$NEW/data/processed/identity/likelihood" rich
 mkdir -p "$NEW/data/processed/identity/likelihood/rich"                           # fresh bench + official
 
