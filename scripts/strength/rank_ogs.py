@@ -149,7 +149,7 @@ def evaluate(args) -> None:
     uniq = np.unique(players)
     held = set(np.random.default_rng(SEED).permutation(uniq)[:len(uniq) // 5])
     test_mask = np.isin(players, list(held))
-    h_cols = [c for c in rows.columns if c.startswith(("own_", "opp_"))]
+    h_cols = [f"own_{j}" for j in range(15)] + [f"opp_{j}" for j in range(15)]   # not opp_rank
     sanity = regressor().fit(rows.loc[~test_mask, h_cols].to_numpy(), rows.loc[~test_mask, "rank"].to_numpy())
     pred = sanity.predict(rows.loc[test_mask, h_cols].to_numpy())
     truth = rows.loc[test_mask, "rank"].to_numpy()
@@ -206,8 +206,15 @@ def evaluate(args) -> None:
 
 
 def export(g_model, fit, eval_games, x_fit, x_eval, g_fit, g_eval, job: str) -> dict:
+    u = (eval_games["handicap"] <= 1).to_numpy()
+    return export_arm(np.vstack([g_fit, g_eval[u]]), lambda h: g_features(g_model, h), "ogs-l10",
+                      fit, eval_games, x_fit, x_eval, job)
+
+
+def export_arm(extra_stacked, extra_test, tag, fit, eval_games, x_fit, x_eval, job: str) -> dict:
     """Refit on Valid-S + train20 + Valid-U HD<=1 (the base recipe, H+C arm must reproduce 751959-cvec2),
-    then the 826812 question merge groups and the L10 overlay."""
+    then the 826812 question merge groups and the L10 overlay. extra_stacked = the new columns of the stacked
+    pool rows; extra_test(h) = the new columns of test games from their H [own 15 | opp 15]."""
     from go_aicup.data.board_cache import RANKS
     from go_aicup.tasks.strength.humansl import k_bucket
     from go_aicup.tasks.strength.submission_files import write_rank_csv
@@ -219,7 +226,7 @@ def export(g_model, fit, eval_games, x_fit, x_eval, g_fit, g_eval, job: str) -> 
     stacked = pd.concat([fit, eval_games[u]], ignore_index=True)
     prior = more.player_prior(pd.concat([fit[fit["role"] == "S"], eval_games[u]], ignore_index=True))
     models = {"hc": prod._fit(stacked, np.vstack([x_fit, x_eval[u]]), prior, 2027),
-              "ogs": prod._fit(stacked, np.vstack([np.hstack([x_fit, g_fit]), np.hstack([x_eval, g_eval])[u]]), prior, 2027)}
+              "new": prod._fit(stacked, np.hstack([np.vstack([x_fit, x_eval[u]]), extra_stacked]), prior, 2027)}
     xs, gis, qs, shift = [], [], [], 0
     for part in ("public", "private"):
         x, gi, questions = prod.test_data(part)
@@ -228,10 +235,10 @@ def export(g_model, fit, eval_games, x_fit, x_eval, g_fit, g_eval, job: str) -> 
         xs.append(x), gis.append(gi + shift), qs.append(q)
         shift += int(gi.max()) + 1
     x, gi, questions = np.vstack(xs), np.concatenate(gis), pd.concat(qs, ignore_index=True)
-    x_ogs = np.hstack([x, g_features(g_model, x[:, :30])])
+    x_new = np.hstack([x, extra_test(x[:, :30])])
     base = pd.read_csv(prod.BASE, dtype=str).set_index("question_id")["pred_rank"]
     preds = {}
-    for arm, xx in (("hc", x), ("ogs", x_ogs)):
+    for arm, xx in (("hc", x), ("new", x_new)):
         sep = pd.Series([RANKS[r] for r in score_rank(models[arm].probabilities(xx, gi, questions))],
                         index=questions["question_id"]).loc[base.index]
         groups = qm.groups_from_pairs(pd.read_csv(qm.PAIRS))
@@ -251,14 +258,29 @@ def export(g_model, fit, eval_games, x_fit, x_eval, g_fit, g_eval, job: str) -> 
     current = pd.read_csv(ROOT / "submissions" / "rank" / "826812-qm-l10.csv", dtype=str).set_index("question_id")["pred_rank"]
     if (preds["hc"][1] != current).any():
         raise ValueError("H+C merge + L10 does not reproduce 826812-qm-l10.csv")
-    new = preds["ogs"][1]
+    new = preds["new"][1]
     diff = new != current
     order = {r: i for i, r in enumerate(RANKS)}
     return {"public": int(diff[diff.index.str.startswith("pub")].sum()),
             "private": int(diff[diff.index.str.startswith("priv")].sum()),
             "steps": {str(int(s)): int(n) for s, n in (new[diff].map(order) - current[diff].map(order)).value_counts().sort_index().items()},
             "distribution": new.value_counts().reindex(RANKS, fill_value=0).tolist(),
-            "file": write_rank_csv(new.rename("pred_rank").reset_index(), "ogs-qm-l10", job).name}
+            "file": write_rank_csv(new.rename("pred_rank").reset_index(), tag, job).name}
+
+
+def export_yugen(args) -> None:
+    """Control arm as an LB probe (user 11/22: any local gain may be uploaded). Pool features are player-grouped
+    out-of-fold over the whole export pool; test features come from the regressor fitted on the whole pool."""
+    import scripts.strength.rank_prod_a0_fusion as prod
+    fit, eval_games, x_fit, x_eval = prod.train_data()
+    u = (eval_games["handicap"] <= 1).to_numpy()
+    pool = pd.concat([fit, eval_games[u]], ignore_index=True)
+    x_pool = np.vstack([x_fit, x_eval[u]])
+    oof, _, full = yugen_oof(pool, x_pool, x_pool[:1])
+    out = export_arm(oof, lambda h: g_features(full, h), "ygbm-l10", fit, eval_games, x_fit, x_eval, args.job)
+    out["oof_corr_rank"] = float(np.corrcoef(oof[:, 0], pool["rank_id"])[0, 1])
+    print(json.dumps(out, indent=1), flush=True)
+    (OUT / f"export_yugen_{args.job}.json").write_text(json.dumps(out, indent=1))
 
 
 def main() -> None:
@@ -269,6 +291,9 @@ def main() -> None:
     p.add_argument("--shard", type=int, required=True)
     p.add_argument("--num-shards", type=int, required=True)
     p.set_defaults(fn=extract)
+    p = sub.add_parser("export-yugen")
+    p.add_argument("--job", default="local")
+    p.set_defaults(fn=export_yugen)
     p = sub.add_parser("evaluate")
     p.add_argument("--job", default="local")
     p.add_argument("--force-export", action="store_true", help="write the file even if the gate fails (LB probe)")
