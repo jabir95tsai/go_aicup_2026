@@ -201,6 +201,19 @@ def test_weighted_chunk_gradient_and_uniform_start():
     assert not list(head.parameters())
 
 
+def test_extract_all_rows_without_e2(tmp_path):
+    cache, raw, *_ = inputs()
+    arm = "A/R10-D"
+    path = tmp_path / arm
+    path.mkdir(parents=True)
+    model = encoder.build("R10", True, 2027, raw_a=True)
+    torch.save({"arm": arm, "identity": "test", "mother_sha256": None,
+                "model": model.state_dict()}, path / "model.pt")
+    joint.extract_one(arm, cache, raw, torch.device("cpu"), tmp_path, "test", len(raw))
+    np.testing.assert_array_equal(np.load(path / "fit.npy"), raw)
+    assert np.load(path / "e2.npy").shape == (0, 52)
+
+
 @pytest.mark.parametrize("arm", ["A/R10-C", "A/CNN-R10-D-weighted"])
 def test_resume_and_extract(arm, tmp_path, monkeypatch):
     cache, raw, initial, questions, labels, k = inputs()

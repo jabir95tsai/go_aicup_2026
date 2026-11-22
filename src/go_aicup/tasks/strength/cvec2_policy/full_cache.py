@@ -101,7 +101,7 @@ def _check_devices_and_games(games):
         raise ValueError("invalid cvec2 handicap metadata")
 
 
-def infer(games, out, planes_dir=None, config=None, nominal_lengths=None):
+def infer(games, out, planes_dir=None, config=None, nominal_lengths=None, *, reader=None):
     """Stream each teacher into four GPU shards and join them as batches are read."""
     _check_devices_and_games(games)
     plane_batches = None
@@ -116,7 +116,7 @@ def infer(games, out, planes_dir=None, config=None, nominal_lengths=None):
         teacher_games = games.assign(handicap=games.handicap.eq(1).astype(np.int64))
     else:
         teacher_games = games
-        plane_batches = PlaneReader(planes_dir, teacher_games).batches
+        plane_batches = (reader or PlaneReader(planes_dir, teacher_games)).batches
     if config is None:
         config = a_config() if planes_dir is not None else json.loads(
             (ROOT / "configs/strength/policy_large_200k.json").read_text()
@@ -193,7 +193,7 @@ def _merge(fit, e2):
 
 
 def overlap(games, n_fit, out, planes_dir, config, nominal_fit, nominal_e2, on_fit, *,
-            phase_started, smoke=False, abort=None):
+            phase_started, smoke=False, abort=None, groups=(("fit",), ("e2",))):
     """Run both teachers, let C10 devices finish H15 fit work, then publish fit before H15 E2."""
     _check_devices_and_games(games)
     if tuple(config["profiles_H"]) != PROFILES:
@@ -203,8 +203,8 @@ def overlap(games, n_fit, out, planes_dir, config, nominal_fit, nominal_e2, on_f
     if abort is None:
         abort = Event()
     fit, e2 = games.iloc[:n_fit].reset_index(drop=True), games.iloc[n_fit:].reset_index(drop=True)
-    readers = [PlaneReader(planes_dir, rows, groups=(group,)).batches
-               for group, rows in (("fit", fit), ("e2", e2))]
+    readers = [PlaneReader(planes_dir, rows, groups=names).batches
+               for names, rows in zip(groups, (fit, e2), strict=True)]
     stores = {}
     for family in ("H", "C"):
         fit_store = cache.TeacherStore(family, fit, config, readers[0], nominal_fit)

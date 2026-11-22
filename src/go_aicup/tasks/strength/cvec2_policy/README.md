@@ -102,3 +102,49 @@ on smaller draws from the fixed question tables and scores one E2 question per k
 Use the short run for engineering metrics. It has no candidate selection.
 The per-arm peer byte count measures payload gathered across GPUs, and
 `gpu_samples.csv` records device memory usage.
+
+## Four full-pool Public LB candidates
+
+The full pool uses all 183,271 HD0/HD1 games from the existing fit, E2 and
+reserve groups. It draws 20,000 questions per k from their shared release
+prior. A fits a fresh linear B2 on the original H15/C10 features. R10-D and
+CNN-R10-D start with fresh encoders and independently fitted initial heads,
+reuse a single resident H15/C10 cache for training, then refit each final B2
+on the completed encoder's 52-column features. No arm uses E2 for selection.
+
+The fourth arm trains a randomly initialized five-block network from the
+HumanSL checkpoint configuration. It adds a bounded, zero-sum probability
+correction to frozen H15. The completed R10-D and its final B2 stay frozen.
+Each update draws eight questions per k and averages the four bucket losses
+with relative weights 1/1/2/2. The training correction uses up to eight moves
+per side of each game, sampled once with seed 2027. Official inference applies
+the correction to all moves. The fourth arm reuses R10-D's saved full-pool
+features as its training baseline and publishes its checkpoint without another
+full-pool feature pass.
+
+```bash
+SOURCE_RUN=outputs/rank/humansl/cvec2_policy/all/821286-mask-reuse \
+  sbatch src/go_aicup/tasks/strength/cvec2_policy/full_pool.slurm
+```
+
+The Slurm entry runs full-pool training and then official inference on both
+parts. It saves the heads, checkpoints and draw table under
+`outputs/rank/humansl/cvec2_policy/full_pool/<job>/`. Its `official/` report
+includes the applied L10 changes and per-k counts against the recent CSVs.
+All four export candidates use the same L10 overrides. Official scores come
+from the user's manual Public LB submissions.
+
+To export the two historical encoders with the seed-2028 refitted B2 heads,
+run the following on an eight-card compute node with the `go` environment
+and `PYTHONPATH="$PWD/src:$PWD"`:
+
+```bash
+RUN=outputs/rank/humansl/cvec2_policy/all/821286-mask-reuse
+python -m go_aicup.tasks.strength.cvec2_policy.official \
+  --run "$RUN" --refit "$RUN/d-b2-refit-seed2028-839548" \
+  --out "outputs/rank/humansl/cvec2_policy/official/$SLURM_JOB_ID"
+```
+
+`--preflight` runs the official board, question, handicap and input checks on
+CPU. Both exports record the files and their fingerprints in
+`submissions.json`.

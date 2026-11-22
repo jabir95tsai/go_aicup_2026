@@ -304,8 +304,8 @@ def extract_one(arm, cache, raw, device, out, identity, n_fit, abort=None):
     final = path / "model.pt"
     manifest = path / "features.json"
     digest = file_hash(final)
-    if not 0 < n_fit < len(raw):
-        raise ValueError("fit and E2 feature ranges must be nonempty")
+    if not 0 < n_fit <= len(raw):
+        raise ValueError("invalid fit feature range")
     anchor, weighted, architecture, full = parse_arm(arm)
     parent_digest = file_hash(out / anchor / MOTHER / "model.pt") if weighted else None
     saved = load_checkpoint(final, arm, identity, parent_digest)
