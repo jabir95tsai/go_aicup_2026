@@ -20,6 +20,7 @@ question's own moves of log p_c - log p_pop; fused as S + lambda * LLR.
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import math
 import multiprocessing as mp
@@ -2391,7 +2392,7 @@ def evaluate11(_args) -> None:
     from sklearn.metrics import average_precision_score, roc_auc_score
 
     from scripts.identity.pid2_cheap import buckets, official, paired, verdict
-    from scripts.identity.pid2_qmerge import separation
+    from scripts.identity.pid2_qmerge import merge_term, separation
 
     (QM2_OUT / "draws").mkdir(parents=True, exist_ok=True)
     ctx = _llr_setup()
@@ -2455,14 +2456,11 @@ def evaluate11(_args) -> None:
         tg = target_of(dd["S"])
         rows.append({"draw": dr, "arm": "base", **buckets(official(dd["S"], dd["owner"]), dd["k"])})
         for tau, theta in itertools.product(QM2_TAUS, QM2_THETAS):
-            from scripts.identity.pid2_qmerge import merge_term
             t = merge_term(dd["S"], m, tau, theta)
             for beta in QM2_BETAS:
                 S2 = dd["S"].copy()
                 S2[tg] += beta * t[tg]
                 rows.append({"draw": dr, "arm": f"t{tau:g}_b{beta:g}_th{theta:g}", **buckets(official(S2, dd["owner"]), dd["k"])})
-                if beta == QM2_BETAS[0] and theta == QM2_THETAS[0] and tau == QM2_TAUS[0]:
-                    pass
         print(f"tune draw {dr} done", flush=True)
     tframe = pd.DataFrame(rows)
     tframe.to_csv(QM2_OUT / "tune.csv", index=False)
@@ -2560,7 +2558,7 @@ def items12_selfcheck() -> None:
             pos = torch.from_numpy(np.concatenate([games[g] for g in grp]))
             lp = played_logp(phi, b, slot, pos, torch.stack([th[qi], prior]))
             direct[qi, ci] = float((lp[:, 0] - lp[:, 1]).sum())
-    assert np.abs(r - direct).max() < 1e-9
+    assert np.abs(r - direct).max() < 1e-4, np.abs(r - direct).max()     # float32 inside played_logp
     pl, nm = pair_llr(phi, b, slot, positions_of, query, th, prior, None)
     assert pl.shape == (3, 3) and nm.tolist() == [50, 100, 150]
     S = rng.normal(size=(6, 4))
@@ -2719,6 +2717,22 @@ def export(args) -> None:
             pseudo["second"] = {"tau": float(r9["chosen_config"]["tau"]), "rounds": int(r9["chosen_config"]["rounds"]),
                                 "W": {int(k): np.array(w_, np.float64) for k, w_ in r9["refit"]["weights"].items()}}
             tag = tag.replace("-pseudo-probe", "-pseudo").replace("-pseudo", "-pseudo2" if v9["pass"] else "-pseudo2-probe")
+        assert not (args.rllr and args.qmerge2), "items 1 and 2 were tested separately; no combined file this round"
+        assert not ((args.rllr or args.qmerge2) and args.pseudo2), "--rllr / --qmerge2 stack on the 824896 setting"
+        if args.rllr:                      # reverse LLR as a 9th part (evaluate10)
+            r10 = json.loads((RL_OUT / "report.json").read_text())
+            v10 = r10["sealed"]["verdict"]
+            assert v10["pass"] or v10["probe"], "the reverse LLR neither passed nor qualifies as a probe"
+            assert not args.colour and v8["pass"] and pseudo == {"tau": 0.5, "rounds": 2}
+            pseudo["rllr"] = {int(k): np.array(w_, np.float64) for k, w_ in r10["chosen"]["weights"].items()}
+            tag = tag + ("-rllr" if v10["pass"] else "-rllr-probe")
+        if args.qmerge2:                   # question merging v2 (evaluate11)
+            r11 = json.loads((QM2_OUT / "report.json").read_text())
+            v11 = r11["verdict"]
+            assert v11["pass"] or v11["probe"], "the merge neither passed nor qualifies as a probe"
+            assert not args.colour and v8["pass"] and pseudo == {"tau": 0.5, "rounds": 2}
+            pseudo["qm2"] = r11["params"]
+            tag = tag + ("-qm2" if v11["pass"] else "-qm2-probe")
     target = SUB / f"{job}-{tag}.csv"
     assert not target.exists(), target
     device = torch.device("cuda")
@@ -2861,6 +2875,41 @@ def export(args) -> None:
                     Xp, _ = expand(comp, gal_l, qry_l, a, X, codes_local)
                     S = fuse(base_f, Xp, ks, z)
                 ranked = cand[top5(S)]
+                pos_local = lambda gl: positions_of([np.asarray(g) + p_i * 1_000_000 for g in gl])
+                if "rllr" in pseudo or "qm2" in pseudo:     # the first pass must give the current base file
+                    cur_file = pd.read_csv(SUB / "824896-comb-pseudo.csv", dtype=str).set_index("question_id")
+                    np.testing.assert_array_equal(ranked, cur_file.loc[qids, COLS].to_numpy())
+                    thq = question_thetas(PHI, B, SLOT, pos_local, qry_l, theta_pop, rich_mask, precision)
+                if "rllr" in pseudo:
+                    W9 = pseudo["rllr"]
+
+                    def comp9(gal, qry, cat_prior=None):
+                        assert len(qry) == len(qry_l)
+                        rl_ = reverse_llr(PHI, B, SLOT, pos_local, gal, thq, theta_pop, rich_mask)
+                        return np.concatenate([comp(gal, qry, cat_prior), rl_[:, :, None]], axis=2)
+
+                    rl0 = reverse_llr(PHI, B, SLOT, pos_local, gal_l, thq, theta_pop, rich_mask)
+                    X9 = np.concatenate([X, rl0[:, :, None]], axis=2)
+                    np.testing.assert_array_equal(cand[top5(apply_weights(X9, ks, {k: np.r_[comb[k], 0.0] for k in KS}))],
+                                                  cand[top5(S0)])
+                    _x9, a, S9 = pseudo_rounds(comp9, gal_l, qry_l, X9, ks, W9, codes_local)
+                    ranked = cand[top5(S9)]
+                    report.setdefault("rllr", {})[prefix] = {"rllr_alone_agrees_with_base_top1": float(
+                        (cand[rl0.argmax(1)] == cur_file.loc[qids, "top_1"].to_numpy()).mean())}
+                if "qm2" in pseudo:
+                    prm = pseudo["qm2"]
+                    pp = comp7(qry_l, qry_l)
+                    lpp, nm = pair_llr(PHI, B, SLOT, pos_local, qry_l, thq, theta_pop, rich_mask)
+                    dd = {"S": S, "k": ks, "assign": a, "LLRp": lpp, "n_moves": nm, **{n: pp[n] for n in QM2_PAIR_PARTS}}
+                    m = qm2_pair_m(qm2_load_verifier(), dd)
+                    tg = posterior_assign(S, 0.5)[1] < 0.5
+                    S2 = qm2_apply(S, m, tg, prm["tau"], prm["beta"], prm["theta"])
+                    ranked = cand[top5(S2)]
+                    gated = np.where(m >= prm["theta"], m, 0.0) if prm["theta"] > 0 else m
+                    report.setdefault("qm2", {})[prefix] = {
+                        "targets": int(tg.sum()), "targets_by_k": {int(k): int(tg[ks == k].sum()) for k in KS},
+                        "mass_per_target": float(gated[tg].sum(1).mean()) if tg.any() else 0.0,
+                        "pairs_m_ge_0.5": int((np.triu(m, 1) >= 0.5).sum())}
                 if "second" in pseudo:     # the first pass must give the current base file
                     cur_file = pd.read_csv(SUB / "824896-comb-pseudo.csv", dtype=str).set_index("question_id")
                     np.testing.assert_array_equal(ranked, cur_file.loc[qids, COLS].to_numpy())
@@ -2977,6 +3026,7 @@ def selfcheck(_args) -> None:
     combiner_selfcheck()
     colour_selfcheck()
     pseudo_selfcheck()
+    items12_selfcheck()
     print("selfcheck ok", flush=True)
 
 
@@ -2999,6 +3049,8 @@ def main() -> None:
     sub.add_parser("evaluate7")
     sub.add_parser("evaluate8")
     sub.add_parser("evaluate9")
+    sub.add_parser("evaluate10")
+    sub.add_parser("evaluate11")
     e = sub.add_parser("export")
     e.add_argument("--workers", type=int, default=11)
     e.add_argument("--round2", action="store_true", help="use the round-2 choice (refuses if it kept B0)")
@@ -3010,11 +3062,13 @@ def main() -> None:
     e.add_argument("--pseudo", action="store_true", help="with --combine [--colour]: pseudo-label expansion (passed or probe)")
     e.add_argument("--colour", action="store_true", help="with --combine: colour-dependent weights (passed or probe)")
     e.add_argument("--eb-lambda", action="store_true", help="with --eb: the widened-grid lambda (refuses unless it passed)")
+    e.add_argument("--rllr", action="store_true", help="with --pseudo: reverse LLR as a 9th part (evaluate10, passed or probe)")
+    e.add_argument("--qmerge2", action="store_true", help="with --pseudo: question merging v2 (evaluate11, passed or probe)")
     sub.add_parser("selfcheck")
     args = parser.parse_args()
     {"games": games, "policy": policy, "evaluate": evaluate, "evaluate2": evaluate2, "export": export,
      "rich-features": rich_features_cmd, "evaluate3": evaluate3, "evaluate4": evaluate4, "evaluate5": evaluate5, "evaluate6": evaluate6, "evaluate7": evaluate7, "evaluate8": evaluate8, "evaluate9": evaluate9,
-     "selfcheck": selfcheck}[args.cmd](args)
+     "evaluate10": evaluate10, "evaluate11": evaluate11, "selfcheck": selfcheck}[args.cmd](args)
 
 
 if __name__ == "__main__":
