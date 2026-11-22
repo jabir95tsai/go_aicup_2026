@@ -2729,10 +2729,10 @@ def export(args) -> None:
         if args.qmerge2:                   # question merging v2 (evaluate11)
             r11 = json.loads((QM2_OUT / "report.json").read_text())
             v11 = r11["verdict"]
-            assert v11["pass"] or v11["probe"], "the merge neither passed nor qualifies as a probe"
+            assert v11["pass"] or v11["probe"] or args.user_request, "the merge neither passed nor qualifies as a probe"
             assert not args.colour and v8["pass"] and pseudo == {"tau": 0.5, "rounds": 2}
             pseudo["qm2"] = r11["params"]
-            tag = tag + ("-qm2" if v11["pass"] else "-qm2-probe")
+            tag = tag + ("-qm2" if v11["pass"] else "-qm2-probe" if v11["probe"] else "-qm2-req")
     target = SUB / f"{job}-{tag}.csv"
     assert not target.exists(), target
     device = torch.device("cuda")
@@ -3064,6 +3064,7 @@ def main() -> None:
     e.add_argument("--eb-lambda", action="store_true", help="with --eb: the widened-grid lambda (refuses unless it passed)")
     e.add_argument("--rllr", action="store_true", help="with --pseudo: reverse LLR as a 9th part (evaluate10, passed or probe)")
     e.add_argument("--qmerge2", action="store_true", help="with --pseudo: question merging v2 (evaluate11, passed or probe)")
+    e.add_argument("--user-request", action="store_true", help="with --qmerge2: export although it failed (user asked, 11/22)")
     sub.add_parser("selfcheck")
     args = parser.parse_args()
     {"games": games, "policy": policy, "evaluate": evaluate, "evaluate2": evaluate2, "export": export,
