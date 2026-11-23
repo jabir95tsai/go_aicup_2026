@@ -75,7 +75,9 @@ def test_chunked_question_gradient_matches_direct_autograd(architecture):
         model.h.weight.fill_(0.03)
         model.c.weight.normal_(generator=torch.Generator().manual_seed(33))
     direct = copy.deepcopy(model)
-    linear = nn.Linear(40, 10).requires_grad_(False)
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(5)
+        linear = nn.Linear(40, 10).requires_grad_(False)
     questions = [np.array([0, 2]), np.array([1, 2, 0])]
     labels, k = np.array([2, 4]), np.array([2, 3])
 

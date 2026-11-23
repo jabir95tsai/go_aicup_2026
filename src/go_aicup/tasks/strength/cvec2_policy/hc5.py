@@ -1,4 +1,4 @@
-"""Train a five-block HumanSL policy correction behind a frozen R10-D and B2."""
+"""Train a shared five-block H15/C10 policy correction with frozen R10-D and B2."""
 
 from concurrent.futures import ThreadPoolExecutor
 from time import monotonic
@@ -12,6 +12,7 @@ from go_aicup.features.humansl import PROFILES
 from go_aicup.features.humansl_rankvec import unpack
 from go_aicup.features.humansl_torch import CKPT, _katago
 from go_aicup.metrics import K_BUCKETS
+from go_aicup.paths import ROOT
 from go_aicup.tasks.strength.policy_h.extract import profile_rows
 from go_aicup.tasks.strength.policy_residual.model import question_mean
 from go_aicup.tasks.strength.policy_residual.train import atomic_save
@@ -20,18 +21,20 @@ from . import encoder
 from .train import B2
 
 
-ARM = "H5-R10-D"
+ARM = "HC5-R10-D"
+C_VECTORS = ROOT / "outputs/rank/humansl/cvec_v2/learn/vectors.pt"
 WEIGHTS = (1, 1, 2, 2)
 LR = 3e-4
 DECAY = 1e-4
 ALPHA = .25
-PER_SIDE = 8
+WINDOW_STARTS = (50, 85)
+WINDOW_LENGTH = 16
 CHUNK = 32
-DEVICES = ("cuda:4", "cuda:5", "cuda:6", "cuda:7")
+DEVICES = tuple(f"cuda:{i}" for i in (4, 5, 6, 7, 0, 1, 2, 3))
 
 
 class Policy(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, vectors):
         super().__init__()
         _katago()
         from katago.train.model_pytorch import Model
@@ -45,19 +48,25 @@ class Policy(nn.Module):
             self.net.policy_head.conv2p.weight.zero_()
             self.net.policy_head.linear_pass.weight.zero_()
         self.register_buffer("profiles", torch.from_numpy(profile_rows(PROFILES)), persistent=False)
+        if vectors.shape != (10, 2, config["trunk_num_channels"]) or not torch.isfinite(vectors).all():
+            raise ValueError("invalid frozen C10 rank/side vectors")
+        self.register_buffer("c_by_side", vectors.detach().float().transpose(0, 1).contiguous(), persistent=False)
 
-    def forward(self, x, g, color):
-        width = len(PROFILES)
+    def forward(self, x, g, color, side):
+        h_meta = self.net.metadata_encoder(self.profiles[color].flatten(0, 1), None)
+        h_offset = h_meta.reshape(len(x), len(PROFILES), -1)
+        # C v2 vectors already live in the trunk space, as in RankPolicy.
+        offsets = torch.cat((h_offset, self.c_by_side[side]), dim=1)
+        width = offsets.shape[1]
         inputs = x.repeat_interleave(width, dim=0)
         globals_ = g.repeat_interleave(width, dim=0)
-        meta = self.profiles[color].flatten(0, 1)
         # Reuse the checkpoint's stem, blocks, final norm and primary policy head.
         mask = inputs[:, :1].contiguous()
         sizes = mask.sum(dim=(2, 3), keepdim=True)
         size = sizes.sum()
         z = self.net.conv_spatial(inputs)
         z = z + self.net.linear_global(globals_)[:, :, None, None]
-        z = z + self.net.metadata_encoder(meta, None)[:, :, None, None]
+        z = z + offsets.flatten(0, 1)[:, :, None, None]
         for block in self.net.blocks:
             z = z + block(z, mask=mask, mask_sum_hw=sizes, mask_sum=size, extra_outputs=None)
         z = self.net.act_trunkfinal(
@@ -74,44 +83,52 @@ def model_config():
     return config
 
 
+def c_vectors():
+    return torch.load(C_VECTORS, map_location="cpu", weights_only=False)["vectors"]
+
+
 def policy_shift(logp, q, target, d):
     """Apply p + delta p, keeping the exact played logp and the legal mask."""
-    target_idx = target[:, None, None].expand(-1, len(PROFILES), 1)
-    h = logp[:, :len(PROFILES)].float()
-    hq = q[:, :len(PROFILES)]
+    target_idx = target[:, None, None].expand(-1, logp.shape[1], 1)
+    raw = logp.float()
     one_hot = F.one_hot(target, 362).bool()[:, None, :]
     # Cache logp is FP16. Centre with exact played mass and normalized remaining mass.
-    rest = h.masked_fill(one_hot, -torch.inf)
+    rest = raw.masked_fill(one_hot, -torch.inf)
     rest_norm = rest.logsumexp(-1, keepdim=True)
     rest_norm = torch.where(rest_norm.isfinite(), rest_norm, 0)
-    played_mass = hq.exp().clamp(max=1)
+    played_mass = q.exp().clamp(max=1)
     p = (rest - rest_norm).exp() * (1 - played_mass[..., None])
     p = p.scatter(2, target_idx, played_mass[..., None])
     r = d.float().tanh()
     factor = torch.log1p(ALPHA * (r - (p * r).sum(-1, keepdim=True)))
     played = factor.gather(2, target_idx).squeeze(-1)
-    return (torch.cat((h + factor, logp[:, len(PROFILES):].float()), dim=1),
-            torch.cat((hq + played, q[:, len(PROFILES):]), dim=1), played)
+    return raw + factor, q + played, played
 
 
-def correction(net, mother, bits, glob, color, logp, target, q):
+def correction(net, mother, bits, glob, color, side, logp, target, q):
     device = bits.device.type
     with torch.autocast(device, dtype=torch.bfloat16, enabled=device == "cuda"):
-        logits = net(unpack(bits), glob, color)
+        logits = net(unpack(bits), glob, color, side)
         policy, modified, played = policy_shift(logp, q, target, logits)
         with torch.no_grad():
             baseline = mother(logp, target, q)
         diff = mother(policy, target, modified) - baseline
-    return diff + F.pad(played, (0, 10))
+    return diff + played
+
+
+def sampled_moves(length):
+    starts = [(percent * length + 99) // 100 - 1 for percent in WINDOW_STARTS]
+    if starts[0] < 0 or starts[0] + WINDOW_LENGTH > starts[1] or starts[1] + WINDOW_LENGTH > length:
+        raise ValueError(f"HC5 sampling windows do not fit a {length}-move game")
+    return np.concatenate([np.arange(start, start + WINDOW_LENGTH) for start in starts])
 
 
 class Moves:
     """Packed canonical inputs for the sampled positions, indexed into the resident H/C cache."""
-    def __init__(self, reader, games, per_side, seed):
-        rng = np.random.default_rng(seed)
+    def __init__(self, reader, games, *, sample):
         lengths = games.length.to_numpy(dtype=np.int64)
         full_offsets = np.r_[0, np.cumsum(lengths)]
-        maximum = int(lengths.sum()) if per_side is None else int(np.minimum(lengths, 2 * per_side).sum())
+        maximum = len(games) * len(WINDOW_STARTS) * WINDOW_LENGTH if sample else int(lengths.sum())
         self.bits = np.empty((maximum, 993), dtype=np.uint8)
         self.glob = np.empty((maximum, 19), dtype=np.float32)
         self.side = np.empty(maximum, dtype=np.int64)
@@ -123,11 +140,7 @@ class Moves:
         offset = 0
         for rows, entries in reader.batches(0, len(games), 64):
             for row, (bits, glob, target, side) in zip(rows, entries, strict=True):
-                selected = np.arange(len(side))
-                if per_side is not None:
-                    ids = [np.flatnonzero(side == color) for color in (0, 1)]
-                    selected = np.sort(np.concatenate(
-                        [rng.choice(a, min(per_side, len(a)), replace=False) for a in ids]))
+                selected = sampled_moves(len(side)) if sample else np.arange(len(side))
                 stop = offset + len(selected)
                 self.bits[offset:stop] = bits[selected]
                 self.glob[offset:stop] = glob[selected]
@@ -137,8 +150,10 @@ class Moves:
                 self.counts[row] = np.bincount(side[selected], minlength=2)
                 self.offsets[row + 1] = stop
                 offset = stop
-        if (self.counts == 0).any() or offset != self.counts.sum():
+        if offset != maximum or (self.counts == 0).any() or offset != self.counts.sum():
             raise ValueError("incomplete canonical policy correction inputs")
+        if sample and (self.counts != len(WINDOW_STARTS) * WINDOW_LENGTH // 2).any():
+            raise ValueError("HC5 sampling needs 16 moves per side")
 
     def select(self, rows):
         counts = np.diff(self.offsets)[rows]
@@ -173,9 +188,9 @@ def teacher_rows(cache, moves, ids, device):
 
 
 class Lane:
-    def __init__(self, config, state, r10, device):
+    def __init__(self, config, vectors, state, r10, device):
         self.device = torch.device(device)
-        self.net = Policy(config).to(device, memory_format=torch.channels_last)
+        self.net = Policy(config, vectors).to(device, memory_format=torch.channels_last)
         self.net.load_state_dict(state)
         self.mother = encoder.build("R10", True, 2027, raw_a=True).to(device).eval().requires_grad_(False)
         self.mother.load_state_dict(r10)
@@ -183,9 +198,9 @@ class Lane:
     def inputs(self, cache, moves, ids, slots, colors):
         device = self.device
         logp, q = teacher_rows(cache, moves, ids, device)
-        values = [moves.bits[ids], moves.glob[ids], colors, moves.target[ids], slots]
-        bits, glob, color, target, slots = (torch.as_tensor(a, device=device) for a in values)
-        return bits, glob, color, logp, target, q, slots
+        values = [moves.bits[ids], moves.glob[ids], colors, moves.side[ids], moves.target[ids], slots]
+        bits, glob, color, side, target, slots = (torch.as_tensor(a, device=device) for a in values)
+        return bits, glob, color, side, logp, target, q, slots
 
     def chunks(self, inputs):
         for start in range(0, len(inputs[0]), CHUNK):
@@ -215,29 +230,29 @@ def balanced_loss(logits, labels, k):
     return (per_k * weights).sum() / weights.sum(), per_k
 
 
-def _states(config, saved, seed):
+def _states(config, vectors, saved, seed):
     if saved is not None:
         return saved["model"]
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(seed)
-        return Policy(config).state_dict()
+        return Policy(config, vectors).state_dict()
 
 
-def train(cache, reader, games, baseline, r10, head, indices, labels, k, batches, out, identity, seed):
-    checkpoint = out / "h5_checkpoint.pt"
-    final = out / "h5.pt"
+def train(cache, reader, games, baseline, r10, head, indices, labels, k, batches, out, identity, seed, *, abort=None):
+    checkpoint = out / "hc5_checkpoint.pt"
+    final = out / "hc5.pt"
     source = final if final.exists() else checkpoint
     saved = torch.load(source, map_location="cpu", weights_only=True) if source.exists() else None
     if saved is not None and saved["identity"] != identity:
-        raise ValueError("H5 checkpoint sources changed")
+        raise ValueError("HC5 checkpoint sources changed")
     if final.exists():
         if saved["steps"] != len(batches):
-            raise ValueError("H5 final checkpoint has different training budget")
+            raise ValueError("HC5 final checkpoint has different training budget")
         return saved
-    config = model_config()
-    state = _states(config, saved, seed)
-    moves = Moves(reader, games, PER_SIDE, seed)
-    lanes = [Lane(config, state, r10, d) for d in DEVICES]
+    config, vectors = model_config(), c_vectors()
+    state = _states(config, vectors, saved, seed)
+    moves = Moves(reader, games, sample=True)
+    lanes = [Lane(config, vectors, state, r10, d) for d in DEVICES]
     master = lanes[0]
     b2 = B2(head, exact_dot=True).to(master.device).eval()
     params = tuple(master.net.parameters())
@@ -245,11 +260,13 @@ def train(cache, reader, games, baseline, r10, head, indices, labels, k, batches
     history = [] if saved is None else saved["history"]
     if saved is not None:
         if not 0 < saved["steps"] == len(history) <= len(batches):
-            raise ValueError("H5 checkpoint step or history differs")
+            raise ValueError("HC5 checkpoint step or history differs")
         optimizer.load_state_dict(saved["optimizer"])
     started = monotonic()
     with ThreadPoolExecutor(max_workers=len(lanes)) as pool:
         for step in range(len(history) + 1, len(batches) + 1):
+            if abort is not None and abort.is_set():
+                raise RuntimeError("CNN-R10-D failed")
             batch = batches[step - 1]
             rows, local = encoder.question_indices([indices[i] for i in batch])
             ids, slots, color = moves.select(rows)
@@ -268,7 +285,7 @@ def train(cache, reader, games, baseline, r10, head, indices, labels, k, batches
             label = torch.as_tensor(labels[batch], device=master.device)
             loss, by_k = balanced_loss(b2(question_mean(features, local), k[batch]), label, k[batch])
             if not torch.isfinite(loss):
-                raise ValueError("nonfinite H5 question loss")
+                raise ValueError("nonfinite HC5 question loss")
             (grad,) = torch.autograd.grad(loss, features)
             side = torch.cat((grad[:, :30].reshape(-1, 15), grad[:, 30:50].reshape(-1, 10)), 1) / counts
             list(pool.map(lambda task: task[0].backward(task[1], side), zip(lanes, blocks, strict=True)))
@@ -292,11 +309,11 @@ def train(cache, reader, games, baseline, r10, head, indices, labels, k, batches
     return payload
 
 
-def extract(cache, reader, games, baseline, r10, state, seed):
+def extract(cache, reader, games, baseline, r10, state):
     """Apply the trained correction to every move of a test part."""
-    config = model_config()
-    moves = Moves(reader, games, None, seed)
-    lanes = [Lane(config, state, r10, d) for d in DEVICES]
+    config, vectors = model_config(), c_vectors()
+    moves = Moves(reader, games, sample=False)
+    lanes = [Lane(config, vectors, state, r10, d) for d in DEVICES]
     features = np.empty_like(baseline)
 
     def part(task):
@@ -313,5 +330,5 @@ def extract(cache, reader, games, baseline, r10, state, seed):
     with ThreadPoolExecutor(max_workers=len(lanes)) as pool:
         list(pool.map(part, zip(lanes, np.array_split(np.arange(len(games)), len(lanes)), strict=True)))
     if not np.isfinite(features).all():
-        raise ValueError("nonfinite official H5 features")
+        raise ValueError("nonfinite official HC5 features")
     return features

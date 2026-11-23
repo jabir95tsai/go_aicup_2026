@@ -214,6 +214,28 @@ def test_extract_all_rows_without_e2(tmp_path):
     assert np.load(path / "e2.npy").shape == (0, 52)
 
 
+def test_game_parallel_matches_single_device(tmp_path):
+    cache, raw, initial, questions, labels, k = inputs()
+    arm = "A/R10-D"
+    batches = np.tile(np.arange(len(questions)), (2, 1))
+    device = torch.device("cpu")
+    payloads, outputs = [], []
+    for name, replicas in (("single", ()), ("parallel", ("cpu", "cpu"))):
+        out = tmp_path / name
+        joint.train_one(arm, cache, raw, questions, labels, k, batches, initial,
+                        device, out, name, replicas=replicas)
+        joint.extract_one(arm, cache, raw, device, out, name, len(raw), replicas=replicas)
+        path = out / arm
+        payloads.append(joint.load_checkpoint(path / "model.pt", arm, name, None))
+        outputs.append(np.load(path / "fit.npy"))
+    for group in ("model", "head"):
+        for key in payloads[0][group]:
+            torch.testing.assert_close(payloads[0][group][key], payloads[1][group][key],
+                                       atol=2e-6, rtol=2e-5)
+    np.testing.assert_allclose(payloads[0]["diagnostics"]["ce"], payloads[1]["diagnostics"]["ce"], atol=2e-6)
+    np.testing.assert_allclose(*outputs, atol=2e-6)
+
+
 @pytest.mark.parametrize("arm", ["A/R10-C", "A/CNN-R10-D-weighted"])
 def test_resume_and_extract(arm, tmp_path, monkeypatch):
     cache, raw, initial, questions, labels, k = inputs()

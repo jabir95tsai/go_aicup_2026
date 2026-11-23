@@ -22,7 +22,7 @@ from .run import materialize
 
 
 ARMS = ("A/R10-D", "A/CNN-R10-D")
-TAGS = {"A": "cva-l10", ARMS[0]: "r10d-l10", ARMS[1]: "c10d-l10", "H5-R10-D": "h5d-l10"}
+TAGS = {"A": "cva-l10", ARMS[0]: "r10d-l10", ARMS[1]: "c10d-l10", "HC5-R10-D": "hc5-l10"}
 REFERENCES = (
     "839620-chc-l10.csv", "839232-ygoe-l10.csv", "839232-ygo-l10.csv",
     "839232-yge-l10.csv", "839169-ygbm-l10.csv", "826812-qm-l10.csv", "751959-cv2-l10.csv",

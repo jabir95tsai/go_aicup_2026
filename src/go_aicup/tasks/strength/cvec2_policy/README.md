@@ -112,13 +112,17 @@ CNN-R10-D start with fresh encoders and independently fitted initial heads,
 reuse a single resident H15/C10 cache for training, then refit each final B2
 on the completed encoder's 52-column features. No arm uses E2 for selection.
 
-The fourth arm trains a randomly initialized five-block network from the
+HC5-R10-D trains one randomly initialized five-block network from the
 HumanSL checkpoint configuration. It adds a bounded, zero-sum probability
-correction to frozen H15. The completed R10-D and its final B2 stay frozen.
+correction separately to every frozen H15 and C10 policy. H15 uses the original
+192-column HumanSL metadata rows, and C10 uses the frozen C v2 rank/side trunk
+vectors. Both paths feed the same five-block trunk and policy head. The completed
+R10-D and its final B2 stay frozen.
 Each update draws eight questions per k and averages the four bucket losses
-with relative weights 1/1/2/2. The training correction uses up to eight moves
-per side of each game, sampled once with seed 2027. Official inference applies
-the correction to all moves. The fourth arm reuses R10-D's saved full-pool
+with relative weights 1/1/2/2. Training uses 32 moves per game, with two
+16-move windows starting at the ceilings of 50% and 85% of the game length
+(one-based plies). Official inference applies the correction to all moves.
+HC5 uses all eight CUDA devices after the small-model stage and reuses R10-D's saved full-pool
 features as its training baseline and publishes its checkpoint without another
 full-pool feature pass.
 
@@ -133,6 +137,15 @@ parts. It saves the heads, checkpoints and draw table under
 includes the applied L10 changes and per-k counts against the recent CSVs.
 All four export candidates use the same L10 overrides. Official scores come
 from the user's manual Public LB submissions.
+
+After the shared teachers are ready, R10-D uses all eight GPUs to train and
+extract features while CNN-R10-D runs on CPU. Each R10-D update partitions
+whole games across GPUs and computes one global question loss. HC5 takes
+over the same eight GPUs once the final R10-D features and refitted B2 are
+ready. CNN-R10-D continues on CPU if needed and reads teacher batches from
+the resident cache. The full run is complete once both paths finish.
+`small-stage-timing.json` records the time from the teacher barrier to HC5
+and the CPU branch duration.
 
 To export the two historical encoders with the seed-2028 refitted B2 heads,
 run the following on an eight-card compute node with the `go` environment

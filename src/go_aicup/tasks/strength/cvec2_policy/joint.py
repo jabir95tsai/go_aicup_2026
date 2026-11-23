@@ -1,6 +1,8 @@
 """Joint B2 and residual updates, followed by frozen-mother move weighting."""
 
-from contextlib import nullcontext
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack, nullcontext
+from copy import deepcopy
 import json
 import time
 
@@ -167,11 +169,65 @@ def check_abort(abort):
         raise RuntimeError("another experiment worker failed")
 
 
+class GameParallel:
+    """Split complete games across replicas and evaluate one global question loss."""
+
+    def __init__(self, model, cache, device, replicas, pool):
+        replicas = tuple(torch.device(gpu) for gpu in replicas)
+        self.models = [model, *(deepcopy(model).to(gpu) for gpu in replicas)]
+        self.views = [cache.for_device(gpu) for gpu in (device, *replicas)]
+        self.device, self.pool = device, pool
+
+    @property
+    def peer_bytes(self):
+        return sum(getattr(view, "peer_bytes", 0) for view in self.views)
+
+    def jobs(self, rows):
+        chunks = np.array_split(rows, min(len(rows), len(self.models)))
+        return list(zip(self.models[:len(chunks)], self.views[:len(chunks)], chunks, strict=True))
+
+    def features(self, raw, jobs):
+        def forward(task):
+            model, view, rows = task
+            with device_scope(view.device):
+                return encoder.game_features(model, view, raw, rows, POSITION_CHUNK).to(self.device)
+
+        return torch.cat(list(self.pool.map(forward, jobs)))
+
+    def backward(self, raw, questions, labels, k, head, penalty):
+        rows, local = encoder.question_indices(questions)
+        jobs = self.jobs(rows)
+        ce, grad = encoder.question_gradient(self.features(raw, jobs), local, labels, k, head, penalty)
+
+        def backward(task):
+            (model, view, rows), gradient = task
+            with device_scope(view.device):
+                model.zero_grad(set_to_none=True)
+                encoder.backward_games(model, view, rows, gradient.to(view.device), POSITION_CHUNK)
+                synchronize(view.device)
+
+        gradients = grad.split([len(rows) for _, _, rows in jobs])
+        list(self.pool.map(backward, zip(jobs, gradients, strict=True)))
+        for replica, _, _ in jobs[1:]:
+            for param, other in zip(self.models[0].parameters(), replica.parameters(), strict=True):
+                if other.grad is not None:
+                    grad = other.grad.to(self.device)
+                    param.grad = grad if param.grad is None else param.grad.add_(grad)
+        return ce
+
+    def synchronize_weights(self):
+        state = self.models[0].state_dict()
+        for replica in self.models[1:]:
+            replica.load_state_dict(state)
+
+
 def train_one(arm, cache, raw, indices, labels, k, batches, initial, device, out, identity,
-              abort=None, *, on_first_update=None):
+              abort=None, *, on_first_update=None, replicas=()):
     """Resume one arm at its last completed update and publish the final model atomically."""
     device = torch.device(device)
     _, weighted, _, _ = parse_arm(arm)
+    if weighted and replicas:
+        raise ValueError("game parallelism requires an unweighted arm")
     path = out / arm
     path.mkdir(parents=True, exist_ok=True)
     final = path / "model.pt"
@@ -179,7 +235,7 @@ def train_one(arm, cache, raw, indices, labels, k, batches, initial, device, out
     if not len(batches) or raw.shape != (len(cache.games), 52) or raw.dtype != np.float32:
         raise ValueError("training requires batches and aligned FP32 game features")
     history, regularizers = [], []
-    with device_scope(device):
+    with device_scope(device), ExitStack() as stack:
         view = cache.for_device(device)
         if device.type == "cuda":
             torch.cuda.reset_peak_memory_stats(device)
@@ -230,6 +286,11 @@ def train_one(arm, cache, raw, indices, labels, k, batches, initial, device, out
                 else:
                     got = encoder.game_features(model, view, raw, rows, POSITION_CHUNK)
                     torch.testing.assert_close(got, torch.as_tensor(raw[rows], device=device), rtol=0, atol=0)
+        parallel = None
+        if replicas:
+            pool = stack.enter_context(ThreadPoolExecutor(max_workers=len(replicas) + 1))
+            parallel = GameParallel(model, cache, device, replicas, pool)
+        counted = parallel if parallel is not None else view
         synchronize(device)
         init_seconds = time.monotonic() - initial_time
         started = time.monotonic()
@@ -239,7 +300,7 @@ def train_one(arm, cache, raw, indices, labels, k, batches, initial, device, out
             if step == first_step and on_first_update is not None:
                 on_first_update()
             tick = time.monotonic()
-            before = getattr(view, "peer_bytes", 0)
+            before = getattr(counted, "peer_bytes", 0)
             batch = batches[step - 1]
             questions = [indices[i] for i in batch]
             optimizer.zero_grad(set_to_none=True)
@@ -248,14 +309,19 @@ def train_one(arm, cache, raw, indices, labels, k, batches, initial, device, out
                                                 k[batch], head, POSITION_CHUNK)
             else:
                 reg = head_penalty(head)
-                ce = encoder.backward_questions(model, view, raw, questions, labels[batch],
-                                                k[batch], head, POSITION_CHUNK, reg)
+                if parallel is None:
+                    ce = encoder.backward_questions(model, view, raw, questions, labels[batch],
+                                                    k[batch], head, POSITION_CHUNK, reg)
+                else:
+                    ce = parallel.backward(raw, questions, labels[batch], k[batch], head, reg)
                 penalty = float(reg.detach())
             torch.nn.utils.clip_grad_norm_(parameters, float("inf"), error_if_nonfinite=True)
             optimizer.step()
+            if parallel is not None:
+                parallel.synchronize_weights()
             synchronize(device)
             elapsed = time.monotonic() - tick
-            peer_bytes = getattr(view, "peer_bytes", 0) - before
+            peer_bytes = getattr(counted, "peer_bytes", 0) - before
             if step == 1:
                 first_update_seconds = elapsed
                 first_update_peer_bytes = peer_bytes
@@ -297,7 +363,7 @@ def moves_summary(ratio):
 
 
 @torch.no_grad()
-def extract_one(arm, cache, raw, device, out, identity, n_fit, abort=None):
+def extract_one(arm, cache, raw, device, out, identity, n_fit, abort=None, *, replicas=()):
     """Publish checked, ordered fit and E2 feature arrays under the arm's final checkpoint."""
     device = torch.device(device)
     path = out / arm
@@ -307,6 +373,8 @@ def extract_one(arm, cache, raw, device, out, identity, n_fit, abort=None):
     if not 0 < n_fit <= len(raw):
         raise ValueError("invalid fit feature range")
     anchor, weighted, architecture, full = parse_arm(arm)
+    if weighted and replicas:
+        raise ValueError("game parallelism requires an unweighted arm")
     parent_digest = file_hash(out / anchor / MOTHER / "model.pt") if weighted else None
     saved = load_checkpoint(final, arm, identity, parent_digest)
     shapes = {"fit.npy": (n_fit, 52), "fit_40.npy": (n_fit, 40), "e2.npy": (len(raw) - n_fit, 52)}
@@ -323,7 +391,7 @@ def extract_one(arm, cache, raw, device, out, identity, n_fit, abort=None):
                     break
             else:
                 return record
-    with device_scope(device):
+    with device_scope(device), ExitStack() as stack:
         view = cache.for_device(device)
         if device.type == "cuda":
             torch.cuda.reset_peak_memory_stats(device)
@@ -335,25 +403,32 @@ def extract_one(arm, cache, raw, device, out, identity, n_fit, abort=None):
             model = encoder.build(architecture, full, SEED, raw_a=True)
             model.load_state_dict(saved["model"])
         model = model.eval().to(device)
+        parallel = None
+        if replicas:
+            pool = stack.enter_context(ThreadPoolExecutor(max_workers=len(replicas) + 1))
+            parallel = GameParallel(model, cache, device, replicas, pool)
         features = np.empty_like(raw, dtype=np.float32)
         ratio = np.empty((len(raw), 2), dtype=np.float32) if weighted else None
         started = time.monotonic()
-        for start in range(0, len(raw), 64):
+        size = 64 * (len(replicas) + 1)
+        for start in range(0, len(raw), size):
             check_abort(abort)
-            rows = np.arange(start, min(start + 64, len(raw)))
+            rows = np.arange(start, min(start + size, len(raw)))
             if weighted:
                 counts = view.counts(rows)
                 logits, delta, q, slots = weighted_moves(model, weight, view, rows, POSITION_CHUNK, counts)
                 base = torch.as_tensor(raw[rows], dtype=torch.float32, device=device)
                 values, concentration = weighted_reduce(base, logits, delta, q, slots, counts)
                 ratio[rows] = concentration.reciprocal().reshape(-1, 2).cpu().numpy()
-            else:
+            elif parallel is None:
                 values = encoder.game_features(model, view, raw, rows, POSITION_CHUNK)
+            else:
+                values = parallel.features(raw, parallel.jobs(rows))
             features[rows] = values.cpu().numpy()
         synchronize(device)
         record = {"identity": identity, "model_sha256": digest, "seconds": time.monotonic() - started,
                   "positions": int(cache.games.length.sum()),
-                  "peer_bytes": getattr(view, "peer_bytes", 0)} | memory_stats(device)
+                  "peer_bytes": getattr(parallel if parallel is not None else view, "peer_bytes", 0)} | memory_stats(device)
     if not np.isfinite(features).all() or features.shape != (len(raw), 52):
         raise ValueError(f"invalid features: {arm}")
     if weighted:

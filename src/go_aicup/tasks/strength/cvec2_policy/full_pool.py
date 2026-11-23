@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
+from threading import Event
 from time import monotonic
 
 from filelock import FileLock
@@ -19,13 +20,13 @@ from go_aicup.metrics import K_BUCKETS
 from go_aicup.tasks.strength.policy_residual.epoch import epoch_batches
 from scripts.strength.rank_more_players import PriorMatched, player_prior
 
-from . import all_data, all_report, all_run, full_cache, h5, joint, official, planes
+from . import all_data, all_report, all_run, full_cache, hc5, joint, official, planes
 
 
 DRAW_SEED = 2027
 HEAD_SEED = 2028
 GROUPS = ("fit", "e2", "reserve")
-FILES = ("full_pool.py", "h5.py", "official.py", "full_cache.py", "joint.py",
+FILES = ("full_pool.py", "hc5.py", "official.py", "full_cache.py", "joint.py",
          "all_data.py", "all_report.py", "encoder.py", "planes.py", "train.py")
 
 
@@ -93,16 +94,22 @@ def save_head(path, head):
     temp.replace(path)
 
 
-def train(source, out, updates, h5_updates):
+def train(source, out, updates, hc5_updates):
     started = monotonic()
     config, packed, games, base = source_data(source)
     code = {n: file_hash(Path(__file__).with_name(n)) for n in FILES}
     teacher = all_run.teacher_sources()
     if teacher != config["teacher_sources"]:
         raise ValueError("full-pool teacher identity differs from frozen source")
+    devices = hc5.DEVICES
+    cpu_threads = max(1, min(len(os.sched_getaffinity(0)), int(os.environ.get("SLURM_CPUS_PER_TASK", 1)))
+                      - len(devices))
     settings = {"source": str(source.resolve()), "code": code, "teacher": teacher,
-                "updates": updates, "h5_updates": h5_updates, "h5_weights": h5.WEIGHTS,
-                "h5_per_side": h5.PER_SIDE, "h5_alpha": h5.ALPHA, "draw_seed": DRAW_SEED,
+                "updates": updates, "hc5_updates": hc5_updates, "hc5_weights": hc5.WEIGHTS,
+                "r10_devices": devices, "cnn_device": "cpu", "cnn_cpu_threads": cpu_threads,
+                "hc5_devices": devices,
+                "hc5_window_starts": hc5.WINDOW_STARTS, "hc5_window_length": hc5.WINDOW_LENGTH,
+                "hc5_alpha": hc5.ALPHA, "draw_seed": DRAW_SEED,
                 "head_seed": HEAD_SEED, "planes": str(packed.resolve()),
                 "cpu_manifest": config["cpu_manifest"], "stage1": config["stage1"],
                 "stage1_manifest": file_hash(Path(config["stage1"]) / "complete.json")}
@@ -122,18 +129,18 @@ def train(source, out, updates, h5_updates):
     labels = np.concatenate([y for _, _, y in draws])
     k = np.concatenate([np.full(len(y), bucket) for bucket, _, y in draws])
     indices = [row for _, rows, _ in draws for row in rows]
-    epochs = (max(updates, h5_updates) + 2499) // 2500
+    epochs = (max(updates, hc5_updates) + 2499) // 2500
     table = pd.DataFrame({"k": k})
     batches = np.concatenate([epoch_batches(table, DRAW_SEED, epoch, 8) for epoch in range(1, epochs + 1)])
-    if len(batches) < max(updates, h5_updates) or any(np.any((k[batches] == bucket).sum(axis=1) != 8)
+    if len(batches) < max(updates, hc5_updates) or any(np.any((k[batches] == bucket).sum(axis=1) != 8)
                                                      for bucket in K_BUCKETS):
         raise ValueError("expected eight questions from each k per update")
     draw_path = out / "draws.npz"
     save_head(draw_path, {f"games_{bucket}": games.game_index.to_numpy()[rows] for bucket, rows, _ in draws}
               | {"labels": labels, "k": k, "batches": batches})
     save_head(out / "a-head.npz", fit_head(base, draws))
-    frozen = (out / "h5.pt").exists()
-    if not frozen:
+    fitted = (out / "hc5.pt").exists() and all((out / arm / "head.npz").is_file() for arm in official.ARMS)
+    if not fitted:
         teacher_out = out / "teacher"
         teacher_out.mkdir(exist_ok=True)
         split = 165075
@@ -143,35 +150,59 @@ def train(source, out, updates, h5_updates):
                                    lambda _: None, phase_started=started, groups=(GROUPS[:2], GROUPS[2:]))
         all_run.teacher_parity(cache, base[:, :50], teacher_out / "teacher_parity.json")
 
-        def small(task):
-            arm, device = task
+        abort = Event()
+
+        def small(arm, device, replicas=()):
+            started = monotonic()
             destination = out / arm / "head.npz"
             if destination.exists():
                 all_report.verify_files(out / arm, read_json(out / arm / "features.json")["files"])
-                return
+                return monotonic() - started
             initial = fit_head(base, draws)
             joint.train_one(arm, cache, base, indices, labels, k, batches[:updates], initial,
-                            device, out, identity)
-            joint.extract_one(arm, cache, base, device, out, identity, len(games))
+                            device, out, identity, abort, replicas=replicas)
+            joint.extract_one(arm, cache, base, device, out, identity, len(games), abort,
+                              replicas=replicas)
             features = np.load(out / arm / "fit.npy", mmap_mode="r")
             save_head(destination, fit_head(features, draws))
+            return monotonic() - started
 
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            list(pool.map(small, zip(official.ARMS, ("cuda:4", "cuda:5"), strict=True)))
-        r10_path = out / official.ARMS[0]
-        mother = joint.load_checkpoint(r10_path / "model.pt", official.ARMS[0], identity, None)
-        parent = {name: file_hash(r10_path / name) for name in ("model.pt", "head.npz", "fit.npy")}
-        h5_identity = object_hash({"run": identity, "r10": parent})
-        with np.load(r10_path / "head.npz", allow_pickle=False) as head:
-            h5.train(cache, planes.PlaneReader(packed, games, groups=GROUPS), games,
-                     np.load(r10_path / "fit.npy", mmap_mode="r"), mother["model"], dict(head),
-                     indices, labels, k, batches[:h5_updates], out, h5_identity, DRAW_SEED)
+        def cpu_cnn():
+            try:
+                torch.set_num_threads(cpu_threads)
+                return small(official.ARMS[1], "cpu")
+            except BaseException:
+                abort.set()
+                raise
+
+        small_started = monotonic()
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            cnn = pool.submit(cpu_cnn)
+            try:
+                r10_seconds = small(official.ARMS[0], devices[0], devices[1:])
+                r10_path = out / official.ARMS[0]
+                mother = joint.load_checkpoint(r10_path / "model.pt", official.ARMS[0], identity, None)
+                parent = {name: file_hash(r10_path / name) for name in ("model.pt", "head.npz", "fit.npy")}
+                hc5_identity = object_hash({"run": identity, "r10": parent})
+                timing = {"r10_seconds": r10_seconds, "hc5_start_seconds": monotonic() - small_started}
+                write_json(out / "small-stage-timing.json", timing)
+                with np.load(r10_path / "head.npz", allow_pickle=False) as head:
+                    hc5.train(cache, planes.PlaneReader(packed, games, groups=GROUPS), games,
+                              np.load(r10_path / "fit.npy", mmap_mode="r"), mother["model"], dict(head),
+                              indices, labels, k, batches[:hc5_updates], out, hc5_identity, DRAW_SEED,
+                              abort=abort)
+            except BaseException:
+                if abort.is_set():
+                    cnn.result()
+                abort.set()
+                raise
+            write_json(out / "small-stage-timing.json", timing | {"cnn_seconds": cnn.result()})
     parent_path = out / official.ARMS[0]
     parent = {name: file_hash(parent_path / name) for name in ("model.pt", "head.npz", "fit.npy")}
-    final = torch.load(out / "h5.pt", map_location="cpu", weights_only=True)
-    if final["identity"] != object_hash({"run": identity, "r10": parent}) or final["steps"] != h5_updates:
-        raise ValueError("full-pool H5 final checkpoint differs")
-    files = ["full_pool.json", "draws.npz", "a-head.npz", "h5.pt"]
+    final = torch.load(out / "hc5.pt", map_location="cpu", weights_only=True)
+    if final["identity"] != object_hash({"run": identity, "r10": parent}) or final["steps"] != hc5_updates:
+        raise ValueError("full-pool HC5 final checkpoint differs")
+    files = ["full_pool.json", "draws.npz", "a-head.npz", "hc5.pt"]
     files.extend(f"{arm}/{name}" for arm in official.ARMS
                  for name in ("model.pt", "head.npz", "fit.npy", "features.json"))
     write_json(completed, {"identity": identity, "files": all_report.fingerprint(out, files),
@@ -195,7 +226,7 @@ def export(out, job):
     release.mkdir(exist_ok=True)
     games, questions, base, reader = official.dataset(packed)
     predictions = {}
-    state = torch.load(out / "h5.pt", map_location="cpu", weights_only=True)["model"]
+    state = torch.load(out / "hc5.pt", map_location="cpu", weights_only=True)["model"]
     r10 = joint.load_checkpoint(out / official.ARMS[0] / "model.pt", official.ARMS[0], marker["identity"], None)
     with np.load(out / "a-head.npz", allow_pickle=False) as head:
         predictions["A"] = [official.predict(questions, base, head)]
@@ -205,10 +236,10 @@ def export(out, job):
     for arm in official.ARMS:
         with np.load(out / arm / "head.npz", allow_pickle=False) as head:
             predictions[arm] = [official.predict(questions, np.load(release / arm / "fit.npy"), head)]
-    corrected = h5.extract(cache, reader, games, np.load(release / official.ARMS[0] / "fit.npy"),
-                           r10["model"], state, DRAW_SEED)
+    corrected = hc5.extract(cache, reader, games, np.load(release / official.ARMS[0] / "fit.npy"),
+                            r10["model"], state)
     with np.load(out / official.ARMS[0] / "head.npz", allow_pickle=False) as head:
-        predictions[h5.ARM] = [official.predict(questions, corrected, head)]
+        predictions[hc5.ARM] = [official.predict(questions, corrected, head)]
     official.publish(predictions, release, job)
 
 
@@ -218,15 +249,15 @@ def main():
     parser.add_argument("--source", type=Path)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--steps", type=int, default=2500)
-    parser.add_argument("--h5-steps", type=int, default=2500)
+    parser.add_argument("--hc5-steps", type=int, default=2500)
     parser.add_argument("--job", default=os.environ.get("SLURM_JOB_ID"))
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
     with FileLock(args.out / "full_pool.lock", timeout=0):
         if args.phase == "train":
-            if args.source is None or min(args.steps, args.h5_steps) <= 0:
+            if args.source is None or min(args.steps, args.hc5_steps) <= 0:
                 parser.error("train requires --source and positive step counts")
-            train(args.source, args.out, args.steps, args.h5_steps)
+            train(args.source, args.out, args.steps, args.hc5_steps)
         else:
             if not args.job:
                 parser.error("export requires --job outside Slurm")

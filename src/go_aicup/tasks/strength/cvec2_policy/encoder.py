@@ -125,21 +125,30 @@ def question_ce(features, questions, labels, k, head):
     return F.cross_entropy(head(question_mean(features, questions), k), targets)
 
 
-def backward_questions(model, cache, raw, questions, labels, k, head, chunk, penalty=None):
-    """Apply CE and optional head regularization with bounded move activations."""
-    unique, local = question_indices(questions)
-    features = game_features(model, cache, raw, unique, chunk).requires_grad_()
-    ce = question_ce(features, local, labels, k, head)
+def question_gradient(features, questions, labels, k, head, penalty):
+    features.requires_grad_()
+    ce = question_ce(features, questions, labels, k, head)
     loss = ce if penalty is None else ce + penalty
     if not torch.isfinite(loss):
         raise ValueError('nonfinite policy question loss')
     loss.backward()
-    grad = features.grad
+    return float(ce.detach()), features.grad
+
+
+def backward_games(model, cache, rows, grad, chunk):
     c_start = 2 * model.h_profiles
     side_grad = torch.cat((grad[:, :c_start].reshape(-1, model.h_profiles),
-                           grad[:, c_start:-2].reshape(-1, C)), 1) / cache.counts(unique)[:, None]
-    for policy, target, q, slot in cache.chunks(unique, chunk):
+                           grad[:, c_start:-2].reshape(-1, C)), 1) / cache.counts(rows)[:, None]
+    for policy, target, q, slot in cache.chunks(rows, chunk):
         with torch.autocast('cuda', dtype=torch.bfloat16, enabled=cache.device.type == 'cuda'):
             correction = model(policy, target, q)
         correction.backward(side_grad[slot])
-    return float(ce.detach())
+
+
+def backward_questions(model, cache, raw, questions, labels, k, head, chunk, penalty=None):
+    """Apply CE and optional head regularization with bounded move activations."""
+    rows, local = question_indices(questions)
+    features = game_features(model, cache, raw, rows, chunk)
+    ce, grad = question_gradient(features, local, labels, k, head, penalty)
+    backward_games(model, cache, rows, grad, chunk)
+    return ce
