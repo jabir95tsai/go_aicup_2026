@@ -159,7 +159,8 @@ def local(t: pd.DataFrame) -> dict:
             "pass": bool(passed)}
 
 
-def export(t: pd.DataFrame, cell: str, job: str, *, evidence=None, directory=None, tag="opp-l10") -> dict:
+def export(t: pd.DataFrame, cell: str, job: str, *, evidence=None, directory=None, tag="opp-l10",
+           alpha_rule=None) -> dict:
     from go_aicup.data.preprocess import load_store
     arm, alpha = cell.split("_")
     alpha = float(alpha)
@@ -210,8 +211,12 @@ def export(t: pd.DataFrame, cell: str, job: str, *, evidence=None, directory=Non
     l10 = l10[l10["above_null_max"]].set_index("question_id")["top1_rank"]
     current = pd.read_csv(rs.CURRENT, dtype=str).set_index("question_id")["pred_rank"]
 
+    def apply(p, ll, a):
+        weight = alpha_rule(p)[:, None] if a and alpha_rule is not None else a
+        return posterior(p, ll, weight)
+
     def predict(a: float) -> pd.Series:
-        p = posterior(model.probabilities(xt, gi, questions), qll.loc[questions["question_id"]].to_numpy(), a)
+        p = apply(model.probabilities(xt, gi, questions), qll.loc[questions["question_id"]].to_numpy(), a)
         out = pd.Series([RANKS[r] for r in score_rank(p)], index=questions["question_id"])
         members = [[np.asarray(by_id.loc[qq, "games"]) for qq in g] for g in groups]
         pm = qm.merged_probabilities(model, xt, gi, members, [k_bucket(sum(len(m) for m in ms)) for ms in members])
@@ -221,7 +226,7 @@ def export(t: pd.DataFrame, cell: str, job: str, *, evidence=None, directory=Non
             merged_games = pd.Series([np.concatenate(m) for m in members])
             merged_ll = evidence(merged_games, sub, table, "key")
         for g, prob, ll in zip(groups, pm, merged_ll):
-            pg = posterior(prob[None], ll[None], a)
+            pg = apply(prob[None], ll[None], a)
             for qq in g:
                 out[qq] = RANKS[int(score_rank(pg)[0])]
         out.loc[l10.index] = l10

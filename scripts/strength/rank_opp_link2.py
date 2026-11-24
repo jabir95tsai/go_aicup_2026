@@ -176,10 +176,21 @@ G: dict = {}
 
 
 def topk(scores: np.ndarray, k: int = TOP):
+    first = None
+    if k > TOP:
+        # Keep the original tie ordering at the top-10 boundary.
+        first = topk(scores)
+        scores = scores.copy()
+        np.put_along_axis(scores, first[0], -np.inf, axis=1)
+        k -= TOP
     part = np.argpartition(scores, -k, axis=1)[:, -k:]
     val = np.take_along_axis(scores, part, axis=1)
     order = np.argsort(-val, axis=1)
-    return np.take_along_axis(part, order, axis=1).astype(np.int32), np.take_along_axis(val, order, axis=1).astype(np.float32)
+    idx = np.take_along_axis(part, order, axis=1).astype(np.int32)
+    val = np.take_along_axis(val, order, axis=1).astype(np.float32)
+    if first is not None:
+        idx, val = np.hstack([first[0], idx]), np.hstack([first[1], val])
+    return idx, val
 
 
 def run_task(task) -> dict:
@@ -193,23 +204,31 @@ def run_task(task) -> dict:
     owner = G["owner_col"][rows]
     has = owner >= 0
     out = {"rows": rows}
-    if q["set"].iloc[0] == "ref":
+    ref = q["set"].iloc[0] == "ref"
+    if G["width"] > TOP:
+        arms = {"f8": o + 8.0 * G["w"] * s}
+    else:
+        arms = {"o": o, "s": s, **{f"f{lam:g}": o + lam * G["w"] * s for lam in LAMBDAS}}
+    if ref and G["width"] == TOP:
         own_o, own_s = o[np.arange(len(rows)), owner], s[np.arange(len(rows)), owner]
         out["own_o"], out["own_s"] = own_o.astype(np.float32), own_s.astype(np.float32)
-    arms = {"o": o, "s": s}
-    for lam in LAMBDAS:
-        arms[f"f{lam:g}"] = o + lam * G["w"] * s
     for arm, sc in arms.items():
-        if q["set"].iloc[0] == "ref":
-            out[f"seen_{arm}"] = topk(sc)
+        if ref:
+            out[f"seen_{arm}"] = topk(sc, G["width"])
         sc = sc.copy()
         sc[np.flatnonzero(has), owner[has]] = -np.inf
-        out[arm] = topk(sc)
+        out[arm] = topk(sc, G["width"])
     return out
 
 
 def score(args) -> None:
     from multiprocessing import get_context
+    width = args.f8_top or TOP
+    if args.f8_top is not None and (width <= TOP or args.extra or args.limit):
+        raise ValueError("--f8-top must exceed 10 and uses all main queries")
+    wide_path = OUT / f"scores_f8_top{width}.npz"
+    if args.f8_top and wide_path.exists():
+        raise FileExistsError(wide_path)
     meta = ol.load_train()
     main_q = pd.read_parquet(OUT / "queries.parquet")
     q = pd.read_parquet(OUT / "queries_extra.parquet") if args.extra else main_q
@@ -283,7 +302,8 @@ def score(args) -> None:
         if not np.isclose(np.linalg.norm(qvec[enc], axis=1), 1.0).all():
             raise ValueError(f"{enc}: query vector missing")
     G.update(q=q, prefix=prefix, hashes=opening.prefix_hashes(prefix), galleries=galleries, population=population,
-             params=params, pidx=pidx, qvec=qvec, cent=cent, owner_col=owner_col, w=float(np.load(l2.NEW_W)["w"]))
+             params=params, pidx=pidx, qvec=qvec, cent=cent, owner_col=owner_col, w=float(np.load(l2.NEW_W)["w"]),
+             width=width)
     tasks = []
     for (name, colour), g in q.groupby(["set", "qcolor"], sort=True):
         idx = g.index.to_numpy()
@@ -300,11 +320,12 @@ def score(args) -> None:
                 print(f"task {i + 1}/{len(tasks)} {time.time() - t0:.0f}s", flush=True)
     n = len(q)
     save = {}
-    for arm in ARMS:
+    for arm in (("f8",) if args.f8_top else ARMS):
         for pre in ("", "seen_"):
-            save[f"{pre}{arm}_idx"] = np.full((n, TOP), -1, np.int32)
-            save[f"{pre}{arm}_val"] = np.full((n, TOP), np.nan, np.float32)
-    save["own_o"], save["own_s"] = np.full(n, np.nan, np.float32), np.full(n, np.nan, np.float32)
+            save[f"{pre}{arm}_idx"] = np.full((n, width), -1, np.int32)
+            save[f"{pre}{arm}_val"] = np.full((n, width), np.nan, np.float32)
+    if not args.f8_top:
+        save["own_o"], save["own_s"] = np.full(n, np.nan, np.float32), np.full(n, np.nan, np.float32)
     for r in results:
         rows = r["rows"]
         for key, value in r.items():
@@ -317,8 +338,18 @@ def score(args) -> None:
     save["owner_col"] = owner_col
     save["cand_rank"] = pd.Series(meta["rank_id"].to_numpy().astype(np.int64), index=player).groupby(level=0).first() \
         .loc[candidates].to_numpy()
-    name = "scores_extra.npz" if args.extra else "scores.npz"
-    np.savez(OUT / (name if not args.limit else "scores_limit.npz"), **save)
+    if args.f8_top:
+        with np.load(OUT / "scores.npz") as baseline:
+            for key, value in save.items():
+                prefix = value[:, :TOP] if value.ndim == 2 else value
+                if not np.array_equal(prefix, baseline[key], equal_nan=True):
+                    raise ValueError(f"{key}: first ten do not reproduce f8")
+        temporary = wide_path.with_suffix(".partial.npz")
+        np.savez_compressed(temporary, **save)
+        temporary.replace(wide_path)
+    else:
+        name = "scores_extra.npz" if args.extra else "scores.npz"
+        np.savez(OUT / (name if not args.limit else "scores_limit.npz"), **save)
     print(f"saved {len(results)} tasks, {time.time() - t0:.0f}s", flush=True)
 
 
@@ -454,6 +485,7 @@ def main() -> None:
     p.add_argument("--shards", type=int, default=4)
     p.add_argument("--workers", type=int, default=8)
     p.add_argument("--limit", type=int, default=0, help="first N tasks only (timing)")
+    p.add_argument("--f8-top", type=int, help="save a wider f8 candidate list separately from the baseline")
     p.set_defaults(fn=score)
     p = sub.add_parser("analyze")
     p.add_argument("--scores", default="scores.npz")

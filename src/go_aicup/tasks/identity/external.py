@@ -51,7 +51,7 @@ def load_filtered(directory: Path):
 
 def select(meta: pd.DataFrame, owners: np.ndarray, *, min_games: int, max_players: int | None,
            games_per_player: int, seed: int, min_year: int | None = None, min_rank: float | None = None,
-           human_opponent: bool = False):
+           human_opponent: bool = False, force_min_id: int | None = None):
     """DataFrame of (player, row into meta, colour 0/1), sorted by player then game id.
 
     Only folder owners (humans) become players. human_opponent=True also requires the opponent to own a
@@ -73,7 +73,13 @@ def select(meta: pd.DataFrame, owners: np.ndarray, *, min_games: int, max_player
     eligible = np.sort(counts.index[counts >= min_games].to_numpy())
     rng = np.random.default_rng([seed, 31])
     if max_players is not None and len(eligible) > max_players:
-        eligible = np.sort(rng.choice(eligible, size=max_players, replace=False))
+        if force_min_id is None:
+            eligible = np.sort(rng.choice(eligible, size=max_players, replace=False))
+        else:                              # keep every player id >= force_min_id (KGS, 2026-11-23), fill the rest at random
+            forced = eligible[eligible >= force_min_id]
+            rest = eligible[eligible < force_min_id]
+            eligible = np.sort(np.concatenate([forced, rng.choice(rest, size=max(max_players - len(forced), 0),
+                                                                  replace=False)]))
     sides = sides[sides["player"].isin(eligible)]
     picked = []
     for player, part in sides.groupby("player", sort=True):
@@ -213,10 +219,12 @@ def main(argv=None) -> int:
     p.add_argument("--workers", type=int, default=12)
     p.add_argument("--human-opponent", action="store_true", help="also require the opponent to own a folder")
     p.add_argument("--count-only", action="store_true", help="print the selection counts and stop")
+    p.add_argument("--force-min-id", type=int, default=None,
+                   help="always select eligible players with id >= this (KGS ids start at 10**12)")
     args = parser.parse_args(argv)
     selection = dict(min_games=args.min_games, max_players=args.max_players, games_per_player=args.games_per_player,
                      seed=args.seed, min_year=args.min_year, min_rank=args.min_rank,
-                     human_opponent=args.human_opponent)
+                     human_opponent=args.human_opponent, force_min_id=args.force_min_id)
     if args.count_only:
         meta, _, owners = load_filtered(args.filtered)
         print(json.dumps(select(meta, owners, **selection)[1]))

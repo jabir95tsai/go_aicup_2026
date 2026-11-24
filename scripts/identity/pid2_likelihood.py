@@ -2575,7 +2575,10 @@ def items12_selfcheck() -> None:
     print("items 1/2 selfcheck ok", {"add1_weight": round(float(w[8]), 3), "features": int(f.shape[2])}, flush=True)
 
 
-def official_builder(part: str, choice: dict, cache_dir: Path):
+A3_RUN = ("pid_e2e_ogsk_A3_YO7200/step7200", ROOT / "outputs" / "pid" / "ge2e" / "pid_e2e_ogsk_A3_YO7200" / "step7200" / "best.pt")
+
+
+def official_builder(part: str, choice: dict, cache_dir: Path, mix_a3: bool = False):
     """(comp7, local category codes) for one official added-set part: the 7 non-LLR fusion parts
     for arbitrary gallery / query lists in local game rows (pool rows, then question rows), rebuilt
     from the stores exactly as predict2 / pid2_style_export / pid2_multilevel_export built them
@@ -2621,6 +2624,8 @@ def official_builder(part: str, choice: dict, cache_dir: Path):
         if name != "B":
             info = json.loads((DAY0 / f"{part}2_d4_9600{suffix}" / "info.json").read_text())
             runs[name] = (info["run"], ROOT / info["head"])
+    if mix_a3:                             # 2026-11-23: A2 part = mean(cos_A2, cos_A3) (RESULTS.md, KGS A3)
+        runs["A3"] = A3_RUN
     vecs = {}
     for name, (run, head) in runs.items():
         path = cache_dir / f"vectors_{name}_{part}.npy"
@@ -2637,6 +2642,9 @@ def official_builder(part: str, choice: dict, cache_dir: Path):
             out[lv] = lam * level_scores(lambda g: keys[g], color_ml, pop, gal, qry, choice["n"], lv)[choice["beta"]]
         for name, (_, w) in ENC.items():
             out[name] = 16 * w * s["w"] * twocolor.style_scores(vecs[name], gal, qry)
+        if mix_a3:
+            w2 = ENC["A2"][1]
+            out["A2"] = 0.5 * (out["A2"] + 16 * w2 * s["w"] * twocolor.style_scores(vecs["A3"], gal, qry))
         return out
 
     return comp7, codes_full[n_train:]
@@ -2733,6 +2741,9 @@ def export(args) -> None:
             assert not args.colour and v8["pass"] and pseudo == {"tau": 0.5, "rounds": 2}
             pseudo["qm2"] = r11["params"]
             tag = tag + ("-qm2" if v11["pass"] else "-qm2-probe" if v11["probe"] else "-qm2-req")
+    if args.a3:
+        assert args.pseudo and not (args.rllr or args.qmerge2 or args.pseudo2), "--a3 stacks on the 824896 setting"
+        tag = tag + "-a3"
     target = SUB / f"{job}-{tag}.csv"
     assert not target.exists(), target
     device = torch.device("cuda")
@@ -2847,7 +2858,7 @@ def export(args) -> None:
                 z = np.array([2.0 * (qc[rows[q]] == "B").mean() - 1.0 for q in qids])
             if pseudo is not None:
                 base_f = {"kind": "colour", "W": colw} if colw is not None else {"kind": "comb", "W": comb}
-                comp7, codes_local = official_builder(part, choice, official)
+                comp7, codes_local = official_builder(part, choice, official, mix_a3=args.a3)
                 n_pool = len(pool_meta)
                 gal_l = [g - p_i * 1_000_000 for g in gallery]
                 qry_l = [q - p_i * 1_000_000 for q in query]
@@ -2866,8 +2877,14 @@ def export(args) -> None:
                 rdiff = {c: float(np.abs(Xr[:, :, j] - X[:, :, j]).max()) for j, c in enumerate(PARTS)}
                 print(prefix, "official comp() vs saved parts, max abs diff:", rdiff, flush=True)
                 assert max(rdiff[c] for c in ("opening", "category", "L1", "L2", "LLR")) <= 1e-9, rdiff
-                assert max(rdiff[c] for c in ("B", "A1", "A2")) <= 2e-3, rdiff
+                assert max(rdiff[c] for c in (("B", "A1") if args.a3 else ("B", "A1", "A2"))) <= 2e-3, rdiff
+                if args.a3:                    # the A2 column now holds mean(A2, A3): start from the recomputed parts
+                    report.setdefault("a3", {})[prefix] = {"a2_column_change_max": rdiff["A2"]}
+                    X = Xr
                 S0 = fuse(base_f, X, ks, z)
+                if args.a3:
+                    report["a3"][prefix]["base_top1_changed"] = int((cand[top5(S0)][:, 0] != ranked[:, 0]).sum())
+                    ranked = cand[top5(S0)]
                 assert np.array_equal(cand[top5(S0)], ranked)
                 S, a = S0, None
                 for _ in range(pseudo["rounds"]):
@@ -3065,6 +3082,7 @@ def main() -> None:
     e.add_argument("--rllr", action="store_true", help="with --pseudo: reverse LLR as a 9th part (evaluate10, passed or probe)")
     e.add_argument("--qmerge2", action="store_true", help="with --pseudo: question merging v2 (evaluate11, passed or probe)")
     e.add_argument("--user-request", action="store_true", help="with --qmerge2: export although it failed (user asked, 11/22)")
+    e.add_argument("--a3", action="store_true", help="with --pseudo: A2 part = mean(A2, A3), KGS encoder (2026-11-23)")
     sub.add_parser("selfcheck")
     args = parser.parse_args()
     {"games": games, "policy": policy, "evaluate": evaluate, "evaluate2": evaluate2, "export": export,

@@ -312,7 +312,7 @@ def main(argv=None) -> int:
 
     raw = IdentityEncoder(**config["model"])
     source = torch.load(config["paths"]["init_model"], map_location="cpu", weights_only=False)
-    raw.load_trunk(source["model"])
+    raw.load_trunk(source["model"], grow=bool(config.get("grow_trunk", False)))
     raw.to(device)
     head_config = config.get("head")
     head = None

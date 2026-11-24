@@ -59,12 +59,18 @@ def full_table() -> tuple[pd.DataFrame, dict]:
     return out, top
 
 
-def _delta_prob(t: pd.DataFrame) -> np.ndarray:
+def _delta_prob(t: pd.DataFrame, *, smooth: bool = False) -> np.ndarray:
     """P(r_j | r, bin, hd, oc) as in fit_delta, as probabilities [2, 2, r, bin, rj]."""
     c = np.zeros((2, 2, fu.N_BIN, 19))
     np.add.at(c, (t["hd"].to_numpy(), t["oc"].to_numpy(), t["bin"].to_numpy(),
                   t["rj"].to_numpy() - t["owner_rank"].to_numpy() + 9), 1.0)
-    c += 0.5
+    if smooth:
+        nearby = np.full_like(c, 0.5)
+        nearby[:, :, 1:] += c[:, :, :-1]
+        nearby[:, :, :-1] += c[:, :, 1:]
+        c += (0.5 * c.shape[-1]) * nearby / nearby.sum(axis=-1, keepdims=True)
+    else:
+        c += 0.5
     r, rj = np.arange(10)[:, None], np.arange(10)[None, :]
     p = c[..., rj - r + 9]
     p = p / p.sum(-1, keepdims=True)

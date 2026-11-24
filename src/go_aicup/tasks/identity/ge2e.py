@@ -49,12 +49,19 @@ class IdentityEncoder(nn.Module):
         self.w = nn.Parameter(torch.tensor(10.0))
         self.b = nn.Parameter(torch.tensor(-5.0))
 
-    def load_trunk(self, state: dict) -> None:
-        """Copy stem/blocks weights from a StrengthResNet state dict (A-024 model.pt)."""
+    def load_trunk(self, state: dict, grow: bool = False) -> None:
+        """Copy stem/blocks weights from a StrengthResNet state dict (A-024 model.pt).
+        grow=True (2026-11-23, deeper A3L): the encoder may have more blocks than the source; the extra
+        blocks get bn2.weight = 0, so each starts as the identity and the network output equals the source's."""
         own = {k: v for k, v in state.items() if k.startswith(("stem.", "blocks."))}
         missing = self.load_state_dict(own, strict=False)
-        if any(k.startswith(("stem.", "blocks.")) for k in missing.missing_keys) or missing.unexpected_keys:
+        lost = [k for k in missing.missing_keys if k.startswith(("stem.", "blocks."))]
+        if missing.unexpected_keys or (lost and not grow) or any(k.startswith("stem.") for k in lost):
             raise ValueError("trunk state does not match the encoder")
+        if grow:
+            n_src = 1 + max(int(k.split(".")[1]) for k in own if k.startswith("blocks."))
+            for block in list(self.blocks)[n_src:]:
+                torch.nn.init.zeros_(block.bn2.weight)
 
     def trunk(self, h: torch.Tensor) -> torch.Tensor:
         if self.checkpoint_segments and self.training and torch.is_grad_enabled():
