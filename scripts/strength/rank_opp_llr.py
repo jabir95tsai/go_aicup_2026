@@ -24,6 +24,7 @@ import argparse
 import json
 import re
 import time
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -190,9 +191,56 @@ def policy(args) -> None:
 
 
 # ---------------------------------------------------------------- LLR (GPU)
+def rich_tensors(shards, jobs, games, device):
+    import torch
+    from scripts.identity.pid2_likelihood import DIM_RICH, OPTIONS, _rich_for, _sorted_positions, position_tensors
+
+    lengths = [json.loads((shard / "meta.json").read_text())["positions"] for shard in shards]
+    total = sum(lengths)
+    required = total * (OPTIONS * (2 * DIM_RICH + 4) + 8)
+    free, _ = torch.cuda.mem_get_info(device)
+    if required + (8 << 30) > free:
+        raise RuntimeError(f"rich LLR needs at least {(required + (8 << 30)) / (1 << 30):.1f} GiB free GPU memory")
+    b = torch.empty((total, OPTIONS), dtype=torch.float32, device=device)
+    phi = torch.empty((total, OPTIONS, DIM_RICH), dtype=torch.float16, device=device)
+    slot = torch.empty(total, dtype=torch.int64, device=device)
+    span = {}
+    offset = 0
+
+    def moves_of(g):
+        moves, colors = games[int(g)]
+        if not np.array_equal(colors, np.arange(len(moves)) % 2):
+            raise ValueError(f"game {g}: rich replay requires alternating colors from black")
+        return moves
+
+    for shard, n in zip(shards, lengths):
+        arr = _sorted_positions({k: np.load(shard / f"{k}.npy") for k in ("game", "ply", "top", "lp", "slot")})
+        if len(arr["game"]) != n or n == 0:
+            raise ValueError(f"{shard}: invalid position count")
+        rich = _rich_for(arr, moves_of, len(np.unique(arr["game"])), time.monotonic())
+        sb, sf, ss, part = position_tensors(arr, moves_of, torch.device("cpu"),
+                                           rich={"game": arr["game"], "ply": arr["ply"], "rich": rich})
+        if span.keys() & part.keys():
+            raise ValueError(f"{shard}: game is present in more than one shard")
+        end = offset + n
+        b[offset:end].copy_(sb)
+        phi[offset:end].copy_(sf)
+        slot[offset:end].copy_(ss)
+        span.update({g: (lo + offset, hi + offset) for g, (lo, hi) in part.items()})
+        offset = end
+        print(f"rich positions on GPU: {offset}/{total}", flush=True)
+        del arr, rich, sb, sf, ss, part
+    if set(span) != set(jobs["id"]):
+        raise ValueError("rich policy shards do not cover the jobs")
+    return b, phi, slot, span
+
+
 def llr(args) -> None:
     import torch
-    from scripts.identity.pid2_likelihood import DIM, fit, position_tensors
+    from scripts.identity.pid2_likelihood import DIM, DIM_RICH, fit, position_tensors
+    rich_dir = getattr(args, "rich_dir", None)
+    if rich_dir and (not args.g40 or args.expanded):
+        raise ValueError("--rich-dir requires --g40 without --expanded")
     if args.expanded and not args.g40:
         raise ValueError("--expanded requires --g40")
     expanded_path = OUT / "llr_g40_expanded.npz"
@@ -200,29 +248,36 @@ def llr(args) -> None:
         raise FileExistsError(expanded_path)
     device = torch.device("cuda")
     jobs = pd.read_parquet(OUT / "jobs.parquet")
-    shards = sorted(p for p in OUT.glob("shard_*") if (p / "meta.json").exists())
-    if len(shards) != args.shards:
-        raise SystemExit(f"{len(shards)} of {args.shards} policy shards")
+    shard_dir = OUT if rich_dir is None else rich_dir
+    shards = [shard_dir / f"shard_{i:02d}" for i in range(args.shards)]
+    if not all((p / "meta.json").is_file() for p in shards):
+        raise SystemExit(f"expected {args.shards} policy shards in {shard_dir}")
     if args.g40:
-        extra = sorted(p for p in OUT.glob("g40_*") if (p / "meta.json").exists())
-        if len(extra) != args.shards:
-            raise SystemExit(f"{len(extra)} of {args.shards} g40 shards")
-        shards += extra
         jobs = pd.concat([jobs, pd.read_parquet(OUT / "jobs_g40.parquet")], ignore_index=True)
+        if rich_dir is None:
+            extra = [OUT / f"g40_{i:02d}" for i in range(args.shards)]
+            if not all((p / "meta.json").is_file() for p in extra):
+                raise SystemExit(f"expected {args.shards} g40 shards")
+            shards += extra
+        elif not jobs.equals(pd.read_parquet(rich_dir / "jobs.parquet")):
+            raise ValueError("rich policy jobs differ from the opp7 g40 gallery and queries")
     if args.expanded:
         shards += [OUT / "delta_policy" / f"shard_{i:02d}" for i in range(args.shards)]
         if not all((shard / "meta.json").is_file() for shard in shards):
             raise ValueError("incomplete extra Valid-S policy shards")
         extra_jobs = pd.read_parquet(OUT / "jobs_delta_extra.parquet")
         jobs = pd.concat([jobs, extra_jobs], ignore_index=True)
-    arr = {k: np.concatenate([np.load(s / f"{k}.npy") for s in shards]) for k in ("game", "ply", "top", "lp", "slot")}
-    if not np.array_equal(np.unique(arr["game"]), np.sort(jobs["id"].to_numpy())):
-        raise ValueError("policy shards do not cover the jobs")
     games = dict(zip(jobs["id"].to_numpy(), job_games(jobs)))
     t0 = time.time()
-    B, PHI, SLOT, span = position_tensors(arr, lambda g: games[int(g)][0], device)
-    PHI = PHI[:, :, :DIM]
-    del arr
+    if rich_dir is None:
+        arr = {k: np.concatenate([np.load(s / f"{k}.npy") for s in shards]) for k in ("game", "ply", "top", "lp", "slot")}
+        if not np.array_equal(np.unique(arr["game"]), np.sort(jobs["id"].to_numpy())):
+            raise ValueError("policy shards do not cover the jobs")
+        B, PHI, SLOT, span = position_tensors(arr, lambda g: games[int(g)][0], device)
+        del arr
+    else:
+        B, PHI, SLOT, span = rich_tensors(shards, jobs, games, device)
+    del games
     print(f"positions {len(SLOT)}, outside top-32 {float((SLOT == 32).float().mean()):.4f}, {time.time() - t0:.0f}s",
           flush=True)
 
@@ -242,12 +297,30 @@ def llr(args) -> None:
     rng = np.random.default_rng(SEED)
     pop_players = rng.choice(np.array(by_player.index), size=POP_PLAYERS, replace=False)
     pos_p, own_p = positions_of([np.concatenate([by_player[p][:POP_GAMES] for p in pop_players])])
-    zero = torch.zeros(DIM, device=device, dtype=torch.float64)
+    dim = DIM if rich_dir is None else DIM_RICH
+    zero = torch.zeros(dim, device=device, dtype=torch.float64)
     theta_pop = fit(PHI, B, SLOT, pos_p, own_p, 1, zero, 10.0)[0]
     print("theta_pop", np.round(theta_pop.cpu().numpy(), 3).tolist(), flush=True)
+    precision = covariance = None
+    if rich_dir is not None:
+        from scripts.identity.pid2_likelihood import cross_cov, precision_of, regularise
+
+        q = pd.read_parquet(o2.OUT / "queries.parquet", columns=["set", "owner"])
+        held = set(q.loc[q["set"].isin(["ref", "u_opp"]), "owner"].astype(str))
+        eligible = [p for p, g in by_player.items() if len(g) >= 40 and p not in held]
+        if len(eligible) < POP_PLAYERS:
+            raise ValueError(f"only {len(eligible)} eligible 40-game players for the rich prior")
+        selected = rng.choice(eligible, size=POP_PLAYERS, replace=False)
+        blocks = []
+        for start in range(0, 40, POP_GAMES):
+            p, o = positions_of([by_player[owner][start:start + POP_GAMES] for owner in selected])
+            blocks.append(fit(PHI, B, SLOT, p, o, len(selected), theta_pop, 10.0).cpu().numpy())
+        covariance, stats = regularise(cross_cov(np.stack(blocks)))
+        precision = torch.from_numpy(precision_of(covariance, np.arange(dim), dim, 1.0)).to(device)
+        print(json.dumps({"rich_prior_players": len(selected), "sigma": stats}), flush=True)
     present = [p for p in candidates if p in by_player.index]
     pos_g, own_g = positions_of([by_player[p] for p in present])
-    theta_present = fit(PHI, B, SLOT, pos_g, own_g, len(present), theta_pop, SIGMA)
+    theta_present = fit(PHI, B, SLOT, pos_g, own_g, len(present), theta_pop, SIGMA, precision=precision)
     theta = theta_pop[None].repeat(len(candidates), 1).clone()
     col = pd.Series(np.arange(len(candidates)), index=candidates)
     theta[torch.from_numpy(col.loc[present].to_numpy()).to(device)] = theta_present
@@ -313,7 +386,17 @@ def llr(args) -> None:
         res = score_candidates(rows, z[f"{key}_idx"][rows])
         out[f"{label}_rows"], out[f"{label}_llr"] = rows, res
         print(f"{label}: {len(rows)} queries, {time.time() - t0:.0f}s", flush=True)
-    np.savez(OUT / ("llr_g40.npz" if args.g40 else "llr.npz"), theta_pop=theta_pop.cpu().numpy(), **out)
+    if rich_dir is not None:
+        destination = OUT / "llr_g40_rich.npz"
+        out["covariance"] = covariance
+        temp = rich_dir / "llr_g40_rich.npz"
+        np.savez(temp, theta_pop=theta_pop.cpu().numpy(), **out)
+        import shutil
+        partial = destination.with_name(f".{destination.name}.{rich_dir.name}.partial")
+        shutil.copyfile(temp, partial)
+        partial.replace(destination)
+    else:
+        np.savez(OUT / ("llr_g40.npz" if args.g40 else "llr.npz"), theta_pop=theta_pop.cpu().numpy(), **out)
 
 
 # ---------------------------------------------------------------- fuse (CPU)
@@ -555,6 +638,7 @@ def main() -> None:
     p.add_argument("--shards", type=int, default=8)
     p.add_argument("--g40", action="store_true", help="theta on every style-gallery game (jobs_g40.parquet, g40_ shards)")
     p.add_argument("--expanded", action="store_true", help="score added top-30 candidates and extra Valid-S games")
+    p.add_argument("--rich-dir", type=Path, help="combined g40 policy shards for 50-dimensional empirical Bayes LLR")
     p.set_defaults(fn=llr)
     p = sub.add_parser("fuse")
     p.add_argument("--job", default="local")

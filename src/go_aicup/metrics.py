@@ -51,18 +51,18 @@ def rank_report(pred, true, k) -> pd.DataFrame:
     return _by_bucket(k, fn)
 
 
-def score_rank(proba: np.ndarray) -> np.ndarray:
-    """Bayes-optimal decode for the official rank score.
-
-    E[score | guess r] = p[r] + (p[r-1] + p[r+1]) / e, so the best guess is not
-    the argmax: it favours ranks with probable neighbours, and the edge ranks
-    (D, 6D) are penalised because they have only one neighbour to share credit.
-    """
+def rank_gains(proba: np.ndarray) -> np.ndarray:
+    """Expected official score for each possible guess given its ten-class posterior."""
     proba = np.asarray(proba, dtype=float)
     gain = proba.copy()
     gain[:, 1:] += NEAR * proba[:, :-1]
     gain[:, :-1] += NEAR * proba[:, 1:]
-    return gain.argmax(axis=1)
+    return gain
+
+
+def score_rank(proba: np.ndarray) -> np.ndarray:
+    """Bayes-optimal decode for the official rank score."""
+    return rank_gains(proba).argmax(axis=1)
 
 
 def expected_rank(proba: np.ndarray) -> np.ndarray:
