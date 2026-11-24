@@ -59,11 +59,26 @@ def full_table() -> tuple[pd.DataFrame, dict]:
     return out, top
 
 
-def _delta_prob(t: pd.DataFrame, *, smooth: bool = False) -> np.ndarray:
+def _soft_candidates(rows: pd.DataFrame, top: dict, tau: float) -> tuple[np.ndarray, np.ndarray]:
+    i = rows.index.to_numpy()
+    val = top["val"][i].astype(np.float64)
+    w = np.exp((val - val[:, :1]) / tau)
+    w /= w.sum(1, keepdims=True)
+    return top["cand_rank"][top["idx"][i]], w
+
+
+def _delta_prob(t: pd.DataFrame, *, smooth: bool = False, soft_top: dict | None = None,
+                tau: float = 3.5) -> np.ndarray:
     """P(r_j | r, bin, hd, oc) as in fit_delta, as probabilities [2, 2, r, bin, rj]."""
     c = np.zeros((2, 2, fu.N_BIN, 19))
     np.add.at(c, (t["hd"].to_numpy(), t["oc"].to_numpy(), t["bin"].to_numpy(),
                   t["rj"].to_numpy() - t["owner_rank"].to_numpy() + 9), 1.0)
+    if soft_top is not None:
+        low = t[t["bin"] == 0]
+        rank, weight = _soft_candidates(low, soft_top, tau)
+        hd, oc, owner = (low[col].to_numpy() for col in ("hd", "oc", "owner_rank"))
+        np.add.at(c, (hd, oc, 0, low["rj"].to_numpy() - owner + 9), -0.5)
+        np.add.at(c, (hd[:, None], oc[:, None], 0, rank - owner[:, None] + 9), 0.5 * weight)
     if smooth:
         nearby = np.full_like(c, 0.5)
         nearby[:, :, 1:] += c[:, :, :-1]
@@ -79,11 +94,7 @@ def _delta_prob(t: pd.DataFrame, *, smooth: bool = False) -> np.ndarray:
 
 def soft_ll(prob: np.ndarray, rows: pd.DataFrame, top: dict, tau: float) -> np.ndarray:
     """[n, 10] log sum_i w_i P(r_j(i) | r, bin, hd, oc) minus its mean over r."""
-    i = rows.index.to_numpy()
-    val, idx = top["val"][i].astype(np.float64), top["idx"][i]
-    w = np.exp((val - val[:, :1]) / tau)
-    w /= w.sum(1, keepdims=True)
-    rj = top["cand_rank"][idx]                                              # [n, 10 candidates]
+    rj, w = _soft_candidates(rows, top, tau)
     hd, oc, b = rows["hd"].to_numpy(), rows["oc"].to_numpy(), rows["bin"].to_numpy()
     kern = prob[hd[:, None], oc[:, None], :, b[:, None], rj]               # [n, 10 cand, 10 r]
     like = (w[:, :, None] * kern).sum(1)

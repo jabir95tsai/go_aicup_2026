@@ -122,18 +122,23 @@ def g_features(model, h: np.ndarray) -> np.ndarray:
     return np.column_stack([model.predict(h), model.predict(swap(h))])
 
 
-def yugen_oof(fit: pd.DataFrame, x_fit: np.ndarray, x_eval: np.ndarray, folds: int = 5):
+def yugen_oof(fit: pd.DataFrame, x_fit: np.ndarray, x_eval: np.ndarray, folds: int = 5, *, own_only=False):
     """Control: the regressor on Yugen fit games (target rank_id), player-grouped out-of-fold on the fit pool."""
     players = fit["player_id"].astype(str).to_numpy()
     uniq = np.array(sorted(set(players)))
     fold_of = pd.Series(np.random.default_rng(SEED).integers(folds, size=len(uniq)), index=uniq).loc[players].to_numpy()
     y = fit["rank_id"].to_numpy().astype(float)
-    oof = np.zeros((len(fit), 2))
+    width = 15 if own_only else 30
+    oof = np.zeros((len(fit), 1 if own_only else 2))
+
+    def features(model, x):
+        return model.predict(x)[:, None] if own_only else g_features(model, x)
+
     for f in range(folds):
-        m = regressor().fit(x_fit[fold_of != f, :30], y[fold_of != f])
-        oof[fold_of == f] = g_features(m, x_fit[fold_of == f, :30])
-    full = regressor().fit(x_fit[:, :30], y)
-    return oof, g_features(full, x_eval[:, :30]), full
+        m = regressor().fit(x_fit[fold_of != f, :width], y[fold_of != f])
+        oof[fold_of == f] = features(m, x_fit[fold_of == f, :width])
+    full = regressor().fit(x_fit[:, :width], y)
+    return oof, features(full, x_eval[:, :width]), full
 
 
 # ---------------------------------------------------------------- evaluate

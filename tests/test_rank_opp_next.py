@@ -88,3 +88,127 @@ def test_rich_gpu_builds_multishard_features_and_fits_eb_prior(tmp_path):
         DIM_RICH, dtype=torch.float64, device=device))
     assert torch.isfinite(theta).all() and theta[0].norm() > 0
     torch.testing.assert_close(theta[0], theta[1])
+
+
+def test_soft_delta_counts_only_change_lowest_gap_bucket():
+    rows = pd.DataFrame({"hd": [0] * 4, "oc": [1] * 4, "bin": [0, 0, 1, 1],
+                         "rj": [5] * 4, "owner_rank": [5] * 4})
+    top = {"idx": np.tile([0, 1], (4, 1)), "val": np.zeros((4, 2)), "cand_rank": np.array([5, 6])}
+    original = refine._delta_prob(rows)
+    updated = refine._delta_prob(rows, soft_top=top)
+    np.testing.assert_array_equal(updated[:, :, :, 1:, :], original[:, :, :, 1:, :])
+    np.testing.assert_array_equal(updated[:, 0], original[:, 0])
+    np.testing.assert_allclose(updated.sum(axis=-1), 1)
+    assert updated[0, 1, 5, 0, 6] > original[0, 1, 5, 0, 6]
+    assert updated[0, 1, 5, 0, 5] < original[0, 1, 5, 0, 5]
+
+
+def test_length_calibration_bounds_and_preserves_cache_alignment():
+    from scripts.strength import rank_opp_causes as causes
+
+    cache = {"masked_rows": np.array([5, 7, 9]), "seen_rows": np.array([9, 5]),
+             "masked_llr": np.ones((3, 2)), "seen_llr": np.ones((2, 2))}
+    changed = causes.scale_llr(cache, pd.Series([50, 115, 208], index=[5, 7, 9]))
+    np.testing.assert_allclose(changed["masked_llr"][:, 0], [1.2, 1.0, 0.8])
+    np.testing.assert_allclose(changed["seen_llr"][:, 0], [0.8, 1.2])
+    np.testing.assert_array_equal(cache["masked_llr"], np.ones((3, 2)))
+
+
+def test_short_delta_updates_only_short_games_in_observed_strata():
+    from scripts.strength import rank_opp_causes as causes
+
+    rows = pd.DataFrame({"hd": [0] * 4, "oc": [1, 1, 1, 0], "bin": [0] * 4,
+                         "rj": [7, 5, 5, 5], "owner_rank": [5] * 4})
+    top = {"idx": np.array([[1], [0], [0], [0]]), "val": np.zeros((4, 1)), "cand_rank": np.array([5, 7])}
+    plies = pd.Series([93, 131, 132, 90])
+    fit = rows.iloc[:2]
+    original = refine.soft_ll(refine._delta_prob(fit), rows, top, 3.5)
+    modified = causes.length_evidence(fit, top, plies=plies, arm="short")(rows)
+    assert not np.array_equal(original[0], modified[0])
+    np.testing.assert_array_equal(original[1:], modified[1:])
+    dampened = causes.length_evidence(fit, top, plies=plies, arm="dampen")(rows)
+    np.testing.assert_allclose(dampened[[0, 3]], causes.SHORT_SCALE * original[[0, 3]])
+    np.testing.assert_array_equal(dampened[1:3], original[1:3])
+    boosted = causes.length_evidence(fit, top, plies=plies, arm="long")(rows)
+    np.testing.assert_allclose(boosted[2], original[2] / causes.SHORT_SCALE)
+    np.testing.assert_array_equal(boosted[[0, 1, 3]], original[[0, 1, 3]])
+
+
+def test_length_export_aligns_opponent_plies_by_part_and_store_row(tmp_path, monkeypatch):
+    from functools import partial
+
+    from scripts.strength import rank_opp_causes as causes
+
+    rows = pd.DataFrame({"set": ["s_opp", "s_opp", "test", "test"], "part": ["train", "train", "rank_public", "rank_private"],
+                         "store_row": [-1, -1, 0, 0], "hd": [0] * 4, "oc": [1] * 4, "bin": [0] * 4,
+                         "rj": [7, 5, 7, 5], "owner_rank": [5] * 4})
+    top = {"idx": np.array([[1], [0], [1], [0]]), "val": np.zeros((4, 1)), "cand_rank": np.array([5, 7])}
+    plies = pd.Series([93, 131, 132, 90])
+    params = partial(causes.length_evidence, plies=plies, arm="long")
+    expected = params(rows.iloc[:2], top)(rows.iloc[2:])
+    base = tmp_path / 'opp7.csv'
+    predictions = pd.DataFrame({"question_id": [f"pub_{i}" for i in range(800)], "pred_rank": "A"})
+    predictions.to_csv(base, index=False)
+    monkeypatch.setattr(next_run, "BASE", base)
+
+    def export(_rows, _cell, _job, *, evidence, **_):
+        sub = rows.iloc[[3, 2]].assign(key=[10, 20])
+        scores = evidence(pd.Series([[20], [10], [10, 20]]), sub, None, "key")
+        np.testing.assert_allclose(scores[:2], expected)
+        np.testing.assert_allclose(scores[2], expected.sum(axis=0))
+        return {"file": base.name}
+
+    monkeypatch.setattr(next_run.fu, "export", export)
+    output = next_run.exports("test", "long", rows, top, False, None, tag="olong10", game_evidence=params)
+    assert output["changed_vs_opp7"] == {"public": 0, "private": 0}
+
+
+def test_consensus_requires_distinct_opponents_and_respects_b2_regret():
+    from scripts.strength import rank_opp_experiments as exp
+
+    rows = pd.DataFrame({"bin": [1, 1, 1, 0]})
+    top = {"idx": np.array([[0], [0], [1], [2]])}
+    ll = np.zeros((4, 10))
+    ll[:3, 5] = 3
+    ll[3, 4] = 9
+    per_game = pd.DataFrame(ll, index=[10, 11, 12, 13])
+    evidence = exp.group_evidence(pd.Series([[10, 11, 13], [10, 11, 12, 13]]), per_game, rows, top)
+    np.testing.assert_array_equal(evidence[:, 21], [0, 2])
+    assert evidence[1, 15] == 6
+    np.testing.assert_array_equal(evidence[:, :10], [ll[[0, 1, 3]].sum(axis=0), ll.sum(axis=0)])
+    p = np.zeros((2, 10))
+    p[:, [4, 5]] = [0.52, 0.48]
+    np.testing.assert_array_equal(exp.consensus_predict(p, evidence, tolerance=0.01), [4, 4])
+    np.testing.assert_array_equal(exp.consensus_predict(p, evidence, tolerance=0.05), [4, 5])
+
+
+def test_own_ablation_keeps_no_opponent_feature_columns(monkeypatch):
+    from scripts.strength import rank_opp_experiments as exp
+
+    def own(_fit, x, y, *, own_only):
+        assert own_only
+        return x[:, :1], y[:, :1], None
+
+    monkeypatch.setattr(exp.rank_ogs, "yugen_oof", own)
+    features = np.arange(104).reshape(2, 52)
+    fit, evaluation = exp.own_features(None, features, features)
+    expected = np.r_[0:15, 30:40, 50:52, 0]
+    np.testing.assert_array_equal(fit, features[:, expected])
+    np.testing.assert_array_equal(evaluation, fit)
+
+
+def test_cross_game_pairs_require_shared_opening_and_exclude_duplicate_games():
+    import torch
+    from scripts.strength import rank_opp_cross_game as cross
+
+    x = np.array([[1, 0], [.8, .6], [.6, .8], [.8, .6], [.8, .6]], dtype=np.float32)
+    result = cross.mutual_pairs(x, [8, 8, 8, 9, -1], [1, 2, 1, 4, 5], torch.device("cpu"))
+    assert result[['left', 'right']].to_numpy().tolist() == [[1, 2]]
+    pairs = pd.DataFrame({"left": [0, 2], "right": [1, 3], "similarity": [.8, .9]})
+    idx = np.array([[4, 6], [5, 4], [7, 8], [5, 4]])
+    val = np.array([[8., 0.], [3., 2.], [8., 0.], [3., 2.]])
+    accepted = cross.proposals(pairs, (idx, val), np.zeros(4, dtype=int), {0: [0, 2], 1: [0, 2]})
+    assert accepted.target.to_list() == [1]
+    updated, _ = cross.boost((idx, val), accepted)
+    np.testing.assert_array_equal(updated[:, 0], [4, 4, 7, 5])
+    np.testing.assert_array_equal(idx[:, 0], [4, 5, 7, 5])

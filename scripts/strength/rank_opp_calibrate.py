@@ -138,13 +138,13 @@ def score(questions, posteriors, prior):
     }
 
 
-def interval(questions, delta):
+def interval(questions, delta, *, buckets=K_BUCKETS):
     _, owner = np.unique(questions["player_id"], return_inverse=True)
     k = questions["k"].to_numpy()
     n = len(np.unique(owner))
-    count = np.zeros((n, len(K_BUCKETS)))
+    count = np.zeros((n, len(buckets)))
     totals = np.zeros_like(count)
-    for i, b in enumerate(K_BUCKETS):
+    for i, b in enumerate(buckets):
         mask = k == b
         np.add.at(count[:, i], owner[mask], 1)
         np.add.at(totals[:, i], owner[mask], delta[:, mask].mean(axis=0))

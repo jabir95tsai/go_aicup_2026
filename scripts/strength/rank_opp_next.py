@@ -176,18 +176,29 @@ def deltas(scores, base):
     return by_seed, mean
 
 
-def exports(job, name, rows, top, smooth, rule):
+def exports(job, name, rows, top, smooth, rule, *, soft_counts=False, tag=None, game_evidence=None,
+            group_evidence=None, feature_builder=None, decoder=None):
     pool = rows[rows["set"].isin(["s_opp", "u_opp"])]
-    kernel = rf._delta_prob(pool, smooth=smooth)
+    if game_evidence is None:
+        kernel = rf._delta_prob(pool, smooth=smooth, soft_top=top if soft_counts else None, tau=TAU)
+
+        def game_evidence(target):
+            return rf.soft_ll(kernel, target, top, TAU)
+    else:
+        game_evidence = game_evidence(pool, top)
     test = rows[rows["set"] == "test"].reset_index(names="query_row").set_index(["part", "store_row"])
 
     def evidence(games, sub, _table, key):
         index = pd.MultiIndex.from_frame(sub[["part", "store_row"]])
         aligned = sub.set_index(test.loc[index, "query_row"].to_numpy())
-        values = rf.soft_ll(kernel, aligned, top, TAU)
-        return fu.question_ll(games, pd.DataFrame(values, index=sub[key].to_numpy()))
+        values = game_evidence(aligned)
+        per_game = pd.DataFrame(values, index=sub[key].to_numpy())
+        if group_evidence is not None:
+            return group_evidence(games, per_game, aligned, top)
+        return fu.question_ll(games, per_game)
 
-    report = fu.export(rows, f"DELTA-ALL_{ALPHA}", job, evidence=evidence, alpha_rule=rule, tag=TAGS[name])
+    report = fu.export(rows, f"DELTA-ALL_{ALPHA}", job, evidence=evidence, alpha_rule=rule, tag=tag or TAGS[name],
+                       feature_builder=feature_builder, decoder=decoder)
     pred = pd.read_csv(BASE.with_name(report["file"]), dtype=str)
     base = pd.read_csv(BASE, dtype=str)
     if len(pred) != 800 or not pred["question_id"].equals(base["question_id"]):

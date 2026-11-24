@@ -9,6 +9,7 @@ Fresh sealed draws (pool 0 5000-5019, pool 1 5000-5029). Rule (11/20): pool 1 de
 """
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 
@@ -36,6 +37,17 @@ OUT = Path("outputs/pid/ogs/a3_eval")
 
 
 def main() -> None:
+    global OUT
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--cache", help="third encoder's bench cache (A3L runs, 2026-11-24); it takes the A3 slot")
+    parser.add_argument("--head")
+    parser.add_argument("--out")
+    args = parser.parse_args()
+    if args.cache or args.head or args.out:
+        if not (args.cache and args.head and args.out):
+            parser.error("--cache, --head and --out go together")
+        ENC["A3"] = (args.cache, args.head)
+        OUT = Path(args.out)
     OUT.mkdir(parents=True, exist_ok=True)
     env = load(RUN)
     color, pos = env["color"], env["position"]

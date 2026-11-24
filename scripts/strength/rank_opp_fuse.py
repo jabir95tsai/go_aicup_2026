@@ -160,7 +160,7 @@ def local(t: pd.DataFrame) -> dict:
 
 
 def export(t: pd.DataFrame, cell: str, job: str, *, evidence=None, directory=None, tag="opp-l10",
-           alpha_rule=None) -> dict:
+           alpha_rule=None, feature_builder=None, decoder=None) -> dict:
     from go_aicup.data.preprocess import load_store
     arm, alpha = cell.split("_")
     alpha = float(alpha)
@@ -212,12 +212,14 @@ def export(t: pd.DataFrame, cell: str, job: str, *, evidence=None, directory=Non
     current = pd.read_csv(rs.CURRENT, dtype=str).set_index("question_id")["pred_rank"]
 
     def apply(p, ll, a):
+        if a and decoder is not None:
+            return decoder(p, ll)
         weight = alpha_rule(p)[:, None] if a and alpha_rule is not None else a
-        return posterior(p, ll, weight)
+        return score_rank(posterior(p, ll[:, :len(RANKS)], weight))
 
-    def predict(a: float) -> pd.Series:
-        p = apply(model.probabilities(xt, gi, questions), qll.loc[questions["question_id"]].to_numpy(), a)
-        out = pd.Series([RANKS[r] for r in score_rank(p)], index=questions["question_id"])
+    def predict(a: float, model, xt) -> pd.Series:
+        pred = apply(model.probabilities(xt, gi, questions), qll.loc[questions["question_id"]].to_numpy(), a)
+        out = pd.Series([RANKS[r] for r in pred], index=questions["question_id"])
         members = [[np.asarray(by_id.loc[qq, "games"]) for qq in g] for g in groups]
         pm = qm.merged_probabilities(model, xt, gi, members, [k_bucket(sum(len(m) for m in ms)) for ms in members])
         if evidence is None:
@@ -228,14 +230,17 @@ def export(t: pd.DataFrame, cell: str, job: str, *, evidence=None, directory=Non
         for g, prob, ll in zip(groups, pm, merged_ll):
             pg = apply(prob[None], ll[None], a)
             for qq in g:
-                out[qq] = RANKS[int(score_rank(pg)[0])]
+                out[qq] = RANKS[int(pg[0])]
         out.loc[l10.index] = l10
         return out.loc[current.index]
 
-    base = predict(0.0)
+    base = predict(0.0, model, xt)
     if (base != current).any():
         raise ValueError(f"alpha 0 does not reproduce 839169-ygbm-l10.csv ({int((base != current).sum())})")
-    pred = predict(alpha)
+    if feature_builder is not None:
+        xf, xt = feature_builder(pool, x_pool, x)
+        model = prod._fit(pool, xf, prior, 2027)
+    pred = predict(alpha, model, xt)
     diff = pred != current
     kq = questions.set_index("question_id")["num_games"].loc[current.index]
     report = {"cell": cell, "public": int((diff & diff.index.str.startswith("pub")).sum()),
