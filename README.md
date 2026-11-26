@@ -1,6 +1,51 @@
 # AI CUP 2026 圍棋競賽
 
-兩個競賽共用一份訓練資料、一個 repo：**競賽一 玩家辨識**（`tasks/identity/`）、**競賽二 棋力預測**（`tasks/strength/`）。
+兩個競賽共用一份訓練資料、一個 repo：**競賽一 玩家辨識（TEAM_10894）**（`tasks/identity/`）、**競賽二 棋力預測（TEAM_10895）**（`tasks/strength/`）。
+
+## 程式碼審查與重現指南（最終繳交版本）
+
+### 1. 兩賽最終架構與核心入口
+- **競賽一（TEAM_10894，最終提交 `824896-comb-pseudo.csv`，Public LB `0.8620429`）**：
+  - **原測試集（一對一）**：D4 正規化開局 `pp+slot` Naive Bayes + 8× GE2E 保險編碼器（`ply >= 20`）+ Hungarian 指派（`go_aicup.tasks.identity.{insurance,predict}`）。
+  - **新增集（非一對一）**：D4 開局／Category／L1 角部／L2 應手多層鍵（`scripts/identity/pid2_multilevel_export.py`）+ 三組風格編碼器（`seqB`、`A1`、`A2`）+ 凍結 KataGo HumanSL（`Cv2` 級別條件）50 維對數線性殘差 LLR（含 Numba 盤面重播 G3 局部棋形與經驗貝氏共變異先驗 `EB50`）→ 逐 `k` conditional logit 融合 + 兩輪留一偽標籤擴充（`scripts/identity/pid2_likelihood.py`、`src/go_aicup/tasks/identity/likelihood_rich.py`）。
+- **競賽二（TEAM_10895，最終提交 `849173-opp7-l10.csv`，Public LB `0.7744441`）**：
+  - **自身棋力 B2 分支**：54 維逐盤特徵（KataGo HumanSL 15 profile `H` 含 HD1 貼目 0.5 校正 30 維 + 自學十級 `Cv2` 20 維 + HD1 旗標 2 維 + 玩家分組 5 折 OOF HistGBR `yH` 2 維）→ 分 `k` 多類 Logistic Regression + 先驗對齊 + 同人測試題合併（`scripts/strength/rank_prod_a0_fusion.py`、`rank_ogs.py`、`rank_qmerge.py`）。
+  - **對手身分連結分支（opp7）**：以競賽一偵測器 `f8` 對 8,007 訓練玩家取前十名候選 → 40 盤 27 維 LLR 重排（`μ=2`）→ `τ=3.5` 軟連結 DELTA 核對數證據融合（`α=0.55`）→ Bayes 最佳解碼 `score_rank` + 高信心訓練玩家 L10 覆寫（`scripts/strength/rank_opp_link2.py`、`rank_opp_llr.py`、`rank_opp_mu2_diag.py`）。
+
+### 2. 核心模組輸入／輸出對照
+
+| 模組路徑 | 主要功能 | 輸入 | 輸出 |
+|---|---|---|---|
+| `src/go_aicup/data/sgf.py` | SGF 解析與屬性稽核 | 原始 SGF 字串 | `SZ[19]` 落點座標與標記顏色 |
+| `src/go_aicup/data/preprocess.py` | CSV 轉 memmap / GameStore | `data/raw/{training,tests}/*.csv` | `int16` 落子陣列與 metadata `.parquet` |
+| `src/go_aicup/data/board_cache.py` | 位元打包盤面快取 | GameStore / SGF | `uint8[T,2,46]` 分片與 18 層歷史張量 |
+| `src/go_aicup/data/cv.py` | 玩家互斥切分與合成題組 | `games.parquet` | 零玩家重疊 fold 與 `k` 桶題目表 |
+| `src/go_aicup/features/humansl.py` | KataGo HumanSL 引擎特徵 | 棋局與 `b18c384nbt-humanv0.bin.gz` | 15 個段位 profile 逐手/每盤 log-likelihood |
+| `src/go_aicup/features/humansl_rankvec.py` | 凍結 HumanSL + 自學 `Cv2` 向量 | `b18c384nbt-humanv0.ckpt` + 盤面 | 10 級（或 4 級條件）policy 與條件特徵 |
+| `src/go_aicup/tasks/identity/` | GE2E / E2E 訓練與 G3 重播 | 打包盤面快取 + OGS 快取 | 256 維盤向量、50 維 LLR 特徵、Top-5 CSV |
+| `src/go_aicup/tasks/strength/` | V2 / B2 / 棋力融合模組 | H / Cv2 / yH / 對手證據 | 10 級後驗機率與 `score_rank` 預測 CSV |
+| `src/go_aicup/metrics.py` | 兩賽官方計分與解碼 | 預測類別／Top-5 與真實標籤 | 分 `k` 桶分數與 Equal-k 平均 |
+| `scripts/release/build_reports.py` | 產出官方技術報告與圖表 | `RESULTS.md` 數據與設定 | `reports/*.docx` 與 `reports/figures/*.png` |
+
+### 3. 快速安裝與最終結果重現指令
+```bash
+# 1. 安裝鎖定依賴 (CPython 3.11-3.13, torch==2.6.0+cu124) 與本地套件
+python -m pip install -r requirements.txt
+python -m pip install -e .
+
+# 2. 競賽一 (TEAM_10894)：於乾淨 git worktree 從官方原始測試 CSV 逐位元組重現 824896-comb-pseudo.csv
+bash scripts/release/repro_pid_setup.sh <MAIN_REPO> <CLEAN_WORKTREE> <COMMIT>
+cd <CLEAN_WORKTREE> && sbatch scripts/release/repro_pid_run.sh
+python -m scripts.release.repro_pid_compare --main <MAIN_REPO> --new <CLEAN_WORKTREE> --job <JOB_ID> --out report.json
+
+# 3. 競賽二 (TEAM_10895)：執行對手連結、40 盤 LLR 重排與 opp7 融合匯出
+python -m scripts.strength.rank_opp_link2 plan && python -m scripts.strength.rank_opp_link2 embed && python -m scripts.strength.rank_opp_link2 score
+python -m scripts.strength.rank_opp_llr plan && python -m scripts.strength.rank_opp_llr policy --shard 0 --shards 8
+python -m scripts.strength.rank_opp_mu2_diag <JOB_ID>
+```
+
+---
+
 
 | 文件 | 內容 |
 |---|---|

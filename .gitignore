@@ -38,3 +38,6 @@ build/
 
 # local code intelligence index
 /.codegraph/
+
+# generated reports (avoid leaking personal contact info in public repo)
+/reports/
