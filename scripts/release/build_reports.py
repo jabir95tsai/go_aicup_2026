@@ -10,6 +10,7 @@ are centralized in `TEAM_CONFIG` below so they can be updated in one place and r
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 from pathlib import Path
@@ -62,23 +63,37 @@ TEAM_CONFIG = {
         "team_id": "TEAM_10894",
         "title": "圍棋棋力與風格預測競賽—競賽一：從圍棋棋譜集辨識玩家",
         "filename": "TEAM_10894_圍棋棋力與風格預測競賽—競賽一：從圍棋棋譜集辨識玩家.docx",
-        "private_score": "【待填】",
-        "private_rank": "【待填】",
+        "private_score": "0.8857159",
+        "private_rank": "20",
         "public_score": "0.8630809",
-        "public_rank": "25/134",
+        "public_rank": "25",
         "final_submission": "851729-comb-pseudo-a3l.csv",
     },
     "c2": {
         "team_id": "TEAM_10895",
         "title": "圍棋棋力與風格預測競賽—競賽二：從圍棋棋譜預測玩家棋力等級",
         "filename": "TEAM_10895_圍棋棋力與風格預測競賽—競賽二：從圍棋棋譜預測玩家棋力等級.docx",
-        "private_score": "【待填】",
-        "private_rank": "【待填】",
+        "private_score": "0.7423199",
+        "private_rank": "19",
         "public_score": "0.7744441",
-        "public_rank": "14/171",
+        "public_rank": "15",
         "final_submission": "849173-opp7-l10.csv",
     },
 }
+
+
+def _apply_local_team_config(path: Path) -> None:
+    if not path.exists():
+        return
+    overrides = json.loads(path.read_text(encoding="utf-8"))
+    for key, val in overrides.items():
+        if key in ("c1", "c2") and isinstance(val, dict) and isinstance(TEAM_CONFIG.get(key), dict):
+            TEAM_CONFIG[key].update(val)
+        else:
+            TEAM_CONFIG[key] = val
+
+
+_apply_local_team_config(REPORTS_DIR / "team_config.local.json")
 
 # Official word-count limits per section (minimum, maximum)
 SECTION_LIMITS = {
@@ -505,13 +520,13 @@ def build_c1_sections() -> dict[str, list[str]]:
             "三、逐 k 融合權重訓練與重現稽核：於 pool 0 上以 conditional logit 最大概似（L-BFGS）分 k∈{1,2,3,5} 學習八分項權重，最後套用兩輪後驗 ≥0.5 留一偽標籤擴充。專案所有核心階段皆須通過封存 pool 1 門檻（Δ>0、z≥2.5、各 k≥−0.005 且 pool 0 Δ>0），同時於獨立環境重跑完整管線以檢核跨節點數值穩定性；最終版本 851729-comb-pseudo-a3l.csv 與基底 824896 皆已完成乾淨環境逐位元組重現驗證（archive/restore-855796.log 與 Slurm 839312），確認與官方最終提交檔內容完全一致。",
         ],
         "陸、分析與結論": [
-            "最終提交檔 851729-comb-pseudo-a3l.csv 在 Public LB 取得 0.8630809（較官方 baseline 0.2845 大幅提升 +0.5786），且 824896 基底與最終版 851729 皆已通過乾淨還原環境之逐位元組重現驗證（SHA-256 前八碼 2501f2f4）。如圖一所示，系統分數由單一開局模型與 seqB（0.8012），隨引入 OGS 雙編碼器與多層開局鍵（0.8388）、27 維 LLR（0.8465）、G3 局部棋形（0.8536）、EB50 異向先驗（0.8543）、逐 k 融合與兩輪偽標籤擴充（0.8620），最後納入 30-block 深化編碼器 A3L-9600 推進至 0.8631；主要階段在驗證台封存 pool 1 皆獲高度統計顯著增益（z 值介於 5.66 至 17.6）。",
+            "最終提交檔 851729-comb-pseudo-a3l.csv 於 Private LB 取得 0.8857159（排名第 20），Public LB 為 0.8630809（排名第 25，較官方 baseline 0.2845 大幅提升 +0.5786），且 824896 基底與最終版 851729 皆已通過乾淨還原環境之逐位元組重現驗證（SHA-256 前八碼 2501f2f4）。如圖一所示，系統分數由單一開局模型與 seqB（0.8012），隨引入 OGS 雙編碼器與多層開局鍵（0.8388）、27 維 LLR（0.8465）、G3 局部棋形（0.8536）、EB50 異向先驗（0.8543）、逐 k 融合與兩輪偽標籤擴充（0.8620），最後納入 30-block 深化編碼器 A3L-9600 推進至 0.8631；主要階段在驗證台封存 pool 1 皆獲高度統計顯著增益（z 值介於 5.66 至 17.6）。",
             "成功關鍵與機制歸因如圖二(a)：玩家條件 LLR 與逐手局部棋形（G3）合計帶來最大突破（+0.041），印證「以棋力模型條件化後之逐手殘差對數似然比」相較整盤平均嵌入更能保留細微手癖；經驗貝氏先驗精準壓縮低訊噪維度，使 10 盤極少樣本也能穩定估計。從圖二(b) 可見誤差結構與成功／失敗案例規律：全黑題在 k=5 達 0.964，但 k=1 全白題僅 0.523（落後全黑 k=1 的 0.598 達 0.075），顯示白棋受對手開局主導較深且資訊量較少；實際檢查誤判案例（如單盤 k=1 短局或與他人口味相近之對局），往往源於候選庫僅 10 盤的參考抽樣變異，而透過偽標籤擴充（官方 pub2 選中 293 題、priv2 選中 305 題）與 A3L 多樣性集成能進一步修正困難對局排名。",
             "同樣重要的是失敗與淘汰方向之排除：我們以嚴格封存驗證淘汰了六條表面合理但無效的路線——一、難負例配對訓練（815766）：診斷顯示誤認為連續分散的相似度，固定誤認對僅占 0.81%，不具結構性突破空間；二、編碼器 8 向 D4 TTA（+0.0007，z=0.53）：編碼器已學習絕對方位習慣，強行八向平均反而稀釋訊號；三、中心擴充 EM（+0.0018，z=2.30）未達顯著門檻；四、反向似然 RLLR（+0.000004）：因不同候選人自身棋局長度與偏離尺度不可比，反遭族群基準偏差淹沒；五、題目合併（E1／v2，AP 0.51–0.67，pool 1 −0.00003）：高分配對多為後驗已一致的題目，無法挽救真正誤判題；六、較短步數之 7,200 步 A3／A3L（pool 1 −0.0018／−0.0010）與最後五向風格混搭 851772（Public 0.8626）皆未優於 851729 而遭排除。",
             "未來改進方向包括：設計針對白棋執色之專屬動態開局／佈局特徵以縮小黑白落差、探索批內線上困難負例挖掘（online hard negative mining），以及引入更強多尺度區域對局網路強化單盤 k=1 辨識力。",
         ],
         "柒、程式碼": [
-            f"Github連結：{TEAM_CONFIG['github_url']}（送出審查前請確認該儲存庫與權重連結皆已開啟公開瀏覽權限）。",
+            f"Github連結：{TEAM_CONFIG['github_url']}",
             "程式碼目錄結構與主要模組輸入／輸出說明如下（詳細安裝與重現指令見專案根目錄 README.md）：",
             "一、資料處理與共用指標（src/go_aicup/data/）：sgf.py 負責 SGF 棋譜解析與屬性稽核；preprocess.py 將官方 CSV 轉為壓縮 memmap 與 GameStore 元資料；board_cache.py 負責 2×46-byte 位元打包與盤面歷史組裝；cv.py 統一產生玩家互斥切分與驗證台抽樣；metrics.py 實作兩賽官方評估指標。",
             "二、競賽一核心與推論（src/go_aicup/tasks/identity/ 與 scripts/identity/）：ge2e.py、train_ge2e.py 與 train_e2e.py 實作 ResNet 風格編碼器、seqB 頭與雙色 GE2E 訓練；predict.py 與 insurance.py 執行原測試集 D4 開局＋GE2E＋Hungarian 指派；pid2_multilevel_export.py 計算 L1/L2 多層開局鍵；likelihood_rich.py 與 pid2_likelihood.py 實作 Numba 盤面重播、50 維特徵、GPU 阻尼牛頓 MAP、EB 先驗、逐 k conditional logit 融合、A3L 整合與兩輪留一偽標籤匯出。",
@@ -561,13 +576,13 @@ def build_c2_sections() -> dict[str, list[str]]:
             "三、對手辨識重排與 DELTA 核函數擬合：沿用競賽一預訓之開局與三組風格編碼器（B／A1／A2）建立 8,007 位訓練玩家至多 40 盤之標準庫；再於 7,969 名合格訓練玩家（113,028 盤、每人至多 40 盤 HD≤1）抽取凍結 HumanSL＋C v2 基底前 32 名 policy，以 GPU 批次阻尼牛頓法求取 27 維對數線性殘差參數 θ（高斯先驗 σ=3）。針對每盤前十名對手候選重算重排分數 f′＝f8＋2·LLR（權重 μ=2 選定自獨立參考玩家半數校準集），再於 Valid-S 20,000 盤擁有者已知盤上依信心分段、讓子與執色統計相對段位差分布（加平滑常數 0.5）建立 DELTA 核函數，最後以本地 E1／E2 五種子交叉驗證選定軟連結溫度 τ=3.5 與證據權重 α=0.55。",
         ],
         "陸、分析與結論": [
-            "競賽二最終版本 849173-opp7-l10.csv 在 Public LB 達到 0.7744441（較官方 baseline 0.4631 高出 +0.3113，排名 14/171）。演進軌跡如圖一所示：純手工特徵（0.412）未過門檻；盤面 V2 ResNet＋C2 跨過門檻（0.5553）；導入凍結 KataGo HumanSL 特徵大幅推升至 0.6833（+0.130）；經過 HD1 貼目校正、C v2 級別向量、先驗對齊與測試同人題合併（0.7531）、yH 非線性特徵（0.7563），最終透過「對手身分連結與 LLR 重排」將 Public LB 推進至 0.7726（opp2）與 0.7744（opp7），證明跨賽整合對手棋風特徵與讓子段位規則為本賽最大槓桿。",
+            "競賽二最終版本 849173-opp7-l10.csv 於 Private LB 取得 0.7423199（排名第 19），Public LB 為 0.7744441（排名第 15，較官方 baseline 0.4631 高出 +0.3113）。演進軌跡如圖一所示：純手工特徵（0.412）未過門檻；盤面 V2 ResNet＋C2 跨過門檻（0.5553）；導入凍結 KataGo HumanSL 特徵大幅推升至 0.6833（+0.130）；經過 HD1 貼目校正、C v2 級別向量、先驗對齊與測試同人題合併（0.7531）、yH 非線性特徵（0.7563），最終透過「對手身分連結與 LLR 重排」將 Public LB 推進至 0.7726（opp2）與 0.7744（opp7），證明跨賽整合對手棋風特徵與讓子段位規則為本賽最大槓桿。",
             "從圖二(a) 可見盤數 k 對準確率的關鍵影響：隨每題棋局數由 k=5 增至 k=20，cvec2 B2 模型得分由 0.7022 穩步上升至 0.7740，且引入 opp7 對手連結後在五個隨機種子下對 opp2 全面正增益（E1 +0.0137、E2 +0.0113）。圖二(b) 直接驗證對手連結機制並非巧合：在高信心 q99.9 門檻下，HD0 連結之對手與本人同級或差一級比例高達 94%（完全同級 51%），遠高於隨機基準 29%；且 HD1 讓先時，連到之對手平均強於執黑者 +0.38 級、弱於執白者 −0.51 級，完全符合圍棋讓子棋理。成功案例包括同玩家跨 Public／Private 之四題互連群組（pub_q_0229 等）透過合併穩定判級，以及原本 k=5 盤少雜訊大之題目因識別出訓練集對手而修正一級誤差。",
             "同時我們系統性記錄多項失敗與拒絕方案以確保不對 400 題 Public LB 過擬合：一、純監督與自回歸深層骨幹（V1、SE、SE3）若未嚴格玩家切分，於 game-disjoint 驗證雖達 0.6239，在未見玩家隨即嚴重退化；二、KataGo 強網路著手品質特徵（S-select −0.0024）與 KataRank Lite／Full 29 級特徵（E2 −0.0088／−0.0080）均呈現負增益，顯示在 HumanSL 多段位剖面前，單純強弱勝負損失難以分辨接近的業餘段位；三、OGS 外部 25,777 盤段級迴歸特徵（E1 −0.0011／E2 −0.0009）未能超越 H 特徵，表示 HumanSL 已充分涵蓋外部段位分布；四、全池神經殘差頭（840005）在嚴格玩家切分下殘差收斂趨近於零，且 50 維 LLR 重排於 E1／E2 出現分歧（−0.0010 vs +0.0024），故依事前準則保留較穩健且不依賴 KGS 之 opp7 為最終版本（亦附帶觀察含 KGS A3 之 opp6 探針 Public 0.7758，僅差 0.0013）。",
             "總結而言，結合人類棋力概率模型、日本讓子段位結構與玩家身分再辨識，有效克服了業餘棋譜雜訊與玩家記憶過擬合；未來可進一步研究基於注意力機制之逐手對手／本人聯合編碼，以及更精細的時間段位漂移校準。",
         ],
         "柒、程式碼": [
-            f"Github連結：{TEAM_CONFIG['github_url']}（送出審查前請確認該儲存庫與權重連結皆已開啟公開瀏覽權限）。",
+            f"Github連結：{TEAM_CONFIG['github_url']}",
             "程式碼目錄結構與主要模組輸入／輸出說明如下（詳細安裝與重現指令見專案根目錄 README.md）：",
             "一、資料處理與共用基礎（src/go_aicup/data/ 與 features/）：sgf.py 與 preprocess.py 負責官方 SGF 稽核與 GameStore 建置；board_cache.py 實作盤面打包與歷史通道；cv.py 強制產生玩家互斥 GroupKFold 切分（Valid-U／Valid-S／train20）；humansl.py 封裝 KataGo v1.18.2 批次抽取 15 個段位 profile 之每手對數機率；humansl_rankvec.py 負責凍結 HumanSL 與學習 C v2 條件向量；metrics.py 實作官方分數與 score_rank 解碼。",
             "二、競賽二核心、對手連結與推論（src/go_aicup/tasks/strength/ 與 scripts/strength/）：rank_prod_a0_fusion.py 與 rank_ogs.py 實作 54 維特徵、yH 玩家分組 OOF 迴歸與 B2 分 k 擬合；rank_qmerge.py 執行同人測試題合併；rank_opp_link2.py 建置 f8 混合偵測器對 8,007 訓練玩家比對；rank_opp_llr.py 與 rank_opp_mu2_diag.py 執行 40 盤 27 維 LLR 重排（μ=2）、軟連結 DELTA 核融合（τ=3.5、α=0.55）、score_rank 解碼及 L10 覆寫匯出。",
@@ -733,7 +748,7 @@ def build_report_docx(comp_key: str, sections: dict[str, list[str]], figures: li
     table = doc.add_table(rows=7, cols=6)
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
     table.autofit = False
-    col_widths = [Cm(1.25), Cm(2.55), Cm(2.55), Cm(2.83), Cm(2.25), Cm(3.40)]
+    col_widths = [Cm(1.25), Cm(2.55), Cm(2.55), Cm(2.73), Cm(2.35), Cm(3.40)]
     for row in table.rows:
         for idx, w in enumerate(col_widths):
             row.cells[idx].width = w
@@ -741,9 +756,9 @@ def build_report_docx(comp_key: str, sections: dict[str, list[str]], figures: li
     # Row 0: Team summary
     _fill_cell(table.cell(0, 0), "隊伍名稱", size_pt=9.5, bold=True)
     _fill_cell(table.cell(0, 1), cfg["team_id"], size_pt=9.5)
-    _fill_cell(table.cell(0, 2), "Private\nLeaderboard 成績", size_pt=9.5, bold=True)
+    _fill_cell(table.cell(0, 2), "Private\nLeaderboard\n成績", size_pt=9.0, bold=True)
     _fill_cell(table.cell(0, 3), str(cfg["private_score"]), size_pt=9.5)
-    _fill_cell(table.cell(0, 4), "Private\nLeaderboard 名次", size_pt=9.5, bold=True)
+    _fill_cell(table.cell(0, 4), "Private\nLeaderboard\n名次", size_pt=9.0, bold=True)
     _fill_cell(table.cell(0, 5), str(cfg["private_rank"]), size_pt=9.5)
 
     headers = [
