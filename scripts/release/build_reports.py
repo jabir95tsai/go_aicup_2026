@@ -37,7 +37,6 @@ FIGURES_DIR = REPORTS_DIR / "figures"
 # ---------------------------------------------------------------------------
 TEAM_CONFIG = {
     "github_url": "https://github.com/jabir95tsai/go_aicup_2026",
-    "weights_url": "【待補：模型權重／快取雲端下載連結（若另行封存）】",
     "advisor": "無",
     "members": [
         {
@@ -530,7 +529,7 @@ def build_c1_sections() -> dict[str, list[str]]:
             "程式碼目錄結構與主要模組輸入／輸出說明如下（詳細安裝與重現指令見專案根目錄 README.md）：",
             "一、資料處理與共用指標（src/go_aicup/data/）：sgf.py 負責 SGF 棋譜解析與屬性稽核；preprocess.py 將官方 CSV 轉為壓縮 memmap 與 GameStore 元資料；board_cache.py 負責 2×46-byte 位元打包與盤面歷史組裝；cv.py 統一產生玩家互斥切分與驗證台抽樣；metrics.py 實作兩賽官方評估指標。",
             "二、競賽一核心與推論（src/go_aicup/tasks/identity/ 與 scripts/identity/）：ge2e.py、train_ge2e.py 與 train_e2e.py 實作 ResNet 風格編碼器、seqB 頭與雙色 GE2E 訓練；predict.py 與 insurance.py 執行原測試集 D4 開局＋GE2E＋Hungarian 指派；pid2_multilevel_export.py 計算 L1/L2 多層開局鍵；likelihood_rich.py 與 pid2_likelihood.py 實作 Numba 盤面重播、50 維特徵、GPU 阻尼牛頓 MAP、EB 先驗、逐 k conditional logit 融合、A3L 整合與兩輪留一偽標籤匯出。",
-            "三、環境建置與一鍵重現流程：依 README.md 執行 pip install -r requirements.txt 與 pip install -e . 安裝鎖定套件，配置 KataGo HumanSL checkpoint 與預訓編碼器權重後，依序執行 scripts/release/repro_pid_setup.sh、repro_pid_run.sh 與 SLURM_JOB_ID=850000 python -m scripts.identity.pid2_likelihood export --eb --combine --pseudo --a3 --a3l 即可逐位元組重現最終提交檔 851729-comb-pseudo-a3l.csv。已凍結之預訓模型權重與驗證參數彙整於：{TEAM_CONFIG_WEIGHTS}",
+            "三、環境建置與一鍵重現流程：依 README.md 執行 pip install -r requirements.txt 與 pip install -e . 安裝鎖定套件，配置 KataGo HumanSL checkpoint 與預訓編碼器權重後，依序執行 scripts/release/repro_pid_setup.sh、repro_pid_run.sh 與 SLURM_JOB_ID=850000 python -m scripts.identity.pid2_likelihood export --eb --combine --pseudo --a3 --a3l 即可逐位元組重現最終提交檔 851729-comb-pseudo-a3l.csv。外部預訓權重 b18c384nbt-humanv0 可直接由 KataGo 官方 GitHub Release（v1.15.0）下載；本隊自訓權重與驗證參數可依 README.md 與設定檔重訓產生，完整凍結權重亦已留存備查，如需審核可立即提供。",
         ],
         "捌、使用的外部資源與參考文獻": [
             "一、外部資料集與預訓模型／開源工具：1. KataGo HumanSL 網路 b18c384nbt-humanv0.ckpt（KataGo v1.15.0 release，KataGo Neural Network License）：於競賽一凍結作為玩家條件似然比基底（搭配我方 C v2 級別向量），貢獻驗證台 +0.0301（LLR）至總融合推進至 0.8631。2. OGS（Online-Go.com）公開棋譜合集 2013–2025-05（za3k.com/ogs，經 OGS 授權重散布與研究使用）：用於 A1／A2／A3L 風格編碼器預訓，A1／A2 貢獻 Public +0.0143（0.8245→0.8388）。3. KGS 高段棋譜庫（u-go.net/gamerecords/，55 檔經清洗後保留 135,806 盤）：僅用於訓練 30-block 深層編碼器 A3L-9600，貢獻 Public 0.8620→0.8631（+0.0010）。4. 開源套件 PyTorch 2.6.0（BSD）、Numba 0.65.0（BSD）、scikit-learn 1.7.2（BSD-3）、KataGo v1.18.2 Python 模組（MIT）。",
@@ -586,7 +585,7 @@ def build_c2_sections() -> dict[str, list[str]]:
             "程式碼目錄結構與主要模組輸入／輸出說明如下（詳細安裝與重現指令見專案根目錄 README.md）：",
             "一、資料處理與共用基礎（src/go_aicup/data/ 與 features/）：sgf.py 與 preprocess.py 負責官方 SGF 稽核與 GameStore 建置；board_cache.py 實作盤面打包與歷史通道；cv.py 強制產生玩家互斥 GroupKFold 切分（Valid-U／Valid-S／train20）；humansl.py 封裝 KataGo v1.18.2 批次抽取 15 個段位 profile 之每手對數機率；humansl_rankvec.py 負責凍結 HumanSL 與學習 C v2 條件向量；metrics.py 實作官方分數與 score_rank 解碼。",
             "二、競賽二核心、對手連結與推論（src/go_aicup/tasks/strength/ 與 scripts/strength/）：rank_prod_a0_fusion.py 與 rank_ogs.py 實作 54 維特徵、yH 玩家分組 OOF 迴歸與 B2 分 k 擬合；rank_qmerge.py 執行同人測試題合併；rank_opp_link2.py 建置 f8 混合偵測器對 8,007 訓練玩家比對；rank_opp_llr.py 與 rank_opp_mu2_diag.py 執行 40 盤 27 維 LLR 重排（μ=2）、軟連結 DELTA 核融合（τ=3.5、α=0.55）、score_rank 解碼及 L10 覆寫匯出。",
-            "三、環境建置與重現步驟：執行 pip install -r requirements.txt 與 pip install -e . 安裝鎖定套件，配置 KataGo v1.18.2 與 HumanSL 權重後，依序執行 rank_opp_link2、rank_opp_llr 與 rank_opp_mu2_diag.py 即可重現最終推論與報告數據。凍結模型與快取位置：{TEAM_CONFIG_WEIGHTS}",
+            "三、環境建置與重現步驟：執行 pip install -r requirements.txt 與 pip install -e . 安裝鎖定套件，配置 KataGo v1.18.2 與 HumanSL 權重後，依序執行 rank_opp_link2、rank_opp_llr 與 rank_opp_mu2_diag.py 即可重現最終推論與報告數據。外部預訓權重 b18c384nbt-humanv0 可直接由 KataGo 官方 GitHub Release（v1.15.0）下載；本隊自訓權重與驗證參數可依 README.md 與設定檔重訓產生，完整凍結權重亦已留存備查，如需審核可立即提供。",
         ],
         "捌、使用的外部資源與參考文獻": [
             "一、外部資料集與預訓模型／開源工具：1. KataGo HumanSL 網路 b18c384nbt-humanv0.bin.gz 與 .ckpt（KataGo v1.15.0 release，KataGo Neural Network License）：作為本系統棋力特徵 H（Valid-U 由 0.5532 提升至 0.6833，+0.130）與 C v2 條件向量／對手 LLR 重排之核心基底。2. KataGo v1.18.2 引擎（MIT）與 NVIDIA CUDA 12.8／cuDNN 9.8 執行期函式庫：供批次抽取 HumanSL 逐手機率。3. OGS 公開棋譜合集 2013–2025-05（za3k.com/ogs，經 OGS 授權重散布與研究使用）：僅透過預訓之競賽一風格編碼器 A1／A2 用於計算對手身分餘弦相似度，協助 opp7 推升 Public LB 至 0.7744。4. scikit-learn 1.7.2（BSD-3）、PyTorch 2.6.0（BSD）、Numba 0.65.0（BSD）。",
@@ -711,8 +710,7 @@ def build_report_docx(comp_key: str, sections: dict[str, list[str]], figures: li
     print(f"\n=== Word-Count Audit: {cfg['team_id']} ({comp_key.upper()}) ===")
     for heading, paras in sections.items():
         _add_paragraph(doc, heading, size_pt=20.0, bold=True, space_before=10, space_after=4)
-        resolved_paras = [p.replace("{TEAM_CONFIG_WEIGHTS}", TEAM_CONFIG["weights_url"]) for p in paras]
-        joined = "\n".join(resolved_paras)
+        joined = "\n".join(paras)
         w_ms = count_msword_words(joined)
         w_cjk = count_cjk_chars(joined)
 
@@ -725,7 +723,7 @@ def build_report_docx(comp_key: str, sections: dict[str, list[str]], figures: li
         else:
             print(f"  {heading:<18} | MS-Word≈{w_ms:4d} | CJK={w_cjk:4d} | (No strict word limit)")
 
-        for ptxt in resolved_paras:
+        for ptxt in paras:
             _add_paragraph(doc, ptxt, size_pt=12.0, space_after=4)
 
         if heading == "陸、分析與結論":
