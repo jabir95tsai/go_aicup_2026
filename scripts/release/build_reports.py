@@ -64,9 +64,9 @@ TEAM_CONFIG = {
         "filename": "TEAM_10894_圍棋棋力與風格預測競賽—競賽一：從圍棋棋譜集辨識玩家.docx",
         "private_score": "【待填】",
         "private_rank": "【待填】",
-        "public_score": "0.8620429",
+        "public_score": "0.8630809",
         "public_rank": "25/134",
-        "final_submission": "824896-comb-pseudo.csv",
+        "final_submission": "851729-comb-pseudo-a3l.csv",
     },
     "c2": {
         "team_id": "TEAM_10895",
@@ -138,19 +138,19 @@ def generate_c1_figures() -> list[tuple[Path, str]]:
         "820880-\nlikeb",
         "821010-\ncomb",
         "824896-\npseudo",
+        "851729-\na3l(終版)",
     ]
-    lbs = [0.2845, 0.7565, 0.8012, 0.8245, 0.8388, 0.8465, 0.8536, 0.8543, 0.8624, 0.8620]
+    lbs = [0.2845, 0.7565, 0.8012, 0.8245, 0.8388, 0.8465, 0.8536, 0.8543, 0.8624, 0.8620, 0.8631]
     x = np.arange(len(stages))
     ax1.plot(x, lbs, marker="o", lw=2.2, color="#1f5a8a", markersize=6, label="主線迭代 Public LB")
     ax1.axhline(0.2845, color="#888888", ls="--", lw=1.0, label="官方 Baseline (0.2845)")
-    ax1.scatter([9.35], [0.8631], marker="*", s=110, color="#c0392b", zorder=5, label="A3L 探針 (0.8631)")
     for xi, yi in zip(x, lbs):
-        dy = -13 if xi in (8,) else 7
-        dx = 14 if xi == 0 else 0
+        dy = -13 if xi in (9,) else 7
+        dx = 14 if xi == 0 else (-6 if xi == 10 else 0)
         ax1.annotate(f"{yi:.4f}", (xi, yi), textcoords="offset points", xytext=(dx, dy),
-                     ha="center", fontsize=7.5, color="#1a1a1a")
+                     ha="center", fontsize=7.2, color="#1a1a1a")
     ax1.set_xticks(x)
-    ax1.set_xticklabels(stages, fontsize=7.2)
+    ax1.set_xticklabels(stages, fontsize=6.7)
     ax1.set_ylim(0.22, 0.93)
     ax1.set_ylabel("Public LB 分數", fontsize=9.5)
     ax1.set_title("(a) 競賽一 Public LB 演進歷程", fontsize=10.5, fontweight="bold")
@@ -265,7 +265,7 @@ def generate_c1_figures() -> list[tuple[Path, str]]:
         ax.annotate("", xy=(x2, y2), xytext=(x1, y1),
                     arrowprops=dict(arrowstyle="->", color="#444444", lw=1.3))
 
-    ax.text(50, 43.5, "競賽一雙軌融合辨識系統總覽（824896-comb-pseudo.csv）",
+    ax.text(50, 43.5, "競賽一雙軌融合辨識系統總覽（851729-comb-pseudo-a3l.csv）",
             ha="center", va="center", fontsize=11.5, fontweight="bold", color="#0d2b45")
 
     # Track 1 (Top)
@@ -280,7 +280,7 @@ def generate_c1_figures() -> list[tuple[Path, str]]:
     # Track 2 (Bottom)
     box(2, 9, 16, 15, "新增集 (pub2/priv2)\n600人×10盤黑白混合\nk=1,2,3,5 非一對一", fc="#f6f8fa", ec="#555555")
     box(21, 18.5, 23, 8.5, "開局與多層計數 (4項)\nOpening / Category / L1角 / L2應手", fc="#e8f1fb", fs=7.8)
-    box(21, 9.5, 23, 8.0, "三組風格編碼器 (3項)\nseqB (Yugen) + A1/A2 (Yugen+OGS)", fc="#e8f1fb", fs=7.8)
+    box(21, 9.5, 23, 8.0, "風格編碼器集成 (3分項)\nseqB + A1 + mean(A2, A3L-9600)", fc="#e8f1fb", fs=7.7)
     box(21, 1.0, 23, 7.5, "50維玩家條件似然比 LLR\nHumanSL(Cv2)+局部棋形G3+EB先驗Σ", fc="#fff4e5", ec="#c87d12", fs=7.7)
 
     box(49, 9.5, 21, 14, "逐 k Conditional Logit\n8 分項學習融合權重\n(k=1,2,3,5 獨立權重)", fc="#eaf2ff", ec="#1f5a8a", bold=True)
@@ -480,45 +480,45 @@ def build_c1_sections() -> dict[str, list[str]]:
         "壹、環境": [
             "本系統開發於 Windows 11 本地端工作站（NVIDIA RTX 3060 Ti 8GB、CUDA 12.4），大規模訓練、特徵抽取與重現性稽核執行於國家高速網路與計算中心「晶創 26」（Nano4）高效能叢集（Red Hat Enterprise Linux x86_64、Slurm 排程之 dev 與 8gpus 佇列，單節點配置最多 8 張 NVIDIA H200 SXM5 141GB 顯卡、2 顆 Intel Xeon Platinum 8480+ 共 112 核心與 2TB 主記憶體，節點內透過 NVLink 互連）。",
             "程式語言採用 Python 3.13.12（Conda 環境 go），核心套件依 requirements.txt 鎖定版本：PyTorch 2.6.0+cu124、NumPy 2.3.5、Pandas 2.3.3、PyArrow 20.0.0、SciPy 1.16.3、scikit-learn 1.7.2、Numba 0.65.0 及 Matplotlib 3.10.8。單節點多卡訓練採用 PyTorch 原生 torchrun 與 NCCL 後端，並以 CUDA 12.8／cuDNN 9.8 執行期函式庫支撐 KataGo Python 推論模組。",
-            "外部預訓模型與資料集：一、KataGo HumanSL 網路 PyTorch 權重 b18c384nbt-humanv0.ckpt（來自 GitHub lightvector/KataGo v1.15.0 release），搭配 KataGo v1.18.2 Python 模組於執行期重現 policy 分布，並凍結主幹改接我方自學之幽玄級別條件向量 C v2，僅供新增集玩家條件似然比特徵抽取，未進行微調。二、OGS（Online-Go.com）公開棋譜合集 2013–2025-05（za3k.com/ogs，16.2 GB），經嚴格過濾後與官方幽玄資料合併訓練端到端風格編碼器 A1 與 A2，未參與任何推論或測試題比對。",
+            "外部預訓模型與資料集：一、KataGo HumanSL 網路 PyTorch 權重 b18c384nbt-humanv0.ckpt（GitHub lightvector/KataGo v1.15.0 release），搭配 KataGo v1.18.2 Python 模組於執行期重現 policy 分布並接續自學之 C v2 級別條件向量，僅供新增集 LLR 特徵抽取，未微調。二、OGS 公開棋譜合集 2013–2025-05（za3k.com/ogs，16.2 GB），用於訓練風格編碼器 A1／A2／A3L。三、KGS 高段棋譜庫（u-go.net/gamerecords/，55 檔 228,849 盤），與 OGS 併抽訓練深層風格編碼器 A3L-9600；兩外部棋譜庫均未參與任何推論。",
         ],
         "貳、演算方法與模型架構": [
-            "針對官方雙重測試集特性，本隊設計「原測試集指派管線」與「新增集多模態八分項融合＋偽標籤擴充管線」之雙軌系統（最終檔 824896-comb-pseudo.csv，共 1,600 題輸出）。",
-            "第一軌（原測試集 pub_/priv_，400 人×100 盤全黑、一對一）：先對前 60 手進行 D4 棋盤對稱正規化，計算前綴回退（prefix back-off）與逐手位置（slot）Naive Bayes 對數似然，並以訓練集全黑棋譜估計族群先驗。為防範開局漂移，引入不看開局（ply≥20）之 GE2E 保險編碼器（沿用 20-block、256-channel 盤面 ResNet 主幹，輸出 256 維逐手向量取盤內平均與餘弦相似度，權重為 8×w），最後以 Hungarian 演算法執行全域一對一最佳指派（--hd-weight 2），輸出前五名候選。",
-            "第二軌（新增集 pub2_/priv2_，600 人×10 盤黑白混合、非一對一）：每道查詢題對 600 名候選人計算八個互補分項：一、D4 開局 Naive Bayes；二、輪廓類別統計（category）；三、多層開局比對 L1（定式角部鍵）；四、L2（對手應手鍵）；五、seqB 編碼器餘弦分數（基於 v4_d4_hd_9600 主幹加兩層 256→512→256 逐手殘差 MLP 聚合頭與手數嵌入）；六、A1 與七、A2 端到端從頭訓練之 20-block ResNet+B 頭編碼器（雙色正規化）；八、玩家條件走子似然比（LLR）。",
-            "在 LLR 分項中，凍結 KataGo HumanSL 網路並替換為自學之 C v2 四級別條件（C／A／2D／5D），取該手對數平均指數分布為基底 b(m)，記錄前 32 高機率落點及其餘點「other」。每位候選人以 10 盤參考盤擬合 50 維對數線性殘差參數 θ_c（級別偏移 3 維、共識排名 5 維、對手與己方上一手距離 10 維、邊線 5 維、階段交互 10 維、跟隨銳利度 G1 2 維、絕對區域 G2 8 維、Numba 盤面重播局部棋形 G3 10 維如碰長尖跳小飛、戰術氣數 G4 3 維），並套用經驗貝氏異向共變異先驗 N(θ_pop, Σ)。最終透過逐 k（k∈{1,2,3,5}）conditional logit 學習八分項權重得出後驗，再對後驗 ≥0.5 之查詢題進行兩輪「留一（leave-one-out）」偽標籤擴充：將其棋局併入預測候選人參考集並重算全部分項（計算該題自身時剔除該題棋局），依後驗由高至低輸出 top-5。",
+            "針對官方雙重測試集特性，本隊設計「原測試集指派管線」與「新增集多模態八分項融合＋偽標籤擴充管線」之雙軌系統（最終檔 851729-comb-pseudo-a3l.csv，共 1,600 題輸出）。",
+            "第一軌（原測試集 pub_/priv_，400 人×100 盤全黑、一對一）：先對前 60 手進行 D4 棋盤對稱正規化，計算前綴回退（prefix back-off）與逐手位置（slot）Naive Bayes 對數似然，並以訓練集全黑棋譜估計族群先驗。為防範開局漂移，引入不看開局（ply≥20）之 GE2E 保險編碼器（20-block、256-channel 盤面 ResNet 主幹，輸出 256 維逐手向量取盤內平均與餘弦相似度，權重為 8×w），最後以 Hungarian 演算法執行全域一對一最佳指派（--hd-weight 2），輸出前五名候選。",
+            "第二軌（新增集 pub2_/priv2_，600 人×10 盤黑白混合、非一對一）：每道查詢題對 600 名候選人計算八個互補分項：一、D4 開局 Naive Bayes；二、輪廓類別統計（category）；三、多層開局比對 L1（定式角部鍵）；四、L2（對手應手鍵）；五、seqB 編碼器餘弦分數（v4_d4_hd_9600 主幹加兩層 256→512→256 逐手殘差 MLP 聚合頭與手數嵌入）；六、端到端 20-block 風格編碼器 A1；七、由 A2 與深化 30-block（35.9M 參數、grow_trunk=True）之 A3L-9600 編碼器取等權平均 mean(A2, A3L-9600) 組成該風格分項；八、玩家條件走子似然比（LLR）。",
+            "在 LLR 分項中，凍結 KataGo HumanSL 網路並替換為自學之 C v2 四級別條件（C／A／2D／5D），取該手對數平均指數分布為基底 b(m)，記錄前 32 高機率落點及其餘點「other」。每位候選人以 10 盤參考盤擬合 50 維對數線性殘差參數 θ_c（級別偏移 3 維、共識排名 5 維、對手與己方上一手距離 10 維、邊線 5 維、階段交互 10 維、跟隨銳利度 G1 2 維、絕對區域 G2 8 維、Numba 盤面重播局部棋形 G3 10 維如碰長尖跳小飛、戰術氣數 G4 3 維），並套用經驗貝氏異向共變異先驗 N(θ_pop, Σ)。最終透過逐 k（k∈{1,2,3,5}）conditional logit 學習八分項權重得出後驗，再對後驗 ≥0.5 之查詢題進行兩輪「留一（leave-one-out）」偽標籤擴充（pub2 選 293 題擴充 259 人、priv2 選 305 題擴充 278 人）：將其棋局併入預測候選人參考集並重算全部分項（計算該題自身時剔除該題棋局），依後驗由高至低輸出 top-5。",
         ],
         "參、創新性": [
             "本架構創新聚焦於突破新增集「每人僅 10 盤參考棋、黑白混合且查詢題最小僅 1 盤（k=1）」之極端少樣本瓶頸。首先，原創「以棋力條件網路為基底之玩家條件對數線性殘差模型（LLR）」：傳統風格嵌入將整盤池化為單一 256 維向量，會稀釋局部手筋與步調習慣；本隊跨任務將競賽二自學的 C v2 幽玄級別向量接回凍結之 KataGo HumanSL，抽取出兼具棋力與人類共識的 top-32 基底分布 b(m)，再於其上為每位候選人擬合 50 維低維度殘差向量 θ_c。由於參數少且具有明確圍棋語意（如局部棋形碰長尖跳小飛與跟隨銳利度），單靠 LLR 即能補足嵌入向量與開局計數無法分辨之細微手癖，在封存驗證池帶來全系統最大單項躍升（+0.0301，z=17.6）。",
             "其次，提出「經驗貝氏異向共變異先驗（EB50）」解決 10 盤過擬合問題：實驗發現各維度在玩家間變異差異極大（如級別偏移標準差達 0.57–0.83，局部棋形為 0.14–0.39，區域僅 0.05–0.14），等向先驗會在無差異方向殘留雜訊。我們從獨立驗證台玩家四組互異 10 盤估計玩家間共變異矩陣 Σ 並設特徵值下限 0.01，使 MAP 收縮精準保留個人特質，將同一人兩組 10 盤的 θ 餘弦穩定度由 0.509 大幅推升至 0.690。",
-            "再者，設計「多模態八分項留一偽標籤擴充機制」：利用新增集「同一玩家可對應多題」的官方結構，將高信心題（後驗 ≥0.5）以兩輪遞迴方式擴充進候選人的 10 盤參考庫並重算所有八個異質分項，同時嚴格執行留一避免自我增強洩漏，有效緩解 10 盤參考不足之先天限制。最後，針對原測試集一對一與新增集非一對一採取雙軌分離指派與逐 k conditional logit 融合，達成理論嚴謹與實務最佳化。",
+            "再者，設計「多模態八分項留一偽標籤擴充機制」與「殘差恆等深化擴容（grow_trunk）」：前者利用同一玩家可對應多題之結構，在嚴格留一保護下把高信心題併入候選參考庫並重算全部分項；後者於預訓 20-block 主幹上以零初始化末層 BN 權重無縫擴深至 30-block（A3L-9600），再結合 OGS 與 KGS 高段多樣化棋譜提升少樣本表徵泛化力，並採原／新增集雙軌分離指派達成最佳效能。",
         ],
         "肆、資料處理": [
             "訓練集經全量稽核共 1,000,000 盤、8,007 位玩家、221,894,008 手（100–445 手，無重複棋譜，解析錯誤 0），唯一鍵為 (rank, game_id) 而非單獨 game_id（避免 10:1 靜默塌縮）。針對官方 v1.1 新增之讓子欄位 HD[n]，經實證稽核確認 HD0 為互先貼目 6.5、HD1 為讓先貼目 0.5（白勝和棋），而 HD≥2 之 36,421 盤 SGF 黑白標記與實際執色相反且缺讓子星位。因官方競賽二測試集與競賽一可用訓練條件皆以讓先內為主，本任務資料處理一律過濾 HD≤1，避免讓子標記反轉汙染風格特徵。",
             "為加速百萬盤處理並杜絕重複解析 CSV，建立確定性 bit-packed 盤面快取（每手雙層 19×19 打包為 2×46 bytes 與落點、顏色元資料）。針對雙色盤面，所有風格編碼器與 LLR 皆執行執色正規化（as_black：白方落子將雙方盤面通道對調，統一轉換為「我方／對方」視角）；D4 對稱處理則依子題特性區隔：開局模型與 L1/L2 採用旋轉正規化或原始方位對齊，風格編碼器訓練時施以「玩家層級固定 D4 增強」（同一玩家所有盤共用同一變換，保留方位偏好同時擴增樣本）。",
-            "外部資料 OGS 2013–2025-05 棋譜經嚴格清洗：僅保留 19 路、ranked、HD≤1、無擺子、已完成、手數 ≥60 手且對手為真人之對局；A1 抽樣 40,000 名玩家各 20 盤、A2 納入全部 82,481 名玩家各 10 盤，訓練時與幽玄按 1:1（yugen_share=0.5）混合抽樣。驗證設計嚴格遵循玩家互斥（player-disjoint）：從非編碼器訓練玩家建構兩個 591 人×40 盤封存驗證台（pool 0 用於開發選參與 Σ／權重擬合，pool 1 完全隔離作單次最終門檻檢定），每次抽題皆模擬 10 盤參考庫與互斥查詢集，完全杜絕資料洩漏。",
+            "外部資料均經嚴格清洗：OGS 2013–2025-05 僅保留 19 路、ranked、HD≤1、無擺子、已完成、手數 ≥60 手且對手為真人之對局（A1 抽 40,000 人×20 盤、A2 用全量 82,481 人×10 盤）；KGS 高段庫（228,849 盤）依同規格與「前 60 手無 pass、排除疑似電腦帳號」條件篩出 135,806 盤／11,627 人（其中 ≥20 盤者 1,463 人），全數強制納入並與 OGS 併抽至 40,000 人×20 盤訓練 A3L-9600，訓練時幽玄抽樣比為 0.5。驗證台由非編碼器訓練玩家建構兩個 591 人×40 盤互斥池（pool 0 開發調參、pool 1 封存檢定），杜絕任何資料洩漏。",
         ],
         "伍、訓練方式": [
-            "訓練流程分為風格編碼器預訓、端到端主幹訓練、條件似然擬合與融合校準四階段，全程固定隨機種子與硬體紀錄。",
-            "一、風格編碼器與 seqB 頭：基礎骨幹由棋力 V2 20-block ResNet 初始化，先於幽玄資料（排除驗證台 split 0–2）以 GE2E softmax 損失（每批 64 人×8 盤×16 手，D4 玩家層級增強，AdamW lr=3e-4、wd=1e-4、5% warmup＋cosine 衰減、BF16 混合精度）訓練 9,600 步得到 v4_d4_hd_9600，再凍結逐手向量訓練兩層逐手殘差 MLP 聚合頭（head B）。接著以相同超參數與激活檢查點技術（每批 64 人×8 盤×32 手，WSD 排程：5% warmup 與最後 20% 衰減），混合幽玄與 OGS 資料從頭端到端聯合訓練 20-block 編碼器＋B 頭各 9,600 步，產出 A1 與 A2（8×H200 各耗時約 10.5 小時）。",
-            "二、LLR 殘差參數與先驗擬合：於驗證台外抽取 600 名訓練玩家（各 10 盤）以 σ=10 擬合族群基準 θ_pop；再由 pool 0（591 人×4 組×10 盤）估計 50×50 玩家間共變異矩陣 Σ。推論階段以 GPU 批次阻尼牛頓法（damped Newton，單步最大位移限 1、至多 25 輪）為每位官方候選人求取 MAP 解（λ=4、c=1），全程僅費時數分鐘且無數值發散。",
-            "三、逐 k 融合權重訓練與門檻控管：於 pool 0 開發抽樣組上使用 conditional logit 最大概似（L-BFGS）分 k∈{1,2,3,5} 學習八個分項權重，最後套用兩輪後驗 ≥0.5 留一偽標籤擴充。專案實施嚴格事前登記門檻（gate）：任何新改動須於完全未見玩家之封存 pool 1 達成整體 Δ>0、z≥2.5、四個 k 桶皆 ≥−0.005 且 pool 0 Δ>0 方得採納；所有訓練僅使用可公開重現之設定檔與確定性腳本，並在隔離 git worktree 完成從原始測試 CSV 至最終輸出之逐位元組重現性驗證。",
+            "訓練流程分為風格編碼器預訓、端到端主幹訓練、條件似然擬合與融合校準四階段，全程固定隨機種子與硬體紀錄，並於各階段完成後凍結權重執行離線驗證。",
+            "一、風格編碼器與 A3L 深化訓練：基礎骨幹由棋力 V2 20-block ResNet 初始化，先於幽玄資料（排除驗證台 split 0–2）以 GE2E softmax 損失（每批 64 人×8 盤×16 手，D4 玩家層級增強，AdamW lr=3e-4、wd=1e-4、5% warmup＋cosine 衰減、BF16 混合精度）訓練 9,600 步得到 v4_d4_hd_9600，再凍結逐手向量訓練兩層逐手殘差 MLP 聚合頭（head B）。接著以相同超參數與激活檢查點（每批 64 人×8 盤×32 手，WSD 排程：5% warmup 與最後 20% 衰減），混合幽玄與 OGS 資料從頭端到端訓練 20-block 的 A1／A2 各 9,600 步（8×H200 各約 10.5 小時）；A3L-9600 則以 grow_trunk=True 將 20-block 主幹擴為 30-block（6 段激活檢查點，seed 2027），於 OGS＋KGS 混合快取接續 stable_step5760.pt 跑滿 9,600 步並於第 7,680 步啟動 WSD 衰減。",
+            "二、LLR 殘差參數與先驗擬合：於驗證台外抽取 600 名訓練玩家（各 10 盤）以 σ=10 擬合族群基準 θ_pop；再由 pool 0（591 人×4 組×10 盤）估計 50×50 玩家間共變異矩陣 Σ。推論階段以 GPU 批次阻尼牛頓法（damped Newton，單步最大位移限 1、至多 25 輪）為每位官方候選人求取收斂之 MAP 解（λ=4、c=1），全程僅費時數分鐘且無數值發散或記憶體溢位問題。",
+            "三、逐 k 融合權重訓練與重現稽核：於 pool 0 上以 conditional logit 最大概似（L-BFGS）分 k∈{1,2,3,5} 學習八分項權重，最後套用兩輪後驗 ≥0.5 留一偽標籤擴充。專案所有核心階段皆須通過封存 pool 1 門檻（Δ>0、z≥2.5、各 k≥−0.005 且 pool 0 Δ>0），同時於獨立環境重跑完整管線以檢核跨節點數值穩定性；最終版本 851729-comb-pseudo-a3l.csv 與基底 824896 皆已完成乾淨環境逐位元組重現驗證（archive/restore-855796.log 與 Slurm 839312），確認與官方最終提交檔內容完全一致。",
         ],
         "陸、分析與結論": [
-            "最終提交檔 824896-comb-pseudo.csv 在 Public LB 取得 0.8620429（較官方 baseline 0.2845 大幅提升 +0.5775），且經乾淨工作樹重現稽核（Slurm 839312，耗時 1 小時 7 分）確認從原始測試 CSV 算起 1,600 列預測逐位元組完全一致（SHA-256 前八碼 d069d70a）。如圖一所示，系統分數由單一開局模型與 seqB（0.8012），隨引入 OGS 雙編碼器與多層開局鍵（0.8388）、27 維 LLR（0.8465）、G3 局部棋形（0.8536）、EB50 異向先驗（0.8543），逐步推升至逐 k 融合與兩輪偽標籤擴充（0.8620）；各階段在驗證台封存 pool 1 皆獲高度統計顯著增益（z 值介於 5.66 至 17.6）。",
-            "成功關鍵與機制歸因如圖二(a)：玩家條件 LLR 與逐手局部棋形（G3）合計帶來最大突破（+0.041），印證「以棋力模型條件化後之逐手殘差對數似然比」相較整盤平均嵌入更能保留細微手癖；經驗貝氏先驗精準壓縮低訊噪維度，使 10 盤極少樣本也能穩定估計。從圖二(b) 可見誤差結構與成功／失敗案例規律：全黑題在 k=5 達 0.964，但 k=1 全白題僅 0.523（落後全黑 k=1 的 0.598 達 0.075），顯示白棋受對手開局主導較深且資訊量較少；實際檢查誤判案例（如單盤 k=1 短局或與他人口味相近之對局），往往源於候選庫僅 10 盤的參考抽樣變異，而透過偽標籤擴充（官方 pub2 選中 294 題、priv2 選中 305 題）能成功救回部分跨題一致之玩家。",
-            "同樣重要的是失敗與淘汰方向之排除：我們以嚴格封存驗證淘汰了六條表面合理但無效的路線——一、難負例配對訓練（815766）：診斷顯示誤認為連續分散的相似度，固定誤認對僅占 0.81%，不具結構性突破空間；二、編碼器 8 向 D4 TTA（+0.0007，z=0.53）：編碼器已學習絕對方位習慣，強行八向平均反而稀釋訊號；三、中心擴充 EM（+0.0018，z=2.30）未達顯著門檻；四、反向似然 RLLR（+0.000004）：因不同候選人自身棋局長度與偏離尺度不可比，反遭族群基準偏差淹沒；五、題目合併（E1／v2，AP 0.51–0.67，pool 1 −0.00003）：高分配對多為後驗已一致的題目，無法挽救真正誤判題；六、KGS 7,200 步 A3 編碼器在封存池略降（−0.0018），故主線維持 824896；截稿前晚間另曾對 9,600 步深層 A3L 進行探針（851729，Public 0.8631），雖略高但未過事前 z≥2.5 門檻。",
-            "未來改進方向包括：設計針對白棋執色之專屬動態開局／佈局特徵以縮小黑白落差、對非重複高難負例探索批內線上困難負例挖掘（online hard negative mining），以及引入更強多尺度區域對局網路強化單盤 k=1 辨識力。",
+            "最終提交檔 851729-comb-pseudo-a3l.csv 在 Public LB 取得 0.8630809（較官方 baseline 0.2845 大幅提升 +0.5786），且 824896 基底與最終版 851729 皆已通過乾淨還原環境之逐位元組重現驗證（SHA-256 前八碼 2501f2f4）。如圖一所示，系統分數由單一開局模型與 seqB（0.8012），隨引入 OGS 雙編碼器與多層開局鍵（0.8388）、27 維 LLR（0.8465）、G3 局部棋形（0.8536）、EB50 異向先驗（0.8543）、逐 k 融合與兩輪偽標籤擴充（0.8620），最後納入 30-block 深化編碼器 A3L-9600 推進至 0.8631；主要階段在驗證台封存 pool 1 皆獲高度統計顯著增益（z 值介於 5.66 至 17.6）。",
+            "成功關鍵與機制歸因如圖二(a)：玩家條件 LLR 與逐手局部棋形（G3）合計帶來最大突破（+0.041），印證「以棋力模型條件化後之逐手殘差對數似然比」相較整盤平均嵌入更能保留細微手癖；經驗貝氏先驗精準壓縮低訊噪維度，使 10 盤極少樣本也能穩定估計。從圖二(b) 可見誤差結構與成功／失敗案例規律：全黑題在 k=5 達 0.964，但 k=1 全白題僅 0.523（落後全黑 k=1 的 0.598 達 0.075），顯示白棋受對手開局主導較深且資訊量較少；實際檢查誤判案例（如單盤 k=1 短局或與他人口味相近之對局），往往源於候選庫僅 10 盤的參考抽樣變異，而透過偽標籤擴充（官方 pub2 選中 293 題、priv2 選中 305 題）與 A3L 多樣性集成能進一步修正困難對局排名。",
+            "同樣重要的是失敗與淘汰方向之排除：我們以嚴格封存驗證淘汰了六條表面合理但無效的路線——一、難負例配對訓練（815766）：診斷顯示誤認為連續分散的相似度，固定誤認對僅占 0.81%，不具結構性突破空間；二、編碼器 8 向 D4 TTA（+0.0007，z=0.53）：編碼器已學習絕對方位習慣，強行八向平均反而稀釋訊號；三、中心擴充 EM（+0.0018，z=2.30）未達顯著門檻；四、反向似然 RLLR（+0.000004）：因不同候選人自身棋局長度與偏離尺度不可比，反遭族群基準偏差淹沒；五、題目合併（E1／v2，AP 0.51–0.67，pool 1 −0.00003）：高分配對多為後驗已一致的題目，無法挽救真正誤判題；六、較短步數之 7,200 步 A3／A3L（pool 1 −0.0018／−0.0010）與最後五向風格混搭 851772（Public 0.8626）皆未優於 851729 而遭排除。",
+            "未來改進方向包括：設計針對白棋執色之專屬動態開局／佈局特徵以縮小黑白落差、探索批內線上困難負例挖掘（online hard negative mining），以及引入更強多尺度區域對局網路強化單盤 k=1 辨識力。",
         ],
         "柒、程式碼": [
-            f"完整專案程式碼已整理並託管於 GitHub：{TEAM_CONFIG['github_url']}（送出審查前請確認該儲存庫與權重連結皆已開啟公開瀏覽權限）。",
+            f"Github連結：{TEAM_CONFIG['github_url']}（送出審查前請確認該儲存庫與權重連結皆已開啟公開瀏覽權限）。",
             "程式碼目錄結構與主要模組輸入／輸出說明如下（詳細安裝與重現指令見專案根目錄 README.md）：",
             "一、資料處理與共用指標（src/go_aicup/data/）：sgf.py 負責 SGF 棋譜解析與屬性稽核；preprocess.py 將官方 CSV 轉為壓縮 memmap 與 GameStore 元資料；board_cache.py 負責 2×46-byte 位元打包與盤面歷史組裝；cv.py 統一產生玩家互斥切分與驗證台抽樣；metrics.py 實作兩賽官方評估指標。",
-            "二、競賽一核心與推論（src/go_aicup/tasks/identity/ 與 scripts/identity/）：ge2e.py、train_ge2e.py 與 train_e2e.py 實作 ResNet 風格編碼器、seqB 頭與雙色 GE2E 訓練；predict.py 與 insurance.py 執行原測試集 D4 開局＋GE2E＋Hungarian 指派；pid2_multilevel_export.py 計算 L1/L2 多層開局鍵；likelihood_rich.py 與 pid2_likelihood.py 實作 Numba 盤面重播、50 維特徵、GPU 阻尼牛頓 MAP、EB 先驗、逐 k conditional logit 融合與兩輪留一偽標籤匯出。",
-            "三、環境建置與一鍵重現流程：依 README.md 執行 pip install -r requirements.txt 與 pip install -e . 安裝鎖定套件，並下載 KataGo HumanSL checkpoint 至指定路徑後，執行 scripts/release/repro_pid_setup.sh、repro_pid_run.sh 與 repro_pid_compare.py 即可在乾淨工作樹從官方原始測試 CSV 逐位元組重現最終提交檔 824896-comb-pseudo.csv。已凍結之預訓模型權重與驗證參數彙整於：{TEAM_CONFIG_WEIGHTS}",
+            "二、競賽一核心與推論（src/go_aicup/tasks/identity/ 與 scripts/identity/）：ge2e.py、train_ge2e.py 與 train_e2e.py 實作 ResNet 風格編碼器、seqB 頭與雙色 GE2E 訓練；predict.py 與 insurance.py 執行原測試集 D4 開局＋GE2E＋Hungarian 指派；pid2_multilevel_export.py 計算 L1/L2 多層開局鍵；likelihood_rich.py 與 pid2_likelihood.py 實作 Numba 盤面重播、50 維特徵、GPU 阻尼牛頓 MAP、EB 先驗、逐 k conditional logit 融合、A3L 整合與兩輪留一偽標籤匯出。",
+            "三、環境建置與一鍵重現流程：依 README.md 執行 pip install -r requirements.txt 與 pip install -e . 安裝鎖定套件，配置 KataGo HumanSL checkpoint 與預訓編碼器權重後，依序執行 scripts/release/repro_pid_setup.sh、repro_pid_run.sh 與 SLURM_JOB_ID=850000 python -m scripts.identity.pid2_likelihood export --eb --combine --pseudo --a3 --a3l 即可逐位元組重現最終提交檔 851729-comb-pseudo-a3l.csv。已凍結之預訓模型權重與驗證參數彙整於：{TEAM_CONFIG_WEIGHTS}",
         ],
         "捌、使用的外部資源與參考文獻": [
-            "一、外部資料集與預訓模型／開源工具：1. KataGo HumanSL 網路 b18c384nbt-humanv0.ckpt（KataGo v1.15.0 release，KataGo Neural Network License）：於競賽一凍結作為玩家條件似然比基底（搭配我方 C v2 級別向量），貢獻驗證台 +0.0301（LLR）至總融合推進至 0.8620。2. OGS（Online-Go.com）公開棋譜合集 2013–2025-05（za3k.com/ogs，經 OGS 授權重散布與研究使用）：僅用於 A1／A2 風格編碼器預訓，貢獻 Public +0.0143（0.8245→0.8388）。3. 開源套件 PyTorch 2.6.0（BSD）、Numba 0.65.0（BSD）、scikit-learn 1.7.2（BSD-3）、KataGo v1.18.2 Python 模組（MIT）。",
+            "一、外部資料集與預訓模型／開源工具：1. KataGo HumanSL 網路 b18c384nbt-humanv0.ckpt（KataGo v1.15.0 release，KataGo Neural Network License）：於競賽一凍結作為玩家條件似然比基底（搭配我方 C v2 級別向量），貢獻驗證台 +0.0301（LLR）至總融合推進至 0.8631。2. OGS（Online-Go.com）公開棋譜合集 2013–2025-05（za3k.com/ogs，經 OGS 授權重散布與研究使用）：用於 A1／A2／A3L 風格編碼器預訓，A1／A2 貢獻 Public +0.0143（0.8245→0.8388）。3. KGS 高段棋譜庫（u-go.net/gamerecords/，55 檔經清洗後保留 135,806 盤）：僅用於訓練 30-block 深層編碼器 A3L-9600，貢獻 Public 0.8620→0.8631（+0.0010）。4. 開源套件 PyTorch 2.6.0（BSD）、Numba 0.65.0（BSD）、scikit-learn 1.7.2（BSD-3）、KataGo v1.18.2 Python 模組（MIT）。",
             "二、生成式 AI 工具使用揭露：本專案開發與報告製作過程如實使用生成式 AI 輔助，包括 Anthropic Claude Code（Claude Opus 5.5）與 OpenAI Codex 協助撰寫實驗腳本、資料稽核、單元測試與自動化重現管線，以及 Google Antigravity（Gemini）協助彙整實驗帳本、繪製分析圖表與編排本報告初稿；所有演算法設計、實驗假設、門檻裁決、程式碼審閱與實測驗證皆由參賽隊員親自執行與確認。",
             "三、參考文獻（APA 格式）：",
             "Chen, Y.-C., Shih, C.-H., & Wu, I.-C. (2025). Strength estimation and human-like strength adjustment in games. International Conference on Learning Representations (ICLR 2025).",
@@ -546,7 +546,7 @@ def build_c2_sections() -> dict[str, list[str]]:
         "參、創新性": [
             "本系統針對競賽二核心挑戰——「評分指標非線性（差兩級即零分）與 8,007 位玩家標籤雜訊」——提出四項關鍵創新設計。首先，推導並實作對應官方指標之 Bayes 最佳解碼器（metrics.score_rank）：一般分類採用機率 argmax 或序數期望值，於兩級誤差全零分下皆非最佳解；本隊精確最大化期望官方得分 p[r]＋(p[r−1]＋p[r+1])/e，自動壓抑無雙向鄰居分數保護之邊界段位（D、6D），實證穩定優於 argmax 與期望值解碼。",
             "其次，提出「自學幽玄十級條件向量（C v2）與讓先貼目校正（P3）」：由於 KataGo 原始 HumanSL 使用 KGS 段位體系且預設互先貼 6.5 目，與日本幽玄十級定義及讓先無貼目（HD1）存在域落差，本隊凍結網路權重僅學習 20 組 384 維條件向量重映射級別空間，並於 HD1 棋局將 KataGo 貼目調為 0.5 目以吻合實際規則。",
-            "第三，首創「跨任務對手身分連結與 LLR 重排（opp7）」：我們打破單獨從查詢玩家棋譜推論棋力的框架，實證測試集約 60%–77% 的對手即為訓練集已知段位之 8,007 位玩家，且幽玄配對規則保證 HD0 幾乎同級（|Δ|≤1 達 94%）、HD1 精準反映一級強弱差。我們進一步將競賽一的 27 維 LLR 模型跨賽遷移至此對 f8 前十候選進行重排（將參考盤單盤 top-1 辨識率由 0.337 提升至 0.379），並以軟連結 DELTA 核函數平滑吸收不確定性，取代硬門檻挑選，使 Public LB 躍升 +0.0182（0.7563→0.7744）。",
+            "第三，首創「跨任務對手身分連結與 LLR 重排（opp7）」：我們打破單獨從查詢玩家棋譜推論棋力的框架，實證測試集約 60%–77% 的對手即為訓練集已知段位之 8,007 位玩家（官方測試 10,000 盤中高達 700 盤突破 q99 高信心門檻），且幽玄配對規則保證 HD0 幾乎同級（|Δ|≤1 達 94%）、HD1 精準反映一級強弱差。我們進一步將競賽一的 27 維 LLR 模型跨賽遷移至此對 f8 前十候選進行重排（將參考盤單盤 top-1 辨識率由 0.3367 提升至 0.3809），並以軟連結 DELTA 核函數平滑吸收不確定性，取代硬門檻挑選，使 Public LB 躍升 +0.0182（0.7563→0.7744）。",
             "第四，建構「風格同人測試題合併（qmerge）」與「玩家層級非線性 H 迴歸特徵（yH）」，從多個正交維度榨取棋局結構訊號。",
         ],
         "肆、資料處理": [
@@ -567,7 +567,7 @@ def build_c2_sections() -> dict[str, list[str]]:
             "總結而言，結合人類棋力概率模型、日本讓子段位結構與玩家身分再辨識，有效克服了業餘棋譜雜訊與玩家記憶過擬合；未來可進一步研究基於注意力機制之逐手對手／本人聯合編碼，以及更精細的時間段位漂移校準。",
         ],
         "柒、程式碼": [
-            f"完整專案程式碼已整理並託管於 GitHub：{TEAM_CONFIG['github_url']}（送出審查前請確認該儲存庫與權重連結皆已開啟公開瀏覽權限）。",
+            f"Github連結：{TEAM_CONFIG['github_url']}（送出審查前請確認該儲存庫與權重連結皆已開啟公開瀏覽權限）。",
             "程式碼目錄結構與主要模組輸入／輸出說明如下（詳細安裝與重現指令見專案根目錄 README.md）：",
             "一、資料處理與共用基礎（src/go_aicup/data/ 與 features/）：sgf.py 與 preprocess.py 負責官方 SGF 稽核與 GameStore 建置；board_cache.py 實作盤面打包與歷史通道；cv.py 強制產生玩家互斥 GroupKFold 切分（Valid-U／Valid-S／train20）；humansl.py 封裝 KataGo v1.18.2 批次抽取 15 個段位 profile 之每手對數機率；humansl_rankvec.py 負責凍結 HumanSL 與學習 C v2 條件向量；metrics.py 實作官方分數與 score_rank 解碼。",
             "二、競賽二核心、對手連結與推論（src/go_aicup/tasks/strength/ 與 scripts/strength/）：rank_prod_a0_fusion.py 與 rank_ogs.py 實作 54 維特徵、yH 玩家分組 OOF 迴歸與 B2 分 k 擬合；rank_qmerge.py 執行同人測試題合併；rank_opp_link2.py 建置 f8 混合偵測器對 8,007 訓練玩家比對；rank_opp_llr.py 與 rank_opp_mu2_diag.py 執行 40 盤 27 維 LLR 重排（μ=2）、軟連結 DELTA 核融合（τ=3.5、α=0.55）、score_rank 解碼及 L10 覆寫匯出。",
@@ -692,10 +692,10 @@ def build_report_docx(comp_key: str, sections: dict[str, list[str]], figures: li
         size_pt=12.0, space_after=8
     )
 
-    # 8 Official Sections in exact order
+    # 8 Official Sections in exact order (20pt Bold headings per official template)
     print(f"\n=== Word-Count Audit: {cfg['team_id']} ({comp_key.upper()}) ===")
     for heading, paras in sections.items():
-        _add_paragraph(doc, heading, size_pt=14.0, bold=True, space_before=8, space_after=4)
+        _add_paragraph(doc, heading, size_pt=20.0, bold=True, space_before=10, space_after=4)
         resolved_paras = [p.replace("{TEAM_CONFIG_WEIGHTS}", TEAM_CONFIG["weights_url"]) for p in paras]
         joined = "\n".join(resolved_paras)
         w_ms = count_msword_words(joined)
@@ -727,13 +727,13 @@ def build_report_docx(comp_key: str, sections: dict[str, list[str]], figures: li
 
     # Page break + Author Contact Table
     doc.add_page_break()
-    _add_paragraph(doc, "作者聯絡資料表", size_pt=14.0, bold=True,
+    _add_paragraph(doc, "作者聯絡資料表", size_pt=20.0, bold=True,
                    align=WD_ALIGN_PARAGRAPH.CENTER, space_before=0, space_after=8)
 
     table = doc.add_table(rows=7, cols=6)
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
     table.autofit = False
-    col_widths = [Cm(1.3), Cm(2.6), Cm(2.9), Cm(3.0), Cm(2.0), Cm(3.0)]
+    col_widths = [Cm(1.25), Cm(2.55), Cm(2.55), Cm(2.83), Cm(2.25), Cm(3.40)]
     for row in table.rows:
         for idx, w in enumerate(col_widths):
             row.cells[idx].width = w
@@ -741,9 +741,9 @@ def build_report_docx(comp_key: str, sections: dict[str, list[str]], figures: li
     # Row 0: Team summary
     _fill_cell(table.cell(0, 0), "隊伍名稱", size_pt=9.5, bold=True)
     _fill_cell(table.cell(0, 1), cfg["team_id"], size_pt=9.5)
-    _fill_cell(table.cell(0, 2), "Private Leaderboard 成績", size_pt=9.5, bold=True)
+    _fill_cell(table.cell(0, 2), "Private\nLeaderboard 成績", size_pt=9.5, bold=True)
     _fill_cell(table.cell(0, 3), str(cfg["private_score"]), size_pt=9.5)
-    _fill_cell(table.cell(0, 4), "Private Leaderboard 名次", size_pt=9.5, bold=True)
+    _fill_cell(table.cell(0, 4), "Private\nLeaderboard 名次", size_pt=9.5, bold=True)
     _fill_cell(table.cell(0, 5), str(cfg["private_rank"]), size_pt=9.5)
 
     headers = [
@@ -766,7 +766,7 @@ def build_report_docx(comp_key: str, sections: dict[str, list[str]], figures: li
             _fill_cell(table.cell(row_idx, 2), m["zh_org"], size_pt=9.0)
             _fill_cell(table.cell(row_idx, 3), m["en_org"], size_pt=9.0)
             _fill_cell(table.cell(row_idx, 4), m["phone"], size_pt=9.0)
-            _fill_cell(table.cell(row_idx, 5), m["email"], size_pt=9.0)
+            _fill_cell(table.cell(row_idx, 5), m["email"], size_pt=7.5)
         else:
             _fill_cell(table.cell(row_idx, 0), f"隊員{r_offset}", size_pt=9.5)
             for ci in range(1, 6):
@@ -775,12 +775,12 @@ def build_report_docx(comp_key: str, sections: dict[str, list[str]], figures: li
     _add_paragraph(
         doc,
         "★註1：請確認上述資料與 AI CUP 報名系統中填寫之內容相同。自 2023 年起，獎狀製作將依據報名系統中填寫內容為準，有特殊狀況需修正者，請主動於報告繳交期限內來信 moe.ai.ncu@gmail.com。報告繳交截止時間後將不予修改。",
-        size_pt=10.0, space_before=8, space_after=2
+        size_pt=12.0, space_before=8, space_after=2
     )
     _add_paragraph(
         doc,
         f"★註2：報告 word 檔名請統一格式為：「{cfg['filename'].removesuffix('.docx')}」",
-        size_pt=10.0, space_before=0, space_after=0
+        size_pt=12.0, space_before=0, space_after=0
     )
 
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)

@@ -5,9 +5,9 @@
 ## 程式碼審查與重現指南（最終繳交版本）
 
 ### 1. 兩賽最終架構與核心入口
-- **競賽一（TEAM_10894，最終提交 `824896-comb-pseudo.csv`，Public LB `0.8620429`）**：
+- **競賽一（TEAM_10894，最終提交 `851729-comb-pseudo-a3l.csv`，Public LB `0.8630809`）**：
   - **原測試集（一對一）**：D4 正規化開局 `pp+slot` Naive Bayes + 8× GE2E 保險編碼器（`ply >= 20`）+ Hungarian 指派（`go_aicup.tasks.identity.{insurance,predict}`）。
-  - **新增集（非一對一）**：D4 開局／Category／L1 角部／L2 應手多層鍵（`scripts/identity/pid2_multilevel_export.py`）+ 三組風格編碼器（`seqB`、`A1`、`A2`）+ 凍結 KataGo HumanSL（`Cv2` 級別條件）50 維對數線性殘差 LLR（含 Numba 盤面重播 G3 局部棋形與經驗貝氏共變異先驗 `EB50`）→ 逐 `k` conditional logit 融合 + 兩輪留一偽標籤擴充（`scripts/identity/pid2_likelihood.py`、`src/go_aicup/tasks/identity/likelihood_rich.py`）。
+  - **新增集（非一對一）**：D4 開局／Category／L1 角部／L2 應手多層鍵（`scripts/identity/pid2_multilevel_export.py`）+ 風格編碼器集成（`seqB`、`A1` 及 `mean(A2, A3L-9600)`，其中 `A3L-9600` 為 30-block Yugen+OGS+KGS 深化編碼器）+ 凍結 KataGo HumanSL（`Cv2` 級別條件）50 維對數線性殘差 LLR（含 Numba 盤面重播 G3 局部棋形與經驗貝氏共變異先驗 `EB50`）→ 逐 `k` conditional logit 融合 + 兩輪留一偽標籤擴充（`scripts/identity/pid2_likelihood.py`、`src/go_aicup/tasks/identity/likelihood_rich.py`）。
 - **競賽二（TEAM_10895，最終提交 `849173-opp7-l10.csv`，Public LB `0.7744441`）**：
   - **自身棋力 B2 分支**：54 維逐盤特徵（KataGo HumanSL 15 profile `H` 含 HD1 貼目 0.5 校正 30 維 + 自學十級 `Cv2` 20 維 + HD1 旗標 2 維 + 玩家分組 5 折 OOF HistGBR `yH` 2 維）→ 分 `k` 多類 Logistic Regression + 先驗對齊 + 同人測試題合併（`scripts/strength/rank_prod_a0_fusion.py`、`rank_ogs.py`、`rank_qmerge.py`）。
   - **對手身分連結分支（opp7）**：以競賽一偵測器 `f8` 對 8,007 訓練玩家取前十名候選 → 40 盤 27 維 LLR 重排（`μ=2`）→ `τ=3.5` 軟連結 DELTA 核對數證據融合（`α=0.55`）→ Bayes 最佳解碼 `score_rank` + 高信心訓練玩家 L10 覆寫（`scripts/strength/rank_opp_link2.py`、`rank_opp_llr.py`、`rank_opp_mu2_diag.py`）。
@@ -33,9 +33,11 @@
 python -m pip install -r requirements.txt
 python -m pip install -e .
 
-# 2. 競賽一 (TEAM_10894)：於乾淨 git worktree 從官方原始測試 CSV 逐位元組重現 824896-comb-pseudo.csv
+# 2. 競賽一 (TEAM_10894)：於乾淨 git worktree 重現 824896 基底與最終 851729-comb-pseudo-a3l.csv
 bash scripts/release/repro_pid_setup.sh <MAIN_REPO> <CLEAN_WORKTREE> <COMMIT>
 cd <CLEAN_WORKTREE> && sbatch scripts/release/repro_pid_run.sh
+# 加上 30-block A3L-9600 編碼器產出最終提交檔 851729-comb-pseudo-a3l.csv
+SLURM_JOB_ID=850000 python -m scripts.identity.pid2_likelihood export --eb --combine --pseudo --a3 --a3l
 python -m scripts.release.repro_pid_compare --main <MAIN_REPO> --new <CLEAN_WORKTREE> --job <JOB_ID> --out report.json
 
 # 3. 競賽二 (TEAM_10895)：執行對手連結、40 盤 LLR 重排與 opp7 融合匯出
